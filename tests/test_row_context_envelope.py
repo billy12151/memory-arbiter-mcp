@@ -16,20 +16,9 @@ import pytest
 
 import tests.test_vnext_evidence as tv
 from memory_arbiter.rowseg import row_context_text
-from memory_arbiter.semantic_conflict import (
-    AttributeValueExtraction,
-    LocalGGUFSemanticBackend,
-    ModelSignal,
-    PAIR_PROMPT_VERSION,
-    _PAIR_PROMPT,
-    _PAIR_PROMPT_EN,
-    evaluate_single_direction_extraction,
-)
 
 # pair-v10 系统提示词逐位钉（对抗 review P3：子串缺席防不住其他措辞漂移）。
 # 改动系统词必须显式 bump PAIR_PROMPT_VERSION 并更新此钉。
-_PAIR_PROMPT_SHA = "82d6543575d5ce085f53b2c7f75392c6af6905a52e792e5799d8d910e6276959"
-_PAIR_PROMPT_EN_SHA = "db00b8c41cd749284a705f9fa07b62e33b4506a645ba9a4186a624300b5acc56"
 
 
 # ── row_context_text 构造 ─────────────────────────────────────────────────────
@@ -252,66 +241,4 @@ def test_channel_c_bare_inputs_judged(tmp_path, monkeypatch) -> None:
 
 # ── pair-v10 渲染：带 context 出段、无 context 零变化 ──────────────────────────
 
-def test_pair_text_renders_context_block() -> None:
-    base_left = {"subject": "s", "quote": "上限调整为 200。"}
-    base_right = {"subject": "s", "quote": "连接池上限为 500。"}
-    plain = LocalGGUFSemanticBackend._pair_text(dict(base_left), dict(base_right))
-    assert "上下文" not in plain, "无 context 时渲染必须与 pair-v9 逐位兼容"
 
-    with_ctx = LocalGGUFSemanticBackend._pair_text(
-        {**base_left, "context": "本机配置"},
-        {**base_right, "context": "服务配置"},
-    )
-    assert "上下文（仅供判断属性归属" in with_ctx
-    assert "A上下文=本机配置" in with_ctx and "B上下文=服务配置" in with_ctx
-    assert with_ctx.index("上下文") < with_ctx.index("A证据原文="), "语境段在证据原文之前"
-
-    en = LocalGGUFSemanticBackend._pair_text(
-        {"subject": "s", "quote": "The limit is 200.", "context": "service config"},
-        {"subject": "s", "quote": "The limit is 500."},
-    )
-    assert "Context (attribute ownership only" in en
-
-    assert PAIR_PROMPT_VERSION == "pair-v10"
-    assert _PAIR_PROMPT.count("例：") == 1, "示例标记唯一，_strip_pair_example 契约不变"
-    # pair-v10：系统提示词与 v9 逐位一致（0.6B 对系统措辞敏感——slow 校准对
-    # 实证，加一行指令即扰动长值对抽取）；契约只存在于渲染出的 context 段。
-    # sha 钉（对抗 review P3）：子串缺席防不住其他措辞漂移——改系统词必须显式换版本。
-    import hashlib
-
-    assert hashlib.sha256(_PAIR_PROMPT.encode()).hexdigest() == _PAIR_PROMPT_SHA
-    assert hashlib.sha256(_PAIR_PROMPT_EN.encode()).hexdigest() == _PAIR_PROMPT_EN_SHA
-    assert "上下文" not in _PAIR_PROMPT and "context" not in _PAIR_PROMPT_EN.lower()
-    assert "属性与值必须取自下方证据原文" in with_ctx
-    assert "must come from the evidence below" in en
-    # 对抗 review P2：truncation retry 渲染同步缩 context（120/侧）——
-    # 否则双长行+满 context 的 retry 形态被 n_ctx 守卫确定性关死。
-    retry_text = LocalGGUFSemanticBackend._pair_text(
-        {**base_left, "context": "甲" * 300},
-        {**base_right, "context": "乙" * 300},
-        quote_cap=240, context_cap=120,
-    )
-    assert "甲" * 120 in retry_text and "甲" * 121 not in retry_text
-    assert "乙" * 120 in retry_text and "乙" * 121 not in retry_text
-
-
-# ── D4 契约：值取自上下文被 grounding 挡住 ─────────────────────────────────────
-
-def test_value_from_context_fails_grounding() -> None:
-    # Qwen 从上下文捞了值（300 只在 context、不在 quote）→ 必须 unverified
-    left = {"quote": "上限调整为 200。", "context": "历史配置为 300。"}
-    right = {"quote": "连接池上限为 500。", "context": "服务配置"}
-    extraction = AttributeValueExtraction(
-        attribute_a="连接池上限", value_a="200",
-        attribute_b="连接池上限", value_b="300",
-    )
-    gate = evaluate_single_direction_extraction(extraction, left, right)
-    assert gate.state == "review_candidate" and gate.reason == "qwen_unverified"
-
-    # 正向：值都取自主行、属性靠上下文恢复 → notice_ready
-    ok = AttributeValueExtraction(
-        attribute_a="连接池上限", value_a="200",
-        attribute_b="连接池上限", value_b="500",
-    )
-    good = evaluate_single_direction_extraction(ok, left, right)
-    assert good.state == "notice_ready"

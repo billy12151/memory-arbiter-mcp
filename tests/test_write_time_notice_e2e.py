@@ -31,7 +31,6 @@ from memory_arbiter.config import Settings
 from memory_arbiter.db import MemoryDB
 from memory_arbiter.embedder import EmbedResult
 from memory_arbiter.evidence import evidence_content_hash
-from memory_arbiter.semantic_conflict import ModelSignal
 from memory_arbiter.tools import MemoryTools
 
 _META = {"entity": "e2e-notice", "scope": "export-format"}
@@ -281,15 +280,6 @@ def test_sync_window_zero_never_blocks(tmp_path: Path, monkeypatch: pytest.Monke
     assert elapsed < 0.5, elapsed  # returned immediately, never waited on the backend
 
 
-def test_pair_prompt_caps_quotes_at_400_chars() -> None:
-    """Scenario 5: model input quotes are capped at the segmenter's unit cap."""
-    from memory_arbiter.semantic_conflict import LocalGGUFSemanticBackend
-
-    long_quote = "甲" * 600
-    text = LocalGGUFSemanticBackend._pair_text({"quote": long_quote}, {"quote": long_quote})
-    assert "甲" * 400 in text
-    assert "甲" * 401 not in text
-
 
 # ── 0.15.12 C1: the two gathering-truncation causes report distinctly ─────────
 
@@ -427,7 +417,6 @@ def real_backend() -> "Any":
     import gc
 
     from memory_arbiter.constants import SEMANTIC_N_CTX
-    from memory_arbiter.semantic_conflict import LocalGGUFSemanticBackend
 
     backend = LocalGGUFSemanticBackend(_SLOW_MODEL, n_ctx=SEMANTIC_N_CTX, n_threads=4, n_batch=128)
     backend.load()
@@ -441,7 +430,6 @@ def real_backend() -> "Any":
 
 
 def _real_gate(backend: Any, left: str, right: str):
-    from memory_arbiter.semantic_conflict import evaluate_single_direction_extraction, signal_extraction
 
     def env(text: str) -> dict[str, Any]:
         return {"quote": text[:400], "subject": "slow", "tags": ["slow"],
@@ -454,65 +442,6 @@ def _real_gate(backend: Any, left: str, right: str):
     )
     return gate, forward, reverse
 
-
-@pytest.mark.slow
-def test_slow_date_pair_end_to_end_notice_ready(real_backend: "Any") -> None:
-    """Dates differing only in value must extract and reach notice_ready."""
-    backend = real_backend
-    gate, _f, _r = _real_gate(
-        backend,
-        "新功能 scheduled-launch 的上线日期为 2026-09-01。",
-        "新功能 scheduled-launch 的上线日期为 2026-09-10。",
-    )
-    assert gate.state == "notice_ready", gate
-    assert gate.attribute and gate.value_a != gate.value_b
-
-
-@pytest.mark.slow
-def test_slow_long_quote_pair_outputs_complete_json(real_backend: "Any") -> None:
-    """The 2026-09-08 live-host invalid_output sample: long prose pair must
-    produce a complete, extractable JSON (no truncation) under v5+2048+400."""
-    backend = real_backend
-    left = (
-        "经复核确认：memory-arbiter 的写入路径已不含任何 Qwen 语义冲突检测，写时语义冲突检测已整体移除。"
-        "当前冲突检测仅在定时 LLM scan 中执行，写入时不同步执行语义检查。"
-    )
-    right = (
-        "核心链路为 0.5B 粗召回 + pair 文本证据 gate；pair text medium gate 与 pair text strong gate "
-        "做成可选配置，默认使用 medium，整个检测在写入提交后异步执行，输出为 advisory notice。"
-    )
-    gate, forward, reverse = _real_gate(backend, left, right)
-    # Both directions must be complete extractions (invalid_json/invalid_schema
-    # is the regression this test guards against); the gate verdict itself may
-    # legitimately be a strict negative for hard pairs.
-    assert forward.candidate_type == "attribute_value_extraction", forward.candidate_type
-    assert reverse.candidate_type == "attribute_value_extraction", reverse.candidate_type
-    assert forward.parsed and reverse.parsed
-
-
-@pytest.mark.slow
-def test_slow_long_values_keep_difference(real_backend: "Any") -> None:
-    """45–58 char historical value shapes must keep their distinction under
-    the v5 fragment-selection wording (compression wording flattened them)."""
-    backend = real_backend
-    gate, _f, _r = _real_gate(
-        backend,
-        "Tier1 功能方案状态：Tier1 已确认功能方案（810 v2 重排版：merge / 定时任务引导 / find 增强，0.16 规划）。",
-        "Tier1 功能方案状态：Tier1 仍为高 ROI 候选分析（809：三项待排期，merge 可复用冲突生命周期）。",
-    )
-    assert gate.value_a != gate.value_b, gate
-
-
-@pytest.mark.slow
-def test_slow_short_value_regression(real_backend: "Any") -> None:
-    """json vs csv short values: the stable baseline."""
-    backend = real_backend
-    gate, _f, _r = _real_gate(
-        backend,
-        "conflict-bench 的 export-format 取值为 json。",
-        "conflict-bench 的 export-format 取值为 csv。",
-    )
-    assert gate.state == "notice_ready", gate
 
 
 def _assert_no_invalid_output(forward: "Any", reverse: "Any") -> None:
@@ -537,76 +466,3 @@ def _faithful_env(
             "workspace_canonical": workspace, "memory_id": memory_id, "version": version,
             "event_time": event_time, "metadata": {}}
 
-
-@pytest.mark.slow
-def test_slow_live_degradation_replay_over_limit_value(real_backend: "Any") -> None:
-    """Replay of the 2026-09-08 17:31 degradation (mema id=925 evidence).
-
-    Pre-fix (pair-v5, no retry) the reverse direction of this exact fixture
-    answers invalid_schema/invalid_value_b — the 0.5B copies the 76-char
-    "合并覆盖≥50%…（owner 拍板：…）" clause into value_b, reproducing the live
-    qwen_invalid_output sample almost verbatim. Both directions must now
-    produce protocol-valid extractions (short values or legal unknown_field).
-    """
-    backend = real_backend
-    left = _faithful_env(
-        "透出前过滤 kind=subject（坐标(0,0)）+重叠区间合并（overlap=60 防重复计数）；"
-        "永不截断：合并覆盖≥50%全文献条目升级全文+hit_spans 转标注"
-        "（owner 拍板：服务端不替 Agent 挑重要命中，法规 RAG 漏但书是系统性偏差）",
-        subject="0.15.10 方案定稿待审：content_mode 三态（preview/hits/full）+ hit_spans 命中透出，include_content 删除（breaking），多轮否决清单存档",
-        tags=["mema", "mema-core", "0.15.10", "content-mode", "hit-spans", "find", "batch-find",
-              "implementation-plan", "owner-pending-review"],
-        workspace="memory-arbiter-mcp", memory_id=925, version=5,
-        event_time="2026-09-09T00:00:00+00:00",
-    )
-    right = _faithful_env(
-        "透出前过滤：kind=subject（坐标(0,0)）+重叠区间合并（overlap=60 防重复计数），"
-        "其余命中一律不透出，不做升级全文。",
-        subject="透出前过滤", tags=["hit-spans"],
-        workspace="memory-arbiter-mcp", memory_id=903, version=1,
-        event_time="2026-09-08T00:00:00+00:00",
-    )
-    forward = backend.classify_pair(left, right, deadline_monotonic=None)
-    reverse = backend.classify_pair(right, left, deadline_monotonic=None)
-    _assert_no_invalid_output(forward, reverse)
-    # Surface (do not assert) retry activity: today the grammar cap alone
-    # passes these fixtures; if a future change lets copying through again,
-    # this readout shows whether the retry backstop is absorbing it.
-    print(f"pair retry stats: {backend.pair_retry_stats()}")
-
-
-@pytest.mark.slow
-def test_slow_live_degradation_replay_truncated_json(real_backend: "Any") -> None:
-    """Replay of the 2026-09-09 04:48 degradation (mema id=926 evidence).
-
-    Pre-fix (pair-v5, no retry) the forward direction of this exact fixture
-    answers invalid_schema/invalid_value_a — the 0.5B copies the 200+ char
-    review clause into value_a (in the live incident it kept going until the
-    384-token budget killed the JSON mid-key). Both directions must now
-    complete a protocol-valid extraction.
-    """
-    backend = real_backend
-    left = _faithful_env(
-        "代码评审综合 2.7/5：亮点=测试隔离专业、SQL 参数化、优雅降级、CAS 冲突仲裁、loopback 安全；"
-        "硬伤 P0=4个 tool 全是 (action:str, data:dict) 反模式（server.py:347-427，LLM 必须先调 help，"
-        "无 Literal 校验）、P1=90+处 except Exception 静默吞异常、P2=operations.py 2969行上帝文件、"
-        "P3=help 文本 50 行术语、P4=5步安装含 200MB GGUF、P5=无 optional-dependencies。",
-        subject="memarbiter/mema 项目战略评估结论",
-        tags=["memarbiter", "mema", "mema-twin", "项目战略", "竞品分析", "代码评审", "止损决策"],
-        workspace="default", memory_id=926, version=1,
-        event_time="2026-09-09T04:48:12+00:00",
-    )
-    right = _faithful_env(
-        "memory_arbiter 两轮 review 汇总：core 历史待办 + 新一轮 adversarial 发现（6 个开放问题）。"
-        "建议修复前用 core/main 最新代码重新确认问题仍存在。",
-        subject="memory_arbiter 两轮 review 汇总", tags=["code-review", "memory-arbiter"],
-        workspace="memory-arbiter-mcp", memory_id=758, version=10,
-        event_time="2026-08-27T14:32:04+00:00",
-    )
-    forward = backend.classify_pair(left, right, deadline_monotonic=None)
-    reverse = backend.classify_pair(right, left, deadline_monotonic=None)
-    _assert_no_invalid_output(forward, reverse)
-    # Surface (do not assert) retry activity: today the grammar cap alone
-    # passes these fixtures; if a future change lets copying through again,
-    # this readout shows whether the retry backstop is absorbing it.
-    print(f"pair retry stats: {backend.pair_retry_stats()}")

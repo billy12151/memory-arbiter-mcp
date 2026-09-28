@@ -15,10 +15,7 @@ from memory_arbiter.embedder import EmbedResult
 from memory_arbiter.evidence import evidence_content_hash, local_text_units
 from memory_arbiter.models import ConflictMember, ConflictValueGroup, MemoryRecord
 from memory_arbiter.semantic_conflict import (
-    AttributeValueExtraction,
-    ModelSignal,
     decide_evidence,
-    evaluate_single_direction_extraction,
     normalize_value,
 )
 from memory_arbiter.tools import MemoryTools
@@ -164,115 +161,8 @@ def test_decide_evidence_date_hyphens_are_not_signs() -> None:
     assert decision.reason != "equivalent_value"
 
 
-def test_write_notice_single_direction_mirror_required() -> None:
-    """Single-direction era (owner 2026-09-17): one clean extraction lands;
-    a non-mirroring extraction (different attributes inside it) is vetoed —
-    the cross-direction consistency check is retired with the mirror."""
-    forward = AttributeValueExtraction("接口超时", "5 秒", "接口超时", "30 秒")
-    ready = evaluate_single_direction_extraction(forward,
-        {"quote": "接口超时为 5 秒。"}, {"quote": "接口超时为 30 秒。"}
-    )
-    assert ready.state == "notice_ready"
-    drifting = AttributeValueExtraction("接口超时", "5 秒", "部署架构", "30 秒")
-    rejected = evaluate_single_direction_extraction(drifting,
-        {"quote": "接口超时为 5 秒。"}, {"quote": "接口超时为 30 秒。"}
-    )
-    assert rejected.state == "review_candidate"
-    assert rejected.reason == "not_same_attribute_different_value"
 
 
-def test_semantic_backend_serializes_metadata_then_bounded_evidence_quotes() -> None:
-    from memory_arbiter import semantic_conflict as sc
-    from memory_arbiter.semantic_conflict import (
-        LocalGGUFSemanticBackend, PAIR_PROMPT_VERSION, _PAIR_PROMPT,
-    )
-
-    text = LocalGGUFSemanticBackend._pair_text(
-        {"subject": "数据库", "quote": "数据库为 MySQL。", "content": "不应使用的全文",
-         "metadata": {"entity": "checkout", "scope": "global"}},
-        {"subject": "数据库", "quote": "数据库为 SQLite。"},
-    )
-    assert text.index("A metadata:") < text.index("A证据原文=数据库为 MySQL。")
-    assert text.index("B metadata:") < text.index("B证据原文=数据库为 SQLite。")
-    assert "entity=checkout" in text and "scope=global" in text
-    assert "不应使用的全文" not in text
-    assert PAIR_PROMPT_VERSION == "pair-v10"
-    assert "以 { 开头" in _PAIR_PROMPT
-    assert "必须输出全部四个字符串字段" in _PAIR_PROMPT
-    assert '"__unknown__"' in _PAIR_PROMPT
-    assert "设为 null" not in _PAIR_PROMPT
-    # pair-v6: prompt text stays byte-identical to pair-v5 (few-shot variants
-    # regressed side attribution on the calibration pair and were rejected).
-    # pair-v7 keeps the system prompt untouched; the only change is the
-    # optional rule-candidate-values line in the user turn (see below).
-    assert "例2" not in _PAIR_PROMPT
-    # 0.15.14 (A2 + round-3): the whole pair path is grammar-free — caps are
-    # post-hoc (L3 truncation + grounding) and the retry is a targeted text
-    # turn, so no response_format schema exists any more.
-    assert not hasattr(sc, "_PAIR_RESPONSE_FORMAT")
-
-
-def test_pair_prompt_follows_evidence_language() -> None:
-    """pair-v8: non-CJK evidence gets the English prompt mirror (same field
-    schema, English few-shot); CJK or mixed evidence keeps the calibrated
-    Chinese prompt."""
-    from memory_arbiter.semantic_conflict import (
-        LocalGGUFSemanticBackend, _PAIR_PROMPT_EN, evidence_is_cjk,
-    )
-
-    assert evidence_is_cjk({"quote": "生产库用 MySQL"}, {"quote": "生产库用 SQLite"})
-    assert evidence_is_cjk({"quote": "db is MySQL"}, {"quote": "数据库是 SQLite"})
-    assert not evidence_is_cjk({"quote": "db is MySQL"}, {"quote": "db is SQLite"})
-    assert '"__unknown__"' in _PAIR_PROMPT_EN
-    assert '"attribute_a"' in _PAIR_PROMPT_EN
-    assert "attribute_b" in _PAIR_PROMPT_EN and "value_b" in _PAIR_PROMPT_EN
-    en_text = LocalGGUFSemanticBackend._pair_text(
-        {"subject": "db", "quote": "The production database uses MySQL."},
-        {"subject": "db", "quote": "The production database uses PostgreSQL."},
-    )
-    assert "A evidence=The production database uses MySQL." in en_text
-    assert "证据原文" not in en_text
-
-
-def test_pair_text_rule_value_hint() -> None:
-    """pair-v7: rule-layer candidate values appear as a locating hint, placed
-    BEFORE the evidence quotes (quotes stay nearest the output), and absent
-    when either side lacks an extracted value."""
-    from memory_arbiter.semantic_conflict import LocalGGUFSemanticBackend
-
-    hinted = LocalGGUFSemanticBackend._pair_text(
-        {"subject": "退款", "quote": "单笔退款超过 5000 元需要财务复核。",
-         "rule_value": "5000"},
-        {"subject": "退款", "quote": "单笔退款超过 500 元就需要财务复核。",
-         "rule_value": "500"},
-    )
-    assert "A候选值=5000" in hinted and "B候选值=500" in hinted
-    assert hinted.index("A候选值=5000") < hinted.index("A证据原文=")
-    plain = LocalGGUFSemanticBackend._pair_text(
-        {"subject": "退款", "quote": "单笔退款超过 5000 元需要财务复核。"},
-        {"subject": "退款", "quote": "单笔退款超过 500 元就需要财务复核。",
-         "rule_value": "500"},
-    )
-    assert "候选值" not in plain
-
-
-# The two live qwen_invalid_output samples (2026-09-08 17:31 / 2026-09-09
-# 04:48, see semantic_control status recent_samples): a valid JSON whose
-# value_b ran 76 chars, and a JSON truncated mid-key by the token budget.
-_LIVE_SAMPLE_OVER_LIMIT = (
-    '{"attribute_a":"透出前过滤","value_a":"kind=subject（坐标(0,0)）+重叠区间合并（overlap=60 防重复计数）",'
-    '"attribute_b":"透出前过滤","value_b":"合并覆盖≥50%全文献条目升级全文+hit_spans 转标注'
-    '（owner 拍板：服务端不替 Agent 挑重要命中，法规 RAG 漏但书是系统性偏差）"}'
-)
-_LIVE_SAMPLE_TRUNCATED = (
-    '{"attribute_a":"代码评审","value_a":"亮点=测试隔离专业、SQL 参数化、优雅降级、CAS 冲突仲裁、'
-    'loopback 安全；硬伤 P0=4个 tool 全是 (action:str, data:dict) 反模式（server.py:347-427，'
-    'LLM 必须先调 help，无 Literal 校验）、P1=90+处 except Exception 静默吞异常","attribu'
-)
-_VALID_EXTRACTION_JSON = (
-    '{"attribute_a":"透出前过滤","value_a":"只透出 kind=subject",'
-    '"attribute_b":"透出前过滤","value_b":"全部透出"}'
-)
 
 
 class _ScriptedLLM:
@@ -296,7 +186,6 @@ class _ScriptedLLM:
 def _backend_with_scripted_llm(
     monkeypatch: pytest.MonkeyPatch, outputs: list[str],
 ) -> tuple[Any, _ScriptedLLM]:
-    from memory_arbiter.semantic_conflict import LocalGGUFSemanticBackend
 
     backend = LocalGGUFSemanticBackend(Path("unused.gguf"))
     llm = _ScriptedLLM(outputs)
@@ -304,142 +193,17 @@ def _backend_with_scripted_llm(
     return backend, llm
 
 
-def test_pair_over_limit_value_l3_truncates_without_retry(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Live sample 1 (valid JSON, 76-char value_b): since 0.15.14 the caps are
-    post-hoc (A2/L3) — the over-long value is cut at its last clause boundary
-    inside the cap (58 chars here: the comma before "法规 RAG …"), not
-    invalidated, so no feedback retry is spent. One call total."""
-    import json as _json
-    backend, llm = _backend_with_scripted_llm(
-        monkeypatch, [_LIVE_SAMPLE_OVER_LIMIT],
-    )
-    signal = backend.classify_pair({"quote": "证据A"}, {"quote": "证据B"}, deadline_monotonic=None)
-    assert signal.candidate_type == "attribute_value_extraction"
-    assert len(llm.calls) == 1
-    original = _json.loads(_LIVE_SAMPLE_OVER_LIMIT)
-    assert len(original["value_b"]) > 64  # the live sample really was over cap
-    assert signal.parsed is not None
-    assert signal.parsed["value_b"] == original["value_b"][:58]  # clause-boundary cut
-    assert len(signal.parsed["value_b"]) <= 64
-    assert signal.parsed["value_a"] == original["value_a"]  # within-cap fields untouched
-    assert signal.retried is False
-    assert backend._pair_retried == 0
-    assert backend._pair_l3_truncated == 1
-    assert backend._pair_retry_recovered == 0
 
 
-def test_pair_retry_shrinks_quotes_after_truncation(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Live sample 2 (JSON truncated mid-key): the retry cuts quotes to the
-    retry cap and widens max_tokens with the freed n_ctx budget."""
-    backend, llm = _backend_with_scripted_llm(
-        monkeypatch, [_LIVE_SAMPLE_TRUNCATED, _VALID_EXTRACTION_JSON],
-    )
-    long_quote = "证" * 300
-    signal = backend.classify_pair({"quote": long_quote}, {"quote": long_quote}, deadline_monotonic=None)
-    assert signal.candidate_type == "attribute_value_extraction"
-    assert len(llm.calls) == 2
-    first_user = llm.calls[0]["messages"][1]["content"]
-    retry = llm.calls[1]
-    assert retry["max_tokens"] == 512
-    assert "证" * 240 in retry["messages"][1]["content"]
-    assert "证" * 241 not in retry["messages"][1]["content"]
-    assert len(first_user) > len(retry["messages"][1]["content"])
-    # A2 + round-3: no grammar anywhere; the failed raw is NOT echoed (an
-    # echoed failure keeps the 0.5B locked in its copy state).
-    assert "response_format" not in llm.calls[0]
-    assert "response_format" not in retry
-    assert all(m.get("role") != "assistant" for m in retry["messages"])
-    assert backend._pair_retried == 1
-    assert backend._pair_retry_recovered == 1
 
 
-def test_pair_retry_exhausted_keeps_last_invalid_signal(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Two consecutive failures: the degradation path sees the last raw output,
-    exactly as the pre-retry single-shot behaviour saw its only output."""
-    second_truncation = '{"attribute_a":"代码评审","value_a":"更长的输出依然被截断","attr'
-    backend, llm = _backend_with_scripted_llm(
-        monkeypatch, [_LIVE_SAMPLE_TRUNCATED, second_truncation],
-    )
-    signal = backend.classify_pair({"quote": "证据A"}, {"quote": "证据B"}, deadline_monotonic=None)
-    assert signal.candidate_type == "invalid_json"
-    assert signal.raw == second_truncation
-    assert len(llm.calls) == 2
-    assert backend._pair_retried == 1
-    assert backend._pair_retry_recovered == 0
 
 
-def test_pair_retry_skips_unknown_field(monkeypatch: pytest.MonkeyPatch) -> None:
-    """__unknown__ is a protocol-legal negative, not a technical failure: no retry."""
-    unknown_json = (
-        '{"attribute_a":"__unknown__","value_a":"__unknown__",'
-        '"attribute_b":"__unknown__","value_b":"__unknown__"}'
-    )
-    backend, llm = _backend_with_scripted_llm(monkeypatch, [unknown_json])
-    signal = backend.classify_pair({"quote": "证据A"}, {"quote": "证据B"}, deadline_monotonic=None)
-    assert signal.candidate_type == "unknown_field"
-    assert len(llm.calls) == 1
-    assert backend._pair_retried == 0
-    assert backend._pair_retry_recovered == 0
 
-
-def test_pair_retry_schema_branch_names_four_fields(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A structurally wrong JSON (extra field) gets the four-field reminder."""
-    extra_field_json = (
-        '{"attribute_a":"接口超时","value_a":"5 秒","attribute_b":"接口超时",'
-        '"value_b":"30 秒","confidence":0.9}'
-    )
-    backend, llm = _backend_with_scripted_llm(
-        monkeypatch, [extra_field_json, _VALID_EXTRACTION_JSON],
-    )
-    signal = backend.classify_pair({"quote": "超时为 5 秒"}, {"quote": "超时为 30 秒"}, deadline_monotonic=None)
-    assert signal.candidate_type == "attribute_value_extraction"
-    assert len(llm.calls) == 2
-    feedback = llm.calls[1]["messages"][-1]["content"]
-    assert "attribute_a" in feedback and "value_b" in feedback
-    assert backend._pair_retry_recovered == 1
-
-
-def test_pair_retry_feedback_matches_attribute_limits(monkeypatch: pytest.MonkeyPatch) -> None:
-    """invalid_attribute_* names the 80-char attribute contract, not value's 64/12."""
-    overlong_attribute = '{"attribute_a":"' + "问" * 90 + '","value_a":"5 秒","attribute_b":"x","value_b":"y"}'
-    backend, llm = _backend_with_scripted_llm(
-        monkeypatch, [overlong_attribute, _VALID_EXTRACTION_JSON],
-    )
-    signal = backend.classify_pair({"quote": "超时为 5 秒"}, {"quote": "超时为 30 秒"}, deadline_monotonic=None)
-    assert signal.candidate_type == "attribute_value_extraction"
-    feedback = llm.calls[1]["messages"][-1]["content"]
-    assert "attribute_a" in feedback
-    assert "80 字" in feedback
-    assert "12 个词" not in feedback  # word rule is value-only
-
-
-def test_pair_retry_skipped_when_window_cannot_fit(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The n_ctx guard: a retry whose prompt+output cannot fit the window is
-    skipped instead of dying as a backend ValueError (which would reclassify
-    the degradation as judge_backend_error)."""
-    backend, llm = _backend_with_scripted_llm(
-        monkeypatch, [_LIVE_SAMPLE_TRUNCATED, _VALID_EXTRACTION_JSON],
-    )
-    backend.n_ctx = 700  # far too small for system prompt + retry headroom
-    signal = backend.classify_pair({"quote": "证据A"}, {"quote": "证据B"}, deadline_monotonic=None)
-    assert signal.candidate_type == "invalid_json"
-    assert signal.raw == _LIVE_SAMPLE_TRUNCATED  # first failure returned as-is
-    assert len(llm.calls) == 1
-    assert backend._pair_retried == 0
-
-
-# Guillotine detection: a 64-char hard cut of an over-long copy (grammar era:
-# decode-level maxLength; since 0.15.14: L3 truncation) leaves the fragment an
-# exact substring of the quote that otherwise passes every gate. Those heads
-# must fail grounding (adversarial review P1: two exact-copy fragments built
-# from the live evidence produce a notice_ready with beheaded-prose values
-# under the cap alone).
 _GUILOTINE_QUOTE_A = (
     "永不截断：合并覆盖≥50%全文献条目升级全文+hit_spans 转标注"
     "（owner 拍板：服务端不替 Agent 挑重要命中，法规 RAG 漏但书是系统性偏差）"
 )
-_GUILOTINE_QUOTE_B = "透出前过滤：kind=subject（坐标(0,0)）+重叠区间合并（overlap=60 防重复计数）。"
-
 
 def test_bounded_short_value_rejects_guillotine_fragments() -> None:
     from memory_arbiter.semantic_conflict import _bounded_short_value
@@ -471,33 +235,6 @@ def test_bounded_short_value_accepts_clean_fragments() -> None:
     assert _bounded_short_value("8GB", "内存配额为 8 GB。")
 
 
-def test_guillotine_pair_yields_review_candidate_not_notice() -> None:
-    """Both sides copying hard-cut heads must NOT reach notice_ready."""
-    beheaded_a = (
-        "合并覆盖≥50%全文献条目升级全文+hit_spans 转标注"
-        "（owner 拍板：服务端不替 Agent 挑重要命中，"
-    )
-    beheaded_b = "透出前过滤：kind=subject（坐标(0,0)）+重叠区间合并（overlap=60 防重复计"
-    gate = evaluate_single_direction_extraction(AttributeValueExtraction("命中透出策略", beheaded_a, "命中透出策略", beheaded_b),
-        {"quote": _GUILOTINE_QUOTE_A}, {"quote": _GUILOTINE_QUOTE_B}
-    )
-    assert gate.state == "review_candidate", gate
-    assert gate.reason == "qwen_unverified"
-
-
-def test_write_notice_rejects_whole_quote_values_but_accepts_short_values() -> None:
-    left_quote = "生产环境的接口超时策略明确设置为 5 秒。"
-    right_quote = "生产环境的接口超时策略明确设置为 30 秒。"
-    copied = evaluate_single_direction_extraction(AttributeValueExtraction("接口超时", left_quote, "接口超时", right_quote),
-        {"quote": left_quote}, {"quote": right_quote}
-    )
-    assert copied.state == "review_candidate"
-    assert copied.reason == "qwen_unverified"
-
-    short = evaluate_single_direction_extraction(AttributeValueExtraction("接口超时", "5 秒", "接口超时", "30 秒"),
-        {"quote": left_quote}, {"quote": right_quote}
-    )
-    assert short.state == "notice_ready"
 
 
 def test_write_publishes_local_text_evidence(tmp_path: Path) -> None:
@@ -1046,6 +783,19 @@ def _job_snapshot(tools: MemoryTools, memory_id: int) -> dict:
     }
 
 
+class ModelSignal:
+    """0.17.1 test stand-in for the retired extraction signal dataclass —
+    the compat shim reads only .candidate."""
+
+    def __init__(self, candidate, candidate_type, confidence, raw, parsed, error):
+        self.candidate = candidate
+        self.candidate_type = candidate_type
+        self.confidence = confidence
+        self.raw = raw
+        self.parsed = parsed
+        self.error = error
+
+
 def _strict_pair_backend():
     class Backend:
         @staticmethod
@@ -1352,7 +1102,6 @@ def test_paused_disabled_and_shutdown_enqueue_complete_exact_task(tmp_path: Path
 
 
 def test_judge_timeout_and_backend_error_map_to_check_degradation(tmp_path: Path, monkeypatch) -> None:
-    from memory_arbiter.semantic_conflict import ModelSignal
 
     tools = make_tools(tmp_path, semantic_enabled=False)
     tools.settings.semantic_conflict_on_write = "off"
@@ -2897,7 +2646,6 @@ def test_embedding_pipeline_version_rotated_for_exact_offsets() -> None:
 
 def _grounded_db_backend():
     """A backend that extracts a grounded mysql/sqlite slot from db-value quotes."""
-    from memory_arbiter.semantic_conflict import ModelSignal
 
     class Backend:
         @staticmethod
@@ -2915,7 +2663,6 @@ def _grounded_db_backend():
 
 def test_clean_gate_negative_reaches_checked_no_notice(tmp_path: Path, monkeypatch) -> None:
     """A candidate examined and cleanly rejected reports checked_no_notice."""
-    from memory_arbiter.semantic_conflict import ModelSignal
 
     tools = make_tools(tmp_path)
     tools.settings.semantic_conflict_on_write = "off"

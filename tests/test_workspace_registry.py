@@ -679,59 +679,16 @@ from pathlib import Path
 from memory_arbiter.config import Settings
 from memory_arbiter.db import MemoryDB
 from memory_arbiter.tools import MemoryTools
-from memory_arbiter.semantic_conflict import (
-    WorkspaceCandidateSignal,
-    workspace_candidate_from_text,
-)
 
 
 # ── parser ───────────────────────────────────────────────────────────────────
 
-def test_parse_valid_candidate():
-    raw = '{"candidate": "金营项目", "relation": "alias", "confidence": 0.92, "evidence": "同一项目不同写法"}'
-    sig = workspace_candidate_from_text(raw, ["金营项目", "其他项目"])
-    assert sig.candidate == "金营项目"
-    assert sig.relation == "alias"
-    assert sig.confidence == 0.92
 
 
-def test_parse_drops_hallucinated_candidate():
-    # model returns a candidate not in the offered list → dropped
-    raw = '{"candidate": "不存在项目", "relation": "alias", "confidence": 0.9}'
-    sig = workspace_candidate_from_text(raw, ["金营项目"])
-    assert sig.candidate is None
-    assert sig.relation == "uncertain"  # downgraded since no candidate
 
-
-def test_parse_missing_json_is_uncertain():
-    sig = workspace_candidate_from_text("no json here", ["a"])
-    assert sig.candidate is None and sig.relation == "uncertain"
-    assert sig.error == "missing_json"
-
-
-def test_parse_unknown_relation_normalized():
-    raw = '{"candidate": "a", "relation": "bogus", "confidence": 0.5}'
-    sig = workspace_candidate_from_text(raw, ["a"])
-    assert sig.relation == "uncertain"
-
-
-def test_parse_clamps_out_of_range_confidence():
-    hi = workspace_candidate_from_text('{"candidate":"a","relation":"alias","confidence":5.0}', ["a"])
-    assert hi.confidence == 1.0
-    lo = workspace_candidate_from_text('{"candidate":"a","relation":"alias","confidence":-3}', ["a"])
-    assert lo.confidence == 0.0
 
 
 # ── per-isolation policy (stub backend) ──────────────────────────────────────
-
-class _StubBackend:
-    """Minimal stand-in for LocalGGUFSemanticBackend."""
-    def __init__(self, signal: WorkspaceCandidateSignal):
-        self._signal = signal
-
-    def suggest_workspace_candidate(self, ws_raw, evidence, candidates):
-        return self._signal
-
 
 def qwen_candidate_make_tools(tmp_path: Path, isolation: str) -> MemoryTools:
     settings = Settings(

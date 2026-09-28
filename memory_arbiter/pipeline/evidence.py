@@ -19,21 +19,17 @@ from ..constants import (
     SEMANTIC_MIN_PAIR_BUDGET_MS,
 )
 from ..difference_classifier import classify_pair
-from .gates import dispatch_hint_text, qwen_dispatch
 from ..evidence import evidence_content_hash
 from ..models import TrustedApplyingContext
 from ..embedder import ManagedEmbedder
 from ..semantic_conflict import (
-    PAIR_PROMPT_VERSION,
     PairGateResult,
     SemanticBackend,
     decide_evidence,
     direct_value_verdict,
-    evaluate_single_direction_extraction,
     is_cross_evolution,
     notice_dedupe_key,
     normalize_value,
-    signal_extraction,
 )
 from ..semantic_judge import PairVerdict
 from ..text import canon_entity, canon_scope
@@ -909,7 +905,6 @@ class EvidencePipeline:
         cap — it does NOT draw on the job-global pool (owner plan §3.1 scope:
         internal + C + A-cross)."""
         from ..constants import SEMANTIC_CROSS_KNN_WINDOW
-        from .gates import dispatch_hint_text
 
         backend = self._ensure_semantic_backend()
         if backend is None:
@@ -1024,8 +1019,6 @@ class EvidencePipeline:
             SEMANTIC_CROSS_KNN_WINDOW,
         )
         from ..semantic_conflict import attr_is_versional, vector_cosine
-        from ..rowseg import row_context_text
-        from .gates import dispatch_hint_text
 
         record = snapshot if snapshot.get("content") is not None else (
             self.db.get_memory(int(memory_id)) or {}
@@ -1339,7 +1332,6 @@ class EvidencePipeline:
             attribute, str(left.get("subject") or ""),
         )
         extra: dict[str, Any] = {
-            "prompt_version": PAIR_PROMPT_VERSION,
             "anchors": decision.anchors,
             "backlog": True,
         }
@@ -2736,7 +2728,6 @@ class EvidencePipeline:
             # no new notice.
             return
         extra: dict[str, Any] = {
-            "prompt_version": PAIR_PROMPT_VERSION,
             "anchors": decision.anchors,
         }
         if model_signal is not None:

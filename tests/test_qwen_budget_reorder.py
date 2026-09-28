@@ -17,7 +17,6 @@ import pytest
 
 import memory_arbiter.pipeline.gates as _gates
 from memory_arbiter.pipeline.evidence import _JobQwenBudget
-from memory_arbiter.semantic_conflict import ModelSignal
 import tests.test_vnext_evidence as tv
 
 

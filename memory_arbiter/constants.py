@@ -93,9 +93,7 @@ EMBEDDING_DEFAULT_DIM = 768
 # (~101) + two 400-char quotes (~460) + the 384-token output budget exceeded
 # the window, so long-prompt pairs had their JSON generation truncated at the
 # context wall (the top qwen_invalid_output source).
-SEMANTIC_N_CTX = 2048
 SEMANTIC_N_THREADS = 4
-SEMANTIC_N_BATCH = 128
 
 # mDeBERTa judge (0.17.1, owner plan §3.1/§3.6): the write-time conflict
 # arbitration engine replacing Qwen. Label order is a PINNED CONTRACT — the

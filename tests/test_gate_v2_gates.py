@@ -221,18 +221,6 @@ def test_knn_restricted_to_clean_neighbor_list(tmp_path, monkeypatch) -> None:
 
 # ── G6 three-case dispatch + ranking + bridge ───────────────────────────────
 
-def test_qwen_dispatch_three_cases() -> None:
-    from types import SimpleNamespace
-    from memory_arbiter.pipeline.gates import dispatch_hint_text, qwen_dispatch
-    assert qwen_dispatch(SimpleNamespace(left_value="500ms", right_value=None)) == "extract_value"
-    assert qwen_dispatch(SimpleNamespace(left_value="5秒", right_value="3秒")) == "align_attr"
-    assert qwen_dispatch(SimpleNamespace(left_value=None, right_value=None)) == "align_value"
-    # Each case has its own task line; same protocol, different instruction.
-    assert dispatch_hint_text("extract_value") != dispatch_hint_text("align_attr") != dispatch_hint_text("align_value")
-    # The extract_value hint NAMES the attribute (单边桥契约).
-    hint = f"{dispatch_hint_text('extract_value')} 需抽取的属性名：上传方式"
-    assert "上传方式" in hint
-
 
 def test_pair_score_orders_high_band_first(tmp_path, monkeypatch) -> None:
     """带内两对都被 Qwen 消费（预算顺序的纯函数钉在 compute_pair_score 单测）。"""
@@ -410,14 +398,12 @@ def test_channel_c_reports_claim_vs_sentence_conflict(tmp_path, monkeypatch) -> 
 
     class CBackend:
         @staticmethod
-        def classify_pair(left, right, **kw):
-            captured.append(right.get("quote") or "")
-            from memory_arbiter.semantic_conflict import ModelSignal
-            return ModelSignal(
-                True, "attribute_value_extraction", None, "",
-                {"attribute_a": "上传方式", "value_a": "dist/* 路径禁用",
-                 "attribute_b": "上传方式", "value_b": "twine 上传 dist/*"},
-                None,
+        def judge_pair(text_a, text_b):
+            captured.append(text_b)
+            from memory_arbiter.semantic_judge import PairVerdict
+            return PairVerdict(
+                "conflict", {"conflict": 0.9, "no_conflict": 0.05, "possible_conflict": 0.05},
+                "reference_entity", "mdeberta-v4m:test",
             )
 
     monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: CBackend())

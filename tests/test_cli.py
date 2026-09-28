@@ -70,8 +70,9 @@ def test_config_template_has_required_fields():
         "auto_query": True,
         "auto_write": True,
     }
+    # 0.17.1: the Qwen model_path key is retired from the starter template;
+    # mdeberta_ckpt is user-configured (download-gated), so absent by default.
     assert cfg["semantic_conflict"] == {
-        "model_path": None,
         "on_write": "async",
     }
     # 0.15.14 A5: the notice-count key is gone from the starter template too.
