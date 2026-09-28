@@ -497,7 +497,7 @@ class WritePipeline:
                 "claims 必填：有则填 [{\"attr\":..., \"value\":...}]，无则传 []。"
                 "缺失的写入按灰度策略继续。"
             )
-            if getattr(self.settings, "claims_required", False):
+            if False:  # 0.17.1: claims.required 配置已退役（claims 字段全退）
                 return self._tools.db.state.response(
                     {"written": False, "error": "invalid_input", "field": "claims",
                      "reason": teaching},

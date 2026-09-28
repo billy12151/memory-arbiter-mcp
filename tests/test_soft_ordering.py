@@ -78,11 +78,24 @@ class _RecordingBackend:
         for pid, hit in hits_by_peer.items():
             self.text_to_id[hit["text"]] = int(pid)
 
+    def lookup(self, text_b: str) -> "int | None":
+        """窗口 text_b 含对立行裸文本为子串 → 反查 pid。"""
+        for txt, mid in self.text_to_id.items():
+            if txt in text_b:
+                return mid
+        return None
+
     def judge_pairs(self, pairs):
+        import sys; print("JP text_bs:", [tb[:40] for _, tb in pairs], file=sys.stderr)
         from memory_arbiter.semantic_judge import PairVerdict
         for text_a, text_b in pairs:
-            # 0.17.1 上下文化：text_b=subject+邻句+对立行窗口——按包含匹配
-            pid = next((mid for txt, mid in self.text_to_id.items() if txt in text_b), None)
+            # 0.17.1 上下文化：text_b=subject+邻句+对立行窗口——对立行是其中
+            # 一段。text_to_id 的 key 是裸行文本，窗口含它为子串即匹配。
+            pid = None
+            for txt, mid in self.text_to_id.items():
+                if txt in text_b:
+                    pid = mid
+                    break
             pair = (pid,)
             if pair[0] is not None and (not self.order or self.order[-1] != pair):
                 self.order.append(pair)
@@ -154,9 +167,9 @@ def test_write_path_orders_check_level_by_overlap(tmp_path: Path, monkeypatch: p
 
     hits_by_peer = {
         int(near["id"]): {"memory_id": int(near["id"]), "id": 1, "kind": "text", "text": "deploy pipeline is green 8 and 16",
-                         "start_offset": 0, "end_offset": 23, "distance": 0.9, "metadata": dict(_META)},
+                         "start_offset": 0, "end_offset": 33, "distance": 0.9, "metadata": dict(_META)},
         int(far["id"]): {"memory_id": int(far["id"]), "id": 2, "kind": "text", "text": "invoice process is manual",
-                         "start_offset": 0, "end_offset": 23, "distance": 0.1, "metadata": dict(_META)},
+                         "start_offset": 0, "end_offset": 33, "distance": 0.1, "metadata": dict(_META)},
     }
 
     def fake_knn(embedding: Any, k: Any = 5, workspace: Any = None, exclude_memory_id: Any = None, conn: Any = None, **_kw: Any) -> list[dict[str, Any]]:
@@ -212,9 +225,9 @@ def test_write_path_notify_level_not_demoted_by_score(tmp_path: Path, monkeypatc
     def fake_knn(embedding: Any, k: Any = 5, workspace: Any = None, exclude_memory_id: Any = None, conn: Any = None, **_kw: Any) -> list[dict[str, Any]]:
         return [
             {"memory_id": int(check_peer["id"]), "id": 1, "kind": "text", "text": "deploy pipeline is green 8 and 16",
-             "start_offset": 0, "end_offset": 23, "distance": 0.1, "metadata": dict(_META)},
+             "start_offset": 0, "end_offset": 33, "distance": 0.1, "metadata": dict(_META)},
             {"memory_id": int(notify_peer["id"]), "id": 2, "kind": "text", "text": "invoice process is manual",
-             "start_offset": 0, "end_offset": 23, "distance": 0.9, "metadata": dict(_META)},
+             "start_offset": 0, "end_offset": 33, "distance": 0.9, "metadata": dict(_META)},
         ]
 
     monkeypatch.setattr(tools.db, "row_knn", fake_knn)

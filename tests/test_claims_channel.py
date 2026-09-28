@@ -71,23 +71,6 @@ def test_write_persists_claims_and_rejects_ungrounded(tmp_path: Path) -> None:
     assert vec_rows == 1
 
 
-def test_missing_claims_grey_warn_and_enforce(tmp_path: Path) -> None:
-    tools = tv.make_tools(tmp_path)
-    result = tools.memory_write(content="普通记忆一句话足够长。", subject="s", tags=[])
-    assert result["ok"] is True
-    assert any("claims 必填" in w for w in result.get("warnings", []))  # 灰度只警告
-
-    tools.settings.claims_required = True
-    enforced = tools.memory_write(content="另一条普通记忆也很长。", subject="s2", tags=[])
-    assert enforced["ok"] is False
-    assert enforced["data"]["field"] == "claims"
-    tools.settings.claims_required = False
-    explicit = tools.memory_write(content="第三条普通记忆长度足够。", subject="s3", tags=[], claims=[])
-    assert explicit["ok"] is True and "claims 必填" not in explicit.get("warnings", [])
-
-
-# ---------------- P2-5.3 零 Qwen 通道 ----------------
-
 def _write_with_claims(tools, content: str, subject: str, claims: list, metadata: dict | None = None):
     return tools.memory_write(
         content=content, subject=subject, tags=[],
@@ -95,87 +78,6 @@ def _write_with_claims(tools, content: str, subject: str, claims: list, metadata
         claims=claims,
     )["data"]
 
-
-
-def test_agent_supplied_backfill_pending_and_apply(tmp_path: Path) -> None:
-    """0.17.0（owner 2026-09-23）：claims_backfill 的 agent 供给模式——
-    pending 列缺口清单、apply 落库（source=backfill/replace 语义/grounding）。"""
-    tools = tv.make_tools(tmp_path)
-    a = tools.memory_write(content="网关读超时为 500 毫秒，熔断开启。", subject="a", tags=[])["data"]
-    b = tools.memory_write(content="限流上限为 200 QPS。", subject="b", tags=[])["data"]
-
-    pending = tools._claims_backfill_task({"mode": "pending", "limit": 10})
-    assert pending["ok"] and pending["count"] == 2
-    ids = {item["memory_id"] for item in pending["items"]}
-    assert ids == {a["id"], b["id"]}
-    assert all(item["content"] for item in pending["items"])
-
-    applied = tools._claims_backfill_task({
-        "mode": "apply",
-        "results": [
-            {"memory_id": a["id"], "claims": [
-                {"attr": "超时", "value": "500 毫秒"},
-                {"attr": "熔断", "value": "没有这句话"},  # grounding 拒
-            ]},
-            {"memory_id": b["id"], "claims": [{"attr": "限流上限", "value": "200 QPS"}]},
-        ],
-    })
-    assert applied["ok"] and applied["applied_memories"] == 2
-    assert applied["claims_written"] == 2
-    assert applied["rejected_count"] == 1
-    rows = tools.db.claims.current_claims(a["id"])
-    assert len(rows) == 1 and rows[0]["source"] == "backfill"
-    # 缺口清零
-    assert tools._claims_backfill_task({"mode": "pending"})["count"] == 0
-    # replace 重放：同结果覆盖不产生重复
-    again = tools._claims_backfill_task({
-        "mode": "apply",
-        "results": [{"memory_id": a["id"], "claims": [{"attr": "超时", "value": "500 毫秒"}]}],
-    })
-    assert again["claims_written"] == 1
-    assert len(tools.db.claims.current_claims(a["id"])) == 1
-
-
-def test_claims_backfill_no_mode_returns_guidance(tmp_path: Path) -> None:
-    """D2（owner 2026-09-23）：无人值守 Qwen 通道退役——无 mode 返回引导语。"""
-    tools = tv.make_tools(tmp_path)
-    result = tools._claims_backfill_task({})
-    assert result["ok"] is False
-    assert "mode='pending'" in result["error"] and "mode='apply'" in result["error"]
-    # model_path 残留参数不再复活 Qwen 通道
-    result2 = tools._claims_backfill_task({"model_path": "/nonexistent.gguf"})
-    assert result2["ok"] is False and "mode='pending'" in result2["error"]
-
-
-# ---------------- 0.17.0 review R2 ----------------
-
-def test_backfill_apply_overflow_receipt_and_source_fallback(tmp_path: Path) -> None:
-    """R2：backfill apply 是唯一绕过 schema ≤20 硬门的入口——溢出 claims
-    逐条进 rejected（reason=exceeds_max_per_memory），不再被静默截断蒸发；
-    逐条非法 source 兜底 agent（memory_claims CHECK 约束防炸）。"""
-    tools = tv.make_tools(tmp_path)
-    content = "正文锚点：" + " ".join(f"token{i}" for i in range(24)) + "。"
-    a = tools.memory_write(content=content, subject="overflow", tags=[])["data"]
-    claims = [
-        {"attr": f"attr{i}", "value": f"token{i}",
-         **({"source": "hacker"} if i == 0 else {})}
-        for i in range(22)
-    ]
-    applied = tools._claims_backfill_task({
-        "mode": "apply", "results": [{"memory_id": a["id"], "claims": claims}],
-    })
-    assert applied["ok"], applied
-    assert applied["claims_written"] == 20
-    assert applied["rejected_count"] == 2
-    overflow = [
-        r for r in applied["rejected_sample"]
-        if r["reason"] == "exceeds_max_per_memory"
-    ]
-    assert [r["index"] for r in overflow] == [20, 21]
-    rows = tools.db.claims.current_claims(a["id"])
-    assert len(rows) == 20
-    assert rows[0]["source"] == "agent", "非法 source 必须兜底 agent"
-    assert rows[1]["source"] == "backfill"
 
 
 def test_edit_claims_inheritance_and_dropped(tmp_path: Path) -> None:

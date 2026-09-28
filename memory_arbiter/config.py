@@ -50,7 +50,6 @@ class Settings:
     # wins); preload/resident are frozen true — a configured checkpoint loads
     # at startup and stays resident.
     semantic_conflict_enabled: bool = False
-    claims_required: bool = False
     # 0.17.1: the mDeBERTa judge checkpoint (V4m). Configured → arbitration
     # enabled; unset → arbitration disabled (fail-open, doctor reports).
     semantic_conflict_model_path: Path | None = None  # 0.17.1 vestigial: never populated from config (fixtures may set)
@@ -274,10 +273,6 @@ class Settings:
             update_check_enabled=update_check_enabled,
             include_size=pick_bool_field(
                 cfg.get("include_size"), name="include_size", default_bool=True
-            ),
-            claims_required=pick_bool_field(
-                cfg.get("claims", {}).get("required") if isinstance(cfg.get("claims"), dict) else None,
-                "claims.required", False,
             ),
             semantic_conflict_enabled=pick_bool_field(
                 semantic_cfg.get("enabled"), name="semantic_conflict.enabled",

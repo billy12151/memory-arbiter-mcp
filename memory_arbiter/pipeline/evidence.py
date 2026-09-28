@@ -1707,7 +1707,12 @@ class EvidencePipeline:
                     and active_deadline - time.monotonic() < min_budget * 2
                 ) and budget.spend_internal()
                 if budget_ok:
-                    verdict = self._judge_pair(backend, unit_a.text, unit_b.text)
+                    content_text = str(ctx.get("content") or "")
+                    ja = row_window(content_text, int(unit_a.start_offset or 0),
+                                    int(unit_a.end_offset or 0), subject=str(record.get("subject") or ""))
+                    jb = row_window(content_text, int(unit_b.start_offset or 0),
+                                    int(unit_b.end_offset or 0), subject=str(record.get("subject") or ""))
+                    verdict = self._judge_pair(backend, ja, jb)
                     outcome = _judge_outcome(verdict, min_prob)
                     if outcome in ("notice", "possible"):
                         if verdict.error is None:

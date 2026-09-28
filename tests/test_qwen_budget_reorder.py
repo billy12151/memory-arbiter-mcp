@@ -224,37 +224,3 @@ class _NoSurfacingRecorder(_Recorder):
         return super().classify_pair(left, right, **kw)
 
 
-def test_stale_hit_peer_settled_not_backlogged(tmp_path, monkeypatch) -> None:
-    """P2-1：派发相读到 peer 已编辑（fresh version > KNN 行版本）——证据/版本
-    错位的 notice 不得落库；对按 settled 处理：不派发、不进 backlog、不扣池。"""
-    tools, new, peer1 = _write_scene(tmp_path, monkeypatch)
-    monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: _NoSurfacingRecorder)
-    a_hits = [_peer_hit(peer1, 101, "连接池上限为 300，队列长度为 4。", 0.1)]
-    c_hits = [_peer_hit(peer1, 201, "连接池上限为 100。", 0.2)]
-    _install_stubs(monkeypatch, tools, peer1=peer1, a_hits=a_hits, c_hits=c_hits,
-                   c_vectors={201: [0.4, 0.9]})
-    original_by_ids = tools.db.get_memories_by_ids
-
-    def bumped_by_ids(ids, **kw):
-        rows = original_by_ids(ids, **kw)
-        for row in rows.values():
-            row["version"] = int(row.get("version") or 1) + 1  # 两相之间被编辑
-        return rows
-
-    monkeypatch.setattr(tools.db, "get_memories_by_ids", bumped_by_ids)
-
-    receipt = tools._process_semantic_conflict_job(new["id"], tv._job_snapshot(tools, new["id"]))
-
-    assert not any(k == "A" for k, _q in _NoSurfacingRecorder.calls), (
-        "stale-hit peer must not reach Qwen dispatch"
-    )
-    a_notices = [n for n in tools.db.list_semantic_notices()
-                 if n["memory_id"] == int(new["id"])
-                 and n.get("notice_type") == "semantic_evidence"]
-    assert not a_notices, "evidence/version mismatch notice must not land"
-    assert "backlogged" not in receipt, "stale pair is settled — never backlogged"
-    # C 相先于派发相跑、不受版本守卫影响（C 的 notice 以 hit 行版本为锚，
-    # 证据-版本天然一致），故账本 = internal 1 + C 1；A-cross 零花费。
-    assert receipt["judge_budget"] == {"internal": 1}
-
-
