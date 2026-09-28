@@ -36,7 +36,7 @@
 
 - **原文只有一份，索引随时可以重建。** 就像一本书：正文是宝贝，目录和索引丢了重印一份就行。迷码里搜索用的向量、全文索引全是"目录"，原文才是"正文"。
 - **每条记忆都带来源。** 谁写的、什么时候写的、说的是什么时候的事，都有记录。"用户亲口确认过"的事实会被锁住，AI 不能悄悄改。
-- **AI 只负责发现矛盾，没权力改。** 发现两条记忆打架时，AI（本地小模型 Qwen）只能"举手报告"，选哪个、改哪个，必须你点头。
+- **AI 只负责发现矛盾，没权力改。** 发现两条记忆打架时，AI（本地 mDeBERTa 小模型）只能"举手报告"，选哪个、改哪个，必须你点头。
 - **改任何东西都留痕。** 每次修改都有历史版本，可以查到谁、什么时候、把什么改成了什么。
 
 ## 交给 AI Agent 安装
@@ -233,14 +233,14 @@ mema doctor --json
 | `update_check.enabled` | 唯一会联网的功能：偶尔查一下 PyPI 有没有新版本。关掉就完全不联网 | `true` |
 | `embedding.model_path` | 本地 embedding 模型（GGUF 文件）路径——**填了就是"我要用按意思搜"**，不用再开别的开关；向量维度自动跟着模型走，换不同维度的模型会在启动时自动按新维度重建向量表 | 无 |
 | `embedding.auto_query` / `embedding.auto_write` | 查询/写入时自动算向量 | `true` |
-| `semantic_conflict.model_path` | 本地 Qwen 小模型路径，用于写入时的冲突判定——0.16.8 起推荐（且为新装默认）官方 **Qwen3-0.6B-Q8_0**；旧版 Qwen2.5-0.5B 仍可运行但已进入维护模式（doctor 会提示升级）。填了就自动启用、启动时加载、常驻内存；两代模型按 GGUF architecture 字段自动分流 | 无 |
+| `semantic_conflict.mdeberta_ckpt` | 本地 mDeBERTa 判定模型权重（V4m，1.1GB，单独下载），用于写入时的冲突判定。填了就自动启用、启动时加载、常驻内存（CPU）。先装 `mdeberta` extra，再下载 ckpt，详见 README「冲突判定模型」一节 | 无 |
 | `semantic_conflict.enabled` | 显式关掉语义冲突的逃生口；不填时指向模型即启用，显式 `false` 优先 | 自动 |
 | `semantic_conflict.on_write` | 写入时的冲突检测：`async`（异步提醒）或 `off`（关闭） | `async` |
 | `semantic_conflict.notice_sync_wait_ms` | 写入响应愿意等多久，好让写时检查结果直接挂在本次响应上（0.15.8 恢复的配置键，默认 `3000`，范围 `0–5000`）；填 `0` = 完全不阻塞写入响应——批量导入就用这个，检查照常后台跑，提醒照样在之后的响应里带出来 | `3000` |
-| `semantic_conflict.n_gpu_layers` | Qwen GPU 卸载层数（`-1`=全卸载，`0`=纯 CPU；无 GPU 后端时忽略） | `-1` |
+| `semantic_conflict.mdeberta_model_dir` | 判定模型的 config+tokenizer 目录；缺省=ckpt 同目录的 `mdeberta-base/` | 无 |
 | `include_size` | 召回复量总开关（0.15.6）：开着，`find` / `read` / 过期审计 / 历史版本四个召回面都带 `size` 块（返回字符数 + 条数 + **token 预估**），agent 汇报成本用同一把尺子；关了就全都不带 | `true` |
 
-关于"指向模型就是意图"再说两句：以前要 `vec.enabled`、`embedding.provider`、`vec.dim` 三个开关凑齐才算开了向量，现在**只看 `embedding.model_path` 填没填**；Qwen 那边同理，以前 `preload`/`resident` 默认不加载，现在配了模型就启动即加载、常驻不卸载。
+关于"指向模型就是意图"再说两句：以前要 `vec.enabled`、`embedding.provider`、`vec.dim` 三个开关凑齐才算开了向量，现在**只看 `embedding.model_path` 填没填**；mdeberta 判定模型同理，配了 ckpt 就启动即加载、常驻不卸载。
 
 环境变量只留 6 个"启动上下文"：`MEMORY_ARBITER_CONFIG` / `DB_PATH` / `BACKUP_JSONL` / `MCP_TRANSPORT` / `CLIENT` / `AGENT_ID`，用来告诉进程用哪个配置文件、哪个库、哪种传输、什么身份（launchd 等场景需要），同名时以配置文件为准。**其余旧环境变量全部失效**，设置了会在 `mema doctor`、控制台设置页和 `memory(action="status")` 里收到 "no longer read" 警告；被删的旧文件键会被忽略并提示 "no longer configurable"。旧键怎么迁移见[集成指南](docs/INTEGRATION.zh-CN.md)。
 

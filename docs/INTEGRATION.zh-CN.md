@@ -36,8 +36,8 @@ stdio 是默认传输。要让多个本地客户端共享一个社区版进程�
 意图语义：
 
 - `embedding.model_path` 指向本地 GGUF 模型就是启用 sqlite-vec 证据召回的唯一意图——不再有 `vec.enabled`/`embedding.provider`/`vec.dim`。向量维度取自模型本身；数据库把活跃维度记录为库内事实源，换成不同输出维度的模型时会在启动时按新维度 DROP 并重建向量表，索引翻为 `state=mismatch`，待全量重建把数据重新发布进新表。
-- `semantic_conflict.model_path` 指向本地 Qwen2.5-0.5B GGUF 即启用语义冲突运行时，并在启动时加载、常驻不卸载（`preload`/`resident` 冻结为 true）。`semantic_conflict.enabled=false` 是显式关闭的逃生口；不设 + 有 `model_path` 即视为启用。
-- 真实（有 config 文件的）安装缺能力时——embedding 模型缺失，或语义冲突未显式关闭但 Qwen 模型缺失——每次工具响应都会带一条持久的降级横幅（指向 `mema setup --install`），每个 Agent 的第一次调用还会在 onboarding notice 里附带能力健康卡。`enabled=false` 且已配置模型视为 deliberate 极简安装，不 nag。`mema setup --install` 是 setup 的执行模式：自动 pip 装 extras、下载两个 GGUF 模型（断点续传，HuggingFace 失败自动切 ModelScope），并回写完成的 config；裸 `mema setup` 保持只指导不执行。
+- `semantic_conflict.mdeberta_ckpt` 指向本地 mDeBERTa 判定权重（V4m）即启用语义冲突运行时，并在启动时加载、常驻不卸载（`preload`/`resident` 冻结为 true）。`semantic_conflict.enabled=false` 是显式关闭的逃生口；不设 + 有 `mdeberta_ckpt` 即视为启用。0.17.1 起 Qwen/GGUF 判定后端已删除，旧 `model_path` 配置会给迁移警告。
+- 真实（有 config 文件的）安装缺能力时——embedding 模型缺失，或语义冲突未显式关闭但 mdeberta 判定模型缺失——每次工具响应都会带一条持久的降级横幅（指向 `mema setup --install`），每个 Agent 的第一次调用还会在 onboarding notice 里附带能力健康卡。`enabled=false` 且已配置模型视为 deliberate 极简安装，不 nag。`mema setup --install` 是 setup 的执行模式：自动 pip 装 extras、下载两个 GGUF 模型（断点续传，HuggingFace 失败自动切 ModelScope），并回写完成的 config；裸 `mema setup` 保持只指导不执行。
 - 排序固定为 hybrid（字面 + 证据倒数排名融合），没有排序模式可选。
 - HTTP 接口路径固定 `/mcp`，请求体上限固定 4 MB。
 
@@ -87,7 +87,7 @@ stdio 是默认传输。要让多个本地客户端共享一个社区版进程�
 
 ### 双向四字段抽取
 
-证据 KNN 只提供有界的短 pair 召回和排序。可选的本地 Qwen2.5-0.5B 分别以 A→B 和 B→A 各跑一次。每次结果必须是恰好四个有界字符串字段的严格 JSON 对象：
+证据 KNN 只提供有界的短 pair 召回和排序。0.17.1 起判定由本地 mDeBERTa（V4m）三分类完成：conflict≥0.80 出 normal notice、possible 出 info 灰区通知、no_conflict 静默 clear；写入漏斗门（初筛/G5/余弦带/规则证据）全部保留。
 
 ```json
 {"attribute_a":"数据库选型","value_a":"MySQL","attribute_b":"数据库选型","value_b":"SQLite"}
@@ -102,7 +102,7 @@ stdio 是默认传输。要让多个本地客户端共享一个社区版进程�
 5. 确定性的重复、兼容、环境/版本/地域/对象、观察时间、历史/当前、演进和测量范围 veto 均不命中；
 6. 正式槽位具备充分的 `workspace_canonical + attribute + subject` 身份（gate-v2：metadata entity/scope 已退役，历史冲突组保留旧 slot 键）。
 
-模糊的属性相似不能创建正式槽位。Qwen 失败或缺席无权否决确定性的扫描候选。
+模糊的属性相似不能创建正式槽位。判定模型失败或缺席无权否决确定性的扫描候选。
 
 ### 定时扫描：宽门
 

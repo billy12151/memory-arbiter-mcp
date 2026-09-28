@@ -3,6 +3,39 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [0.17.1] — 未发版（feat/mdeberta-judge-0171 分支，owner 拍板只 commit 不发版）
+
+### 概要
+写时冲突仲裁判定引擎 **Qwen3-0.6B 抽槽式 → mini-clash mDeBERTa V4m 三分类判别式**（只换引擎，写入漏斗门全保留——row_prefilter/G5/余弦带/decide_evidence/预算公平墙一个不动）。方案：docs/mema-mdeberta-v4m-judge-swap-0171-plan-2026-09-28.md（两轮 review 闭环，owner 九项拍板）。
+
+### 新增
+- `memory_arbiter/semantic_judge.py`：`IsolatedMDeBERTaBackend`（spawn 子进程 torch CPU fp32，标签契约钉死拒启、崩溃熔断 10min×3、硬超时/加载超时沿用、批推理 `judge_pairs` 长度排序+动态 padding、ckpt sha8 身份）。
+- 配置键：`semantic_conflict.mdeberta_ckpt`（配置即启用，镜像旧 model_path 语义）、`mdeberta_model_dir`（缺省=ckpt 同目录 `mdeberta-base/`）、`mdeberta_notice_min_prob`（0.80）、`mdeberta_batch`（默认 8，启动 knee 探测写 doctor）。
+- extra：`pip install memory-arbiter-mcp[mdeberta]`（torch+transformers；ckpt 1.1GB 另行下载，README 指引）。
+- doctor：mdeberta 体检项（ckpt 存在/依赖/熔断状态/最近错误）。
+
+### 判定语义（owner 九项拍板）
+- conflict 且 P≥0.80 → normal notice；conflict 低置信 → 计数不落；possible → **severity=info**（无 action_required，Agent 自裁）；no_conflict → clear。
+- **internal 相写时不判死**：一切结局 pending 附模型意见，终裁归扫描侧强模型（旧 dismissed veto 退役）。
+- **通知帽改 job 级 top5**：conflict 正式 + possible info 按嫌疑分合并排序取 5，其余降级 info（`model_notices_capped` 回执）；正式 notice 附「另有 N 条 info 项」。
+- 攒批：各相位先收后判一次批前向（A-cross 两遍法），deadline 检查粒度=每块；backlog drain 按批档批量取、技术失败留队重试。
+- notice 适配：slot attribute=句对 sha256 差异锚（claim 通道保留真属性）、`model_signal`/`model_version` 进 payload（`qwen_signal` 一版兼容读）、direct 路径保留真抽取属性。
+
+### 移除（Breaking）
+- **Qwen/GGUF 语义后端整体删除**：`LocalGGUFSemanticBackend`/`IsolatedGGUFSemanticBackend`/pair prompts/重试协议/`SEMANTIC_N_CTX`/`SEMANTIC_N_BATCH`/workspace suggester（`_suggest_workspace_candidate`）与 `QWEN_CANDIDATE_*`；`setup --install` 不再下载 Qwen。
+- 配置键 `semantic_conflict.model_path`/`n_gpu_layers` 退役（配置时给迁移警告）。
+- 回执键 `qwen_budget` → `judge_budget`（`qwen_budget` 一版兼容回显）；降级计数 `qwen_*` → `judge_*`（`qwen_unverified` 整键消亡）。
+- 纯 Qwen 协议测试文件删除（test_qwen3_routing/test_qwen_perf_gates/test_pair_timing_ring/test_worker_forwarding/backpressure/inflight_hygiene）+ Qwen 协议用例清理。
+
+### 保留（漏斗门不动）
+`_SENT_PREFILTER`、G5 记忆级筛选、余弦带 [0.60,0.98)、`decide_evidence`/`coexistence_veto`/`direct_value_verdict`、`is_cross_evolution`/`attr_is_versional`、KNN 窗口 16、对池 10/internal 帽 3/CLAIMS 帽 5、公平墙 5s、notice_sync_wait 3s 语义、通道 B 全部、scan 路（本就不跑模型）。llama-cpp-python 依赖保留（embedder 的 EmbeddingGemma 在用）。
+
+### 升级指引
+1. `pip install memory-arbiter-mcp[mdeberta]`（torch CPU wheel ~200MB）；
+2. 下载 `mdeberta-v4m_dual_v1.pt`（1.1GB）+ `mdeberta-base/`（config+tokenizer）；
+3. config：`semantic_conflict.mdeberta_ckpt` 指向 ckpt（自动启用+预加载）。未配置=写时仲裁停用（scan/Agent 兜底不受影响），doctor 报告。
+升级前请清空 conflict_backlog（旧引擎条目避免跨引擎重放歧义）；发版前置=全量重扫（detector 已 bump `mdeberta-v4m-v1`）。
+
 ## [0.17.0] — 2026-09-22
 
 ### Changed (0.17.0 追加包：前缀终局形态——存储侧裸文本+查询侧 query 前缀，owner 2026-09-26 拍板，未发版一次性收敛)
