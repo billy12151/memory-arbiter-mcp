@@ -497,6 +497,10 @@ def build_embedder(
             gpu_backend = bool(llama_cpp.llama_supports_gpu_offload())
         except Exception:
             gpu_backend = False
+        # 训练让路开关（owner 2026-09-28）：MEMORY_ARBITER_EMBED_CPU=1 强制 CPU，
+        # 不碰 GPU（同机另一会话训练模型时避免 Metal 争用）。
+        if os.environ.get("MEMORY_ARBITER_EMBED_CPU") == "1":
+            gpu_backend = False
 
         llm: Any = None
         used_gpu = False

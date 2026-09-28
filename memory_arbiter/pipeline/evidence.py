@@ -17,6 +17,8 @@ from ..constants import (
     SEMANTIC_CROSS_KNN_WINDOW,
     SEMANTIC_MAX_ROWS,
     SEMANTIC_MIN_PAIR_BUDGET_MS,
+    SEMANTIC_JUDGE_CONTEXT_BEFORE,
+    SEMANTIC_JUDGE_CONTEXT_AFTER,
 )
 from ..difference_classifier import classify_pair
 from ..evidence import evidence_content_hash
@@ -1895,11 +1897,13 @@ class EvidencePipeline:
                 text_a=unit.text, text_b=str(hit.get("text") or ""),
                 judge_text_a=row_window(
                     content, int(unit.start_offset or 0), int(unit.end_offset or 0),
-                    subject=own_subject_text),
+                    subject=own_subject_text,
+                    before=SEMANTIC_JUDGE_CONTEXT_BEFORE, after=SEMANTIC_JUDGE_CONTEXT_AFTER),
                 judge_text_b=row_window(
                     str(peer_row.get("content") or ""),
                     int(hit.get("start_offset") or 0), int(hit.get("end_offset") or 0),
-                    subject=peer_subject_text),
+                    subject=peer_subject_text,
+                    before=SEMANTIC_JUDGE_CONTEXT_BEFORE, after=SEMANTIC_JUDGE_CONTEXT_AFTER),
             )
         # ── pass 2: one batched judge call, verdicts → notices ──────────────
         def _run_judge(judge_pairs_in: list[tuple[str, str]]) -> list[Any]:

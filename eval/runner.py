@@ -84,7 +84,8 @@ def _sha256(path: Path) -> str:
 
 
 def build_settings(
-    workdir: Path, embed_model: Path | None, qwen_model: Path | None = None
+    workdir: Path, embed_model: Path | None, qwen_model: Path | None = None,
+    notice_min_prob: float = 0.80
 ) -> Settings:
     return Settings(
         db_path=workdir / "harness.sqlite3",
@@ -98,6 +99,7 @@ def build_settings(
         # 0.17.1: 判定引擎=mDeBERTa（--qwen-model 参数名保留，值=ckpt 路径）
         semantic_conflict_enabled=qwen_model is not None,
         semantic_conflict_mdeberta_ckpt=qwen_model,
+        semantic_conflict_mdeberta_notice_min_prob=notice_min_prob,
     )
 
 
@@ -106,13 +108,14 @@ def temp_library(
     embed_model: Path | None,
     keep_db: Path | None = None,
     qwen_model: Path | None = None,
+    notice_min_prob: float = 0.80,
     sync_wait_ms: int | None = None,
 ) -> Iterator[MemoryTools]:
     """临时库生命周期：建库 → 起 workers → yield → drain + shutdown → 销毁."""
     import tempfile
 
     workdir = Path(tempfile.mkdtemp(prefix="mema-eval-"))
-    settings = build_settings(workdir, embed_model, qwen_model)
+    settings = build_settings(workdir, embed_model, qwen_model, notice_min_prob=notice_min_prob)
     tools = MemoryTools(settings, MemoryDB(settings))
     if sync_wait_ms is not None:
         # harness 提速（owner 2026-09-24）：写响应的 notice 同步等待窗只
@@ -707,6 +710,7 @@ def _spawn_conflict_child(
         sys.executable, str(Path(__file__).resolve()),
         "--suite", "conflict", "--label", child_label, "--out", str(args.out),
         "--embed-model", str(embed_model), "--qwen-model", str(qwen_model),
+        "--mdeberta-notice-min-prob", str(args.mdeberta_notice_min_prob),
         "--conflict-sync-wait-ms", str(
             NOTICE_SYNC_WAIT_MS
             if args.conflict_sync_wait_ms is None
@@ -762,6 +766,9 @@ def main() -> int:
     parser.add_argument(
         "--keep-db", type=Path, default=None, help="调试：保留临时库副本到该目录"
     )
+    parser.add_argument(
+        "--mdeberta-notice-min-prob", type=float, default=0.80,
+        help="mdeberta 判定 notice 概率下限（按 ckpt 校准：V4m 0.80 / V21 0.90）")
     parser.add_argument(
         "--conflict-sync-wait-ms",
         type=int,
@@ -882,7 +889,8 @@ def main() -> int:
             conflict_pairs += _load_jsonl(FIXTURES / "conflict" / "pairs_large.jsonl")
             conflict_pairs += _load_jsonl(FIXTURES / "conflict" / "pairs_noisy.jsonl")
             with temp_library(
-                embed_model, qwen_model=qwen_model, sync_wait_ms=conflict_sync_wait_ms,
+                embed_model, qwen_model=qwen_model, notice_min_prob=args.mdeberta_notice_min_prob,
+                sync_wait_ms=conflict_sync_wait_ms,
                 keep_db=args.keep_db if args.suite == "conflict" else None,
             ) as tools:
                 conflict = run_conflict_suite(
