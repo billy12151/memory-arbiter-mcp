@@ -89,15 +89,17 @@ def locate_row(content: str, row_text: str) -> "tuple[int, int] | None":
 
 def row_window(content: str, start: int, end: int, *, subject: str = "",
                before: int = 1, after: int = 1,
-               subject_chars: int = 64,
-               side_budget_chars: int = 165) -> str:
+               subject_chars: int = 64, neighbor_chars: int = 80,
+               side_budget_chars: int = 300) -> str:
     """判定输入组装（对抗 review P0 修复 v3）：subject + 前句 + 对立行 + 后句。
 
     三条硬保证：
     1. 对立行**不截断**（值完整性——80 字帽曾切掉行尾数值）；
     2. 邻行不跨空行/标题屏障（异节行污染防护，对齐 row_context_text）；
-    3. 每侧预算 165 CJK 字符 ≈ 128 token（256 pair 共享的一半）——组装层
-       即保总长不触 256 截断；对立行长时邻句自动让位，行仍全保。
+    3. 对立行无条件全保（不参与预算、不被邻句挤掉）；邻行 80 字帽+300
+       总预算=定稿口径（H1 形态 23/33·13FP）。实验记录：行前置 final2/3
+       21/33、无帽 final4 21/33——长邻行（同表他行带对立值）整行进上下
+       文会扰判，80 帽是标定产物不是死参（修复批误删已复原）。
 
     start/end 为对立行 span（content 源坐标）；定位失败退化 subject+对立行。
     """
@@ -155,21 +157,24 @@ def row_window(content: str, start: int, end: int, *, subject: str = "",
         if len(next_lines) >= after:
             break
 
-    # 预算感知组装（token 层保证）：对立行放**最前**——tokenizer
-    # longest_first 从长侧尾部删，行在前则先吃上下文后吃行；超预算时
-    # 邻句让位，对立行永不被 80 字帽切尾（对抗 review P0）。
+    # 预算感知组装（定稿口径）：[prev, row, next] 自然阅读序（属性名
+    # 在前、值在后——final2/3 实证行前置掉 2 召回：数字对需先读属性名
+    # 再读值）；对立行**无条件全保**不参与预算（P0：80 字帽切尾已废），
+    # 邻句按剩余预算让位。
     side_budget = max(40, side_budget_chars)
-    parts: list[str] = [row_text]
+    parts: list[str] = []
     used = len(row_text)
     for p in reversed(prev_lines):
         if used + len(p) + 1 > side_budget:
             break
-        parts.insert(0, p)
+        parts.insert(0, p[:neighbor_chars])
         used += len(p) + 1
+    parts.append(row_text)
+    used = sum(len(p) for p in parts) + len(parts) - 1
     for n in next_lines:
         if used + len(n) + 1 > side_budget:
             break
-        parts.append(n)
+        parts.append(n[:neighbor_chars])
         used += len(n) + 1
     body = "\n".join(parts)
     return f"{subj}\n{body}" if subj else body
