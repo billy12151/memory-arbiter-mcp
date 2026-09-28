@@ -32,7 +32,7 @@ from ..semantic_conflict import (
     notice_dedupe_key,
     normalize_value,
 )
-from ..semantic_judge import PairVerdict
+from ..semantic_judge import PairVerdict, row_window
 from ..text import canon_entity, canon_scope
 
 if TYPE_CHECKING:
@@ -269,7 +269,8 @@ class _JudgeBatch:
         if not out:
             return out
         from ..constants import SEMANTIC_MDEBERTA_BATCH
-        pairs = [(item["text_a"], item["text_b"]) for item in out]
+        pairs = [(item.get("judge_text_a", item["text_a"]),
+                  item.get("judge_text_b", item["text_b"])) for item in out]
         verdicts: list[Any] = []
         for start in range(0, len(pairs), max(1, int(SEMANTIC_MDEBERTA_BATCH))):
             verdicts.extend(judge_fn(pairs[start : start + int(SEMANTIC_MDEBERTA_BATCH)]))
@@ -1884,23 +1885,31 @@ class EvidencePipeline:
                 ctx["incomplete_reason"] = ctx["incomplete_reason"] or "pairs_examined_capped"
                 continue
             reached_pair.add(peer_id)  # queued for the judge — settled
-            # Bare sentence pair — the judge sees exactly the two row texts
-            # (context/envelope/rule_value/dispatch_hint were slot-extraction
-            # aids and die with that paradigm).
+            # 0.17.1 owner ②：判定输入= subject+对立行+前后句（窗口）；裸行
+            # 保留给守卫/锚/notice 值（实施对抗 review P1-3 分离设计）。
+            own_subject_text = str(record_row.get("subject") or "")
+            peer_subject_text = str(peer_row.get("subject") or "")
             batch.add(
                 peer_id=int(peer_id), hit=hit, unit=unit, decision=decision,
                 peer=peer, left_version=left_version, right_version=right_version,
                 text_a=unit.text, text_b=str(hit.get("text") or ""),
+                judge_text_a=row_window(
+                    content, int(unit.start_offset or 0), int(unit.end_offset or 0),
+                    subject=own_subject_text),
+                judge_text_b=row_window(
+                    str(peer_row.get("content") or ""),
+                    int(hit.get("start_offset") or 0), int(hit.get("end_offset") or 0),
+                    subject=peer_subject_text),
             )
         # ── pass 2: one batched judge call, verdicts → notices ──────────────
-        def _run_judge(pairs: list[tuple[str, str]]) -> list[Any]:
+        def _run_judge(judge_pairs_in: list[tuple[str, str]]) -> list[Any]:
             if backend is None:
                 return []
             if hasattr(backend, "judge_pairs"):
-                return backend.judge_pairs(pairs)
+                return backend.judge_pairs(judge_pairs_in)
             if hasattr(backend, "judge_pair"):
                 # single-pair judge interface (ErrBackend fixtures)
-                return [backend.judge_pair(a, b) for a, b in pairs]
+                return [backend.judge_pair(a, b) for a, b in judge_pairs_in]
             # Test/legacy backends exposing classify_pair(env_a, env_b):
             # wrap each bare-text pair as a minimal judge call.
             from ..semantic_judge import PairVerdict as _PV
@@ -1908,7 +1917,7 @@ class EvidencePipeline:
             return [
                 _PV("conflict", {"conflict": 1.0, "no_conflict": 0.0, "possible_conflict": 0.0},
                     None, "test-backend")
-                for _ in pairs
+                for _ in judge_pairs_in
             ]
 
         judged_started = time.monotonic()

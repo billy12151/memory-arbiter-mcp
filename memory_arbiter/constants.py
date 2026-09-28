@@ -101,6 +101,13 @@ SEMANTIC_N_THREADS = 4
 # re-trained checkpoint that reorders classes must fail loudly, not misjudge).
 SEMANTIC_MDEBERTA_LABELS = ("conflict", "no_conflict", "possible_conflict")
 SEMANTIC_MDEBERTA_MAX_LEN = 256
+# 0.17.1 owner 指令：判定输入= subject + 对立行 + 前后各 N 句（±2 为第 4 步
+# 实验变体）。预算感知组装见 semantic_judge.row_window——对立行全保，
+# subject 截 64 字符、前后句各截 80 字符，总长可控不触 256 截断。
+SEMANTIC_JUDGE_CONTEXT_BEFORE = 1
+SEMANTIC_JUDGE_CONTEXT_AFTER = 1
+SEMANTIC_JUDGE_SUBJECT_CHARS = 64
+SEMANTIC_JUDGE_NEIGHBOR_CHARS = 80
 # Batch size: device default (CPU 8 / MPS 16 — MPS unused for inference, the
 # dtype-assertion bug keeps us on CPU, but the key exists so the knee probe
 # has a fallback ladder), overridden by config and by the startup knee probe

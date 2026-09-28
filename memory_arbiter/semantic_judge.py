@@ -73,6 +73,45 @@ def checkpoint_sha8(ckpt_path: Path) -> str:
     return digest.hexdigest()[:8]
 
 
+def row_window(content: str, start: int, end: int, *, subject: str = "",
+               before: int = 1, after: int = 1,
+               subject_chars: int = 64, neighbor_chars: int = 80) -> str:
+    """判定输入组装（owner 2026-09-28 ②）：subject + 前句 + 对立行 + 后句。
+
+    预算感知：对立行全保；subject 截 subject_chars、前后句各截
+    neighbor_chars——总长可控不触 256 pair 预算截断（对抗 review P1：
+    tokenizer longest_first 会从较长侧尾部交替删，不加预算则 next 全灭、
+    对立行尾部被吃）。start/end 为对立行在 content 中的 span；按 rowseg
+    行的 offset 重叠定位当前行，邻行=rowseg 邻接行（subject 行跳过——
+    subject 单独作首行实体锚）。定位失败退化为 subject+对立行。"""
+    from .rowseg import segment_rows
+
+    row_text = (content or "")[max(0, start):max(0, end)] or (content or "")[:200]
+    subj = (subject or "")[:subject_chars]
+    try:
+        rows = [r for r in segment_rows("", content or "") if r.kind != "subject"]
+    except Exception:
+        return f"{subj}\n{row_text}" if subj else row_text
+    idx = None
+    for i, r in enumerate(rows):
+        if int(r.start_offset) < max(0, end) and int(r.end_offset) > max(0, start):
+            idx = i
+            break
+    if idx is None:
+        for i, r in enumerate(rows):
+            if (r.text or "").strip() == row_text.strip():
+                idx = i
+                break
+    if idx is None:
+        return f"{subj}\n{row_text}" if subj else row_text
+    parts: list[str] = []
+    for j in range(max(0, idx - before), min(len(rows), idx + after + 1)):
+        t = (rows[j].text or "")[:neighbor_chars]
+        parts.append(t)
+    body = "\n".join(parts)
+    return f"{subj}\n{body}" if subj else body
+
+
 def device_default_batch() -> int:
     """Owner 2026-09-28 拍板：批默认按设备分档——有 GPU 16、无 GPU 8。
     torch-free 探测（parent 进程不 import torch）：Apple Silicon（darwin
