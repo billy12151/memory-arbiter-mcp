@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from .config import Settings
+from .semantic_judge import device_default_batch as _device_default_batch
 from .constants import (
     EMBEDDING_MAX_SECTION_CHARS,
     EMBEDDING_N_CTX,
@@ -273,7 +274,7 @@ def _c_evidence_coverage(ctx: _DoctorCtx) -> Finding:
 
 def _c_claims_coverage(ctx: _DoctorCtx) -> Finding:
     # 0.17.0 P2-5.4: claims adoption gauge — informational (grey-period by
-    # design); run memory_repair(task='claims_backfill') to raise it.
+    # design); run claims_backfill 工具已随 0.17.1 claims 通道退役删除 to raise it.
     try:
         with_claims = int(ctx.conn.execute(
             """SELECT COUNT(DISTINCT c.memory_id) FROM memory_claims c
@@ -416,7 +417,10 @@ def _c_semantic_judge_model(ctx: _DoctorCtx) -> Finding | None:
             "ckpt": str(ckpt),
             "model_dir": str(ctx.settings.semantic_conflict_mdeberta_model_dir or ""),
             "notice_min_prob": ctx.settings.semantic_conflict_mdeberta_notice_min_prob,
-            "batch_size": ctx.settings.semantic_conflict_mdeberta_batch,
+            "batch_size": (
+                int(ctx.settings.semantic_conflict_mdeberta_batch)
+                or _device_default_batch()
+            ),
         },
     )
 

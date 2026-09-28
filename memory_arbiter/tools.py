@@ -1591,11 +1591,10 @@ class MemoryTools:
         # only: segment + batch-embed + publish, no detection, receipt says so.
         if snapshot.get("index_only"):
             return self._evidence.index_rows_in_job(memory_id, snapshot)
-        # 0.17.0 Q1 相分裂 (owner plan §3.1, D1/D7): 确定性相 → B → internal
-        # Qwen → C → A-cross 派发相，共享 job 全局 Qwen 预算池（ctx["budget"]：
-        # internal 保护帽 ≤3 → C 可扣穿不可被拦 → A-cross 余量派发，耗尽
-        # continue 不 break）。B/C 先于 A-cross：跨通道去重方向翻转，B∪C
-        # 已浮出 peer 进 A-cross 的 skip 集合（review R1-3）。
+        # 0.17.0 Q1 相分裂 (owner plan §3.1, D1/D7)：确定性相 → internal
+        # 判定相 → A-cross 派发相，共享 job 全局判定预算池（ctx["budget"]：
+        # internal 保护帽 ≤3 → A-cross 余量派发，耗尽 continue 不 break）。
+        # 0.17.1：claims 通道 B/C 退役，相序只剩两段。
         ev = self._evidence
         ctx = ev.conflicts_deterministic_phase(memory_id, snapshot)
         terminal: "dict[str, Any] | None" = ctx.get("terminal")

@@ -490,20 +490,8 @@ class WritePipeline:
                 {"written": False, "error": "isolation=strict requires a workspace on every write"},
                 ok=False,
             )
-        # 0.17.0 P2-5.2: claims 必填灰度（owner 决策 #6）。缺失时灰度期只
-        # 警告教学（agent 下次补上），enforce 期（claims.required=true）硬拒。
-        if payload.get("claims") is None:
-            teaching = (
-                "claims 必填：有则填 [{\"attr\":..., \"value\":...}]，无则传 []。"
-                "缺失的写入按灰度策略继续。"
-            )
-            if False:  # 0.17.1: claims.required 配置已退役（claims 字段全退）
-                return self._tools.db.state.response(
-                    {"written": False, "error": "invalid_input", "field": "claims",
-                     "reason": teaching},
-                    ok=False,
-                )
-            validation.warnings.append(teaching)
+        # 0.17.1：claims.required 门已退役（claims 数据层保留、不参与检测），
+        # 缺失不再教学/硬拒——评审 P1：灰度分支连同教学警告一并删除。
         # The validate_product_payload call above is the single validation
         # funnel: the MCP surface runs it before dispatch, and direct
         # memory_write callers (release smoke, tests) run it here — the

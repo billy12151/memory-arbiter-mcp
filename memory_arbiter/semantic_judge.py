@@ -73,17 +73,31 @@ def checkpoint_sha8(ckpt_path: Path) -> str:
     return digest.hexdigest()[:8]
 
 
+def locate_row(content: str, row_text: str) -> "tuple[int, int] | None":
+    """在 fresh content 中定位裸行文本的源 span（backlog drain 上下文化用）。
+    精确子串命中返回 (start, end)；未命中（content 已变形）返回 None，
+    调用方退化裸行判定（方案 §2.2 兜底口径）。"""
+    hay = content or ""
+    needle = (row_text or "").strip()
+    if not hay or not needle:
+        return None
+    pos = hay.find(needle)
+    if pos < 0:
+        return None
+    return (pos, pos + len(needle))
+
+
 def row_window(content: str, start: int, end: int, *, subject: str = "",
                before: int = 1, after: int = 1,
-               subject_chars: int = 64, neighbor_chars: int = 80,
-               side_budget_chars: int = 300) -> str:
+               subject_chars: int = 64,
+               side_budget_chars: int = 165) -> str:
     """判定输入组装（对抗 review P0 修复 v3）：subject + 前句 + 对立行 + 后句。
 
     三条硬保证：
     1. 对立行**不截断**（值完整性——80 字帽曾切掉行尾数值）；
     2. 邻行不跨空行/标题屏障（异节行污染防护，对齐 row_context_text）；
-    3. 每侧预算 = 对立行全保 + subject/邻句按剩余预算填充（256 pair 共享
-       预算下两侧各 ~128 token ≈ 165 CJK 字符；对立行长时邻句自动收缩）。
+    3. 每侧预算 165 CJK 字符 ≈ 128 token（256 pair 共享的一半）——组装层
+       即保总长不触 256 截断；对立行长时邻句自动让位，行仍全保。
 
     start/end 为对立行 span（content 源坐标）；定位失败退化 subject+对立行。
     """
@@ -141,17 +155,17 @@ def row_window(content: str, start: int, end: int, *, subject: str = "",
         if len(next_lines) >= after:
             break
 
-    # 预算感知组装：对立行全保，subject/邻句按剩余字符预算填充
+    # 预算感知组装（token 层保证）：对立行放**最前**——tokenizer
+    # longest_first 从长侧尾部删，行在前则先吃上下文后吃行；超预算时
+    # 邻句让位，对立行永不被 80 字帽切尾（对抗 review P0）。
     side_budget = max(40, side_budget_chars)
-    parts: list[str] = []
+    parts: list[str] = [row_text]
     used = len(row_text)
     for p in reversed(prev_lines):
         if used + len(p) + 1 > side_budget:
             break
         parts.insert(0, p)
         used += len(p) + 1
-    parts.append(row_text)
-    used = sum(len(p) for p in parts) + len(parts) - 1
     for n in next_lines:
         if used + len(n) + 1 > side_budget:
             break

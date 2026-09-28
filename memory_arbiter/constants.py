@@ -106,8 +106,6 @@ SEMANTIC_MDEBERTA_MAX_LEN = 256
 # subject 截 64 字符、前后句各截 80 字符，总长可控不触 256 截断。
 SEMANTIC_JUDGE_CONTEXT_BEFORE = 1
 SEMANTIC_JUDGE_CONTEXT_AFTER = 1
-SEMANTIC_JUDGE_SUBJECT_CHARS = 64
-SEMANTIC_JUDGE_NEIGHBOR_CHARS = 80
 # Batch size: device default (CPU 8 / MPS 16 — MPS unused for inference, the
 # dtype-assertion bug keeps us on CPU, but the key exists so the knee probe
 # has a fallback ladder), overridden by config and by the startup knee probe
@@ -279,25 +277,9 @@ SEMANTIC_MAX_ROWS = 256
 # conflicts (12th/13th-round evidence). Weights sum to 1.0; recalibrated
 # with the P2-0 corpus during P2-3.2.
 # 0.17.0 P2-3.3/P2-5.3: claims channel attr-vector gate τ (8th-round spike:
-# A/B recall 4/4, C2+D1 accepted as advisory FPs; asymmetric-benefit doctrine).
-# 0.17.0 前缀重标注记（对抗 review P1-3）：通道 C 的 attr↔row 跨型几何与
-# row↔row 不同——M0 sts min 0.5696 贴近本值（harness 复验 0.55 与 0.60 零
-# 结果差异，掉的对是 KNN 窗口组成漂移非 floor）；重标待带标签 M1 数据。
-SEMANTIC_CHANNEL_C_COS_FLOOR = 0.60
-CLAIM_ATTR_TAU = 0.70
 # 0.17.0 review A3: the claims channel is zero-Qwen with no natural pairs
 # cap — notices per write are bounded here instead (overflow visible).
 CLAIMS_MAX_NOTICES_PER_WRITE = 5
-# 0.17.0 review R2: per-attr candidate bound for the exact-key lane
-# (attr_conflict_candidates). Not the KNN k=10 window — this only stops a
-# hot attr (dozens of memories sharing 状态/负责人) from scanning
-# unbounded; hitting it is surfaced as channel_b_exact_capped, never
-# silent.
-CLAIMS_EXACT_CANDIDATE_LIMIT = 100
-# Gate-v2 G6 单边桥: own claim has no same-attr peer claim — aim the attr
-# vector at the peer's sentence rows and let Qwen extract the value (case a,
-# prompt names the attr). Bounded per write; unresolved bridges are counted.
-CLAIMS_BRIDGE_MAX_PER_WRITE = 2
 # Gate-v2 G6 rewrite (owner 2026-09-23): the candidate set is ALREADY all
 # same-topic near neighbours — C4 overlap measures topic-ness, which has no
 # discrimination INSIDE the set (wrong layer), so it drops to a tiebreak.

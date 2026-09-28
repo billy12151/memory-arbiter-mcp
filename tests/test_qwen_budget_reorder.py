@@ -28,8 +28,8 @@ def test_job_qwen_budget_pool_arithmetic() -> None:
     assert pool.spend_internal() is True
     assert pool.spend_internal() is True
     assert pool.internal_used == 2
-    pool.spend_channel_c()
-    pool.spend_channel_c()
+    pool.spend_a_cross()
+    pool.spend_a_cross()
     assert pool.remaining == 6  # 10 − 2 − 2
     # A-cross 余量派发
     for _ in range(6):
@@ -38,7 +38,7 @@ def test_job_qwen_budget_pool_arithmetic() -> None:
     assert pool.a_cross_dispatch_skipped is True
     assert pool.pairs_examined == 10
     assert pool.receipt_block() == {
-        "internal": 2, "channel_c": 2, "a_cross": 6, "a_cross_dispatch_skipped": True,
+        "internal": 2, "a_cross": 8, "a_cross_dispatch_skipped": True,
     }
     # internal 保护帽独立于池：帽内但池尽 → 拒
     pool2 = _JobQwenBudget(total=1, internal_cap=3)
@@ -47,8 +47,8 @@ def test_job_qwen_budget_pool_arithmetic() -> None:
     # 文档算术锚（方案 §3.4-3）：internal 1 + C 2 → A-cross 派发上限 7
     pool3 = _JobQwenBudget(total=10, internal_cap=3)
     assert pool3.spend_internal() is True
-    pool3.spend_channel_c()
-    pool3.spend_channel_c()
+    pool3.spend_a_cross()
+    pool3.spend_a_cross()
     assert pool3.remaining == 7
     for _ in range(7):
         assert pool3.spend_a_cross() is True

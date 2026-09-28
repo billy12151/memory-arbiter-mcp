@@ -20,7 +20,6 @@ from typing import Any, Protocol
 from .difference_classifier import _cn_to_int
 from .constants import (
     EMBED_PREFIX_STS,
-    CLAIM_ATTR_TAU,
     SEMANTIC_PAIR_MAX_ATTEMPTS,
     SEMANTIC_PAIR_RETRY_MAX_TOKENS,
     SEMANTIC_PAIR_RETRY_CONTEXT_CHARS,
@@ -328,17 +327,6 @@ _VERSIONAL_ATTR_RE = re.compile(
     re.IGNORECASE,
 )
 
-
-def attr_is_versional(attr_norm: str) -> bool:
-    """True when a claims attr carries version semantics (release/commit/tag).
-
-    A value delta on such an attr is expected evolution — two memories
-    recording different versions of the same artifact — so the claims channel
-    skips it and counts the skip (versional_vetoed) to keep the exemption
-    observable instead of a black hole. Deliberately narrow: numeric attrs in
-    general are NOT covered (that lesson belongs to the internal channel).
-    """
-    return bool(_VERSIONAL_ATTR_RE.search(attr_norm or ""))
 
 
 _VALUE_RE = re.compile(

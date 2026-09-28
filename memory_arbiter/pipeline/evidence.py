@@ -270,12 +270,16 @@ class _JudgeBatch:
         self._items = []
         if not out:
             return out
-        from ..constants import SEMANTIC_MDEBERTA_BATCH
         pairs = [(item.get("judge_text_a", item["text_a"]),
                   item.get("judge_text_b", item["text_b"])) for item in out]
+        # 0.17.1（评审 P2）：分块跟随 backend 实际批档（设备 auto 8/16），
+        # 子进程内部自会再按 batch_size 切，此处只做调用切片。
+        from ..constants import SEMANTIC_MDEBERTA_BATCH
+        backend_obj = getattr(judge_fn, "__self__", None)
+        chunk = max(1, int(getattr(backend_obj, "batch_size", 0) or SEMANTIC_MDEBERTA_BATCH))
         verdicts: list[Any] = []
-        for start in range(0, len(pairs), max(1, int(SEMANTIC_MDEBERTA_BATCH))):
-            verdicts.extend(judge_fn(pairs[start : start + int(SEMANTIC_MDEBERTA_BATCH)]))
+        for start in range(0, len(pairs), chunk):
+            verdicts.extend(judge_fn(pairs[start : start + chunk]))
         if len(verdicts) != len(out):
             from ..semantic_judge import PairVerdict
             bad = PairVerdict("no_conflict", {}, None, "mdeberta:unavailable",
@@ -353,17 +357,15 @@ class _JudgePairView:
 class _JobQwenBudget:
     """0.17.0 Q1 (owner D1): SEMANTIC_MAX_EXAMINED_PAIRS upgraded from
     "channel A's internal pair cap" to the write job's GLOBAL Qwen pair
-    budget — internal (protection cap) → channel C (draws freely, can
-    overdraw the pool but is never blocked by it) → A-cross (residual
-    max(0, total − internal − C); exhaustion turns the cross loop's
+    budget — internal (protection cap) → A-cross (residual
+    max(0, total − internal); exhaustion turns the cross loop's
     break into a continue — deterministic verdicts still land).
 
     The pool lives in this object, owned by the orchestrator (wrapper or
     standalone process_conflicts) and passed explicitly into the phases —
     never on the EvidencePipeline instance (review R2-3: no cross-job
-    mutable state on the shared object). Channel B's bridge keeps its own
-    CLAIMS_BRIDGE_MAX_PER_WRITE cap and does NOT draw on this pool (owner
-    plan §3.1 scope: internal + C + A-cross)."""
+    mutable state on the shared object). 0.17.1: claims 通道 B/C 退役，
+    池只服务 internal + A-cross 两个消费方。"""
 
     def __init__(
         self,
@@ -373,13 +375,12 @@ class _JobQwenBudget:
         self.total = max(1, int(total))
         self.internal_cap = max(0, int(internal_cap))
         self.internal_used = 0
-        self.channel_c_used = 0
         self.a_cross_used = 0
         self.a_cross_dispatch_skipped = False
 
     @property
     def remaining(self) -> int:
-        return max(0, self.total - self.internal_used - self.channel_c_used - self.a_cross_used)
+        return max(0, self.total - self.internal_used - self.a_cross_used)
 
     def spend_internal(self) -> bool:
         """Internal Qwen dispatch: protection-capped AND pool-bounded."""
@@ -387,10 +388,6 @@ class _JobQwenBudget:
             return False
         self.internal_used += 1
         return True
-
-    def spend_channel_c(self) -> None:
-        """Channel C draws the pool down but is never blocked by it (D3)."""
-        self.channel_c_used += 1
 
     def spend_a_cross(self) -> bool:
         """A-cross Qwen dispatch: residual pool only; exhaustion records the
@@ -402,13 +399,11 @@ class _JobQwenBudget:
         return True
 
     def receipt_block(self) -> "dict[str, Any] | None":
-        """§3.3 conditional receipt block — absent entirely when nothing was
+        """§3.3 conditional receipt block (0.17.1: internal + A-cross only) — absent entirely when nothing was
         deducted and nothing was skipped (zero values never appear)."""
         block: dict[str, Any] = {}
         if self.internal_used:
             block["internal"] = self.internal_used
-        if self.channel_c_used:
-            block["channel_c"] = self.channel_c_used
         if self.a_cross_used:
             block["a_cross"] = self.a_cross_used
         if self.a_cross_dispatch_skipped:
@@ -418,22 +413,8 @@ class _JobQwenBudget:
     @property
     def pairs_examined(self) -> int:
         """Job-global pairs_examined (§3.3): internal + C + A-cross."""
-        return self.internal_used + self.channel_c_used + self.a_cross_used
+        return self.internal_used + self.a_cross_used
 
-
-def _coexistence_by_attr(claims: "list[dict[str, Any]]") -> dict[str, list[str]]:
-    """A4 coexistence map derived locally from claims rows in hand (0.17.0
-    review R2 CL-1): groups distinct value_norms by attr_norm in one pass —
-    replaces per-attr coexisting_values() re-queries (up to 20 fresh
-    connections + ~400 row re-reads per write on the sync path)."""
-    grouped: dict[str, list[str]] = {}
-    for row in claims:
-        attr = str(row["attr_norm"])
-        values = grouped.setdefault(attr, [])
-        value = str(row["value_norm"])
-        if value not in values:
-            values.append(value)
-    return grouped
 
 
 class EvidencePipeline:
@@ -456,22 +437,6 @@ class EvidencePipeline:
     def _ensure_semantic_backend(self) -> "SemanticBackend | None":
         return self._tools._ensure_semantic_backend()
 
-    def _own_claim_vectors(self, memory_id: int, version: int) -> dict[int, list[float]]:
-        """Claim-id → vector for one memory's current-version claims (B and C
-        shared the identical prefetch block; r2s consolidation)."""
-        rows: dict[int, list[float]] = {}
-        with self.db.connection() as conn:
-            for row in conn.execute(
-                """SELECT c.id AS cid, v.embedding FROM memory_claims c
-                   LEFT JOIN memory_claim_vec v ON v.id=c.id
-                   WHERE c.memory_id=? AND c.memory_version=?""",
-                (int(memory_id), int(version)),
-            ).fetchall():
-                if row["embedding"] is not None:
-                    rows[int(row["cid"])] = self.db.evidence._blob_to_vector(
-                        bytes(row["embedding"])
-                    )
-        return rows
 
     def drain_conflict_backlog(self, limit: int = 2) -> int:
         """0.17.0 P2-4.2: idle-worker consumption of the conflict backlog.
@@ -566,8 +531,19 @@ class EvidencePipeline:
             processed += 1
         # ── pass 2: one batched judge call for the collected pool ───────────
         if judge_pool and backend_holder["backend"] is not None:
-            from ..semantic_judge import PairVerdict as _PV
-            pairs = [(e["left_text"], e["right_text"]) for e in judge_pool]
+            from ..semantic_judge import PairVerdict as _PV, locate_row, row_window
+            # 0.17.1 §2.2（评审 P1-1 修订版）：drain 判定输入上下文化——
+            # 版本复核已通过的 fresh content 走 rowseg 定位窗口；content
+            # 已变形（locate 失败）退化裸行。与 A-cross 同口径。
+            def _judge_text(mem: "dict[str, Any]", bare: str) -> str:
+                content = str(mem.get("content") or "")
+                span = locate_row(content, bare)
+                if span is None:
+                    return bare
+                return row_window(content, span[0], span[1],
+                                  subject=str(mem.get("subject") or ""))
+            pairs = [(_judge_text(e["left"], e["left_text"]),
+                      _judge_text(e["right"], e["right_text"])) for e in judge_pool]
             verdicts = backend_holder["backend"].judge_pairs(pairs)
             if len(verdicts) != len(pairs):
                 verdicts = [_PV("no_conflict", {}, None, "mdeberta:unavailable",
@@ -582,7 +558,13 @@ class EvidencePipeline:
                 left, right = entry["left"], entry["right"]
                 left_text, right_text = entry["left_text"], entry["right_text"]
                 decision = entry["decision"]
-                if outcome in ("notice", "possible") and not _values_all_equivalent(left_text, right_text):
+                # 量纲口径与 A-cross 同一（评审 P3④）：decision 在手比
+                # decision 值对，无值不触发守卫（notice 照常落）。
+                _dv = (getattr(decision, "left_value", None),
+                       getattr(decision, "right_value", None))
+                if outcome in ("notice", "possible") and not (
+                    _dv[0] and _dv[1] and _values_all_equivalent(str(_dv[0]), str(_dv[1]))
+                ):
                     self._record_backlog_notice(
                         left, right, left_text, right_text, decision,
                         left_text[:32], left_text, right_text,
@@ -1398,7 +1380,8 @@ class EvidencePipeline:
         # covered rows do NOT count against rows_examined — their counters
         # are their own receipt keys.
         from .gates import candidate_cos_gate, row_prefilter
-        own_claims = self.db.claims.current_claims(int(memory_id))
+        # 0.17.1（评审 P2）：claim-coverage 跳过删后 current_claims 无消费方，
+        # 白开一次表查询——整行删除（claims 数据层保留但检测线不再读）。
         # KEYED BY ROW INDEX, never object identity: the streaming path
         # yields the raw segments while seg_views are _SegView copies — the
         # same row under two Python objects. row_index is the stable key
@@ -1665,12 +1648,6 @@ class EvidencePipeline:
             "no_conflict", {}, None, "mdeberta:unavailable", error="backend cannot serve",
         )
 
-    def conflicts_job_deadline(self, ctx: dict[str, Any]) -> "float | None":
-        """Q1 R1-1: the fairness wall for wrapper-orchestrated channel C —
-        the SAME deadline semantics the internal/dispatch phases live by
-        (C may overdraw the pair pool per D3, but must not eat the queue's
-        clock)."""
-        return _job_fair_deadline(self._semantic_worker, ctx["publish_done_at"])
 
     def conflicts_internal_judge_phase(self, ctx: dict[str, Any]) -> None:
         """Q1 相分裂 phase 2 (owner plan §3.1): internal (same-memory) keeper
@@ -2107,8 +2084,8 @@ class EvidencePipeline:
         rows = self.db.recent_semantic_notices_for_memory(memory_id, limit=64)
         judged = [
             row for row in rows
-            if row.get("source") in {"semantic_evidence", "claim_conflict"}
-            and row.get("status") == "candidate"
+            if row.get("source") == "semantic_evidence"
+            and row.get("status") == "open"  # pending/delivered 解码态；"candidate" 从不存在（对抗 P0：帽曾永空转）
             and isinstance(row.get("payload"), dict)
             and isinstance((row["payload"].get("model_signal") or {}), dict)
             and row["payload"].get("model_signal")

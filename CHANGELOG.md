@@ -6,7 +6,7 @@ Versions follow semantic versioning.
 ## [0.17.1 追加] — 未发版（claim 对比通道退役 + 判定输入上下文化，owner 2026-09-28 拍板）
 
 ### Removed
-- **claim 对比通道整体退役**：通道 B（claims×claims：exact/vector 车道）、通道 C（claims×sentences）、单边桥、scan 慢道 claims 腿。理由：claim 属性无实体绑定（"数据库=MySQL" 与另一系统的 "数据库=Oracle" 无法区分），真实场景误报面大；通道 C harness 实测真召回 1/10。claims 数据层保留（写入/存储/backfill/继承/`claims.required` 门照旧）。
+- **claim 对比通道整体退役**：通道 B（claims×claims：exact/vector 车道）、通道 C（claims×sentences）、单边桥、scan 慢道 claims 腿。理由：claim 属性无实体绑定（"数据库=MySQL" 与另一系统的 "数据库=Oracle" 无法区分），真实场景误报面大；通道 C harness 实测真召回 1/10。claims 数据层保留（写入/存储/继承/`memory_claims` 表照旧）；`claims.required` 写入门与 `memory_repair(task='claims_backfill')` 随通道一并退役（claims 不再参与任何检测，字段本身仍可写可继承）。
 - 覆盖句跳过（claim 覆盖的句子不再被排除出通道 A）随退役删除——否则 claim 覆盖行成检测死区。
 - `--qwen-model`（runner）/`semantic_conflict.model_path` 等 Qwen 判定入口全部移除。
 
@@ -22,7 +22,7 @@ Versions follow semantic versioning.
 
 ### 新增
 - `memory_arbiter/semantic_judge.py`：`IsolatedMDeBERTaBackend`（spawn 子进程 torch CPU fp32，标签契约钉死拒启、崩溃熔断 10min×3、硬超时/加载超时沿用、批推理 `judge_pairs` 长度排序+动态 padding、ckpt sha8 身份）。
-- 配置键：`semantic_conflict.mdeberta_ckpt`（配置即启用，镜像旧 model_path 语义）、`mdeberta_model_dir`（缺省=ckpt 同目录 `mdeberta-base/`）、`mdeberta_notice_min_prob`（0.80）、`mdeberta_batch`（默认 8，启动 knee 探测写 doctor）。
+- 配置键：`semantic_conflict.mdeberta_ckpt`（配置即启用，镜像旧 model_path 语义）、`mdeberta_model_dir`（缺省=ckpt 同目录 `mdeberta-base/`）、`mdeberta_notice_min_prob`（0.80）、`mdeberta_batch`（0=auto 按设备分档：Apple Silicon/NVIDIA 16、其余 8）。
 - extra：`pip install memory-arbiter-mcp[mdeberta]`（torch+transformers；ckpt 1.1GB 另行下载，README 指引）。
 - doctor：mdeberta 体检项（ckpt 存在/依赖/熔断状态/最近错误）。
 
@@ -46,7 +46,7 @@ Versions follow semantic versioning.
 1. `pip install memory-arbiter-mcp[mdeberta]`（torch CPU wheel ~200MB）；
 2. 下载 `mdeberta-v4m_dual_v1.pt`（1.1GB）+ `mdeberta-base/`（config+tokenizer）；
 3. config：`semantic_conflict.mdeberta_ckpt` 指向 ckpt（自动启用+预加载）。未配置=写时仲裁停用（scan/Agent 兜底不受影响），doctor 报告。
-升级前请清空 conflict_backlog（旧引擎条目避免跨引擎重放歧义）；发版前置=全量重扫（detector 已 bump `mdeberta-v4m-v1`）。
+升级前请清空 conflict_backlog（旧引擎条目避免跨引擎重放歧义）；发版前置=全量重扫（detector 已 bump `mdeberta-v4m-v2`）。
 
 ## [0.17.0] — 2026-09-22
 
