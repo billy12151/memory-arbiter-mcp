@@ -81,7 +81,9 @@ class _RecordingBackend:
     def judge_pairs(self, pairs):
         from memory_arbiter.semantic_judge import PairVerdict
         for text_a, text_b in pairs:
-            pair = (self.text_to_id.get(text_b),)
+            # 0.17.1 上下文化：text_b=subject+邻句+对立行窗口——按包含匹配
+            pid = next((mid for txt, mid in self.text_to_id.items() if txt in text_b), None)
+            pair = (pid,)
             if pair[0] is not None and (not self.order or self.order[-1] != pair):
                 self.order.append(pair)
         return [

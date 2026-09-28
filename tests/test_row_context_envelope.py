@@ -185,9 +185,11 @@ def test_cross_dispatch_bare_sentence_pairs_no_context(tmp_path, monkeypatch) ->
     receipt = tools._process_semantic_conflict_job(new["id"], tv._job_snapshot(tools, new["id"]))
 
     assert captured, "A-cross must consult the judge on the sentence pair"
+    # 0.17.1 owner ②：判定输入= subject+对立行+前后句窗口——对立行在窗口内、
+    # 无 context 标记词（该机制已随抽槽范式退役）
     for text_a, text_b in captured:
         assert "context" not in text_a and "context" not in text_b
-    # the peer side is exactly the row sentence
-    assert any(text_b == sentence for text_a, text_b in captured)
+    assert any(sentence in text_b for text_a, text_b in captured), \
+        "peer 对立行必须出现在窗口内"
 
 
