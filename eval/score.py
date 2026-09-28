@@ -580,7 +580,7 @@ def score_all(raw: dict) -> dict[str, Any]:
         ),
         "similarity": score_similarity(raw),
         "conflict": score_conflict(raw),
-        "conflict_claims": score_conflict_claims(raw),
+        # 0.17.1：claims 语料随 claim 对比通道退役卸载（raw 无该键，scorer 返回 None）
         "conflict_comprehensive": score_conflict_comprehensive(raw),
         "conflict_attribution": score_conflict_attribution(raw),
         "perf": compute_perf(raw),

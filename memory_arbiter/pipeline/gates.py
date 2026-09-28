@@ -25,12 +25,8 @@ from ..semantic_conflict import _SENT_PREFILTER, vector_cosine
 
 
 def claim_value_spans(content: str, claims: "list[dict[str, Any]]") -> "list[tuple[int, int]]":
-    """Locate each claim's value inside the memory body (gate-v2 G4, owner
-    拍板: claims 覆盖句跳过). The value contract is a verbatim contiguous
-    slice of the content, so a literal find pins its offset; POSITION-based
-    matching (not value equality) prevents a same-value-elsewhere sentence
-    from being wrongly treated as covered. Values that cannot be located
-    (legacy/edited rows) simply contribute no span."""
+    """claim 值在正文中的字面定位（数据层工具）。0.17.1 起不再用于通道 A
+    覆盖句过滤（claim 对比通道退役）；保留供 claims 写入校验/工具复用。"""
     spans: "list[tuple[int, int]]" = []
     if not content:
         return spans
@@ -49,18 +45,11 @@ def row_prefilter(
 ) -> "Iterator[Any]":
     """③ 句子初筛（编排可选层：写入调用、扫描跳过）— yield rows that carry
     an extractable value, a negation word, a time anchor, or are table rows;
-    pure prose rows never originate a KNN query. A row OVERLAPPED by any
-    claim value span is also dropped (claims 覆盖句跳过): its content is
-    already represented in channel B as a structured claim, and keeping it
-    would double-report the same statement through channel A. Rows with a
-    value but NO covering claim stay (未被覆盖不跳)."""
+    pure prose rows never originate a KNN query. 0.17.1 (owner 拍板)：claim
+    对比通道 B/C/桥退役，claim 覆盖句跳过随之删除——被 claim 覆盖的句子重新
+    从通道 A 发起（否则成检测死区）；claim_spans 参数保留兼容旧调用方但不再
+    参与过滤。"""
     for row in rows:
-        start = int(getattr(row, "start_offset", 0))
-        end = int(getattr(row, "end_offset", 0))
-        # coverage check FIRST (adversarial review P2): a claim-covered
-        # table row must not bypass the skip via the kind shortcut.
-        if any(span_start < end and start < span_end for span_start, span_end in claim_spans):
-            continue
         if str(getattr(row, "kind", "") or "") == "table_row":
             yield row
             continue
