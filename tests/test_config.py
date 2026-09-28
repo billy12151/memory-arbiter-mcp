@@ -1165,7 +1165,6 @@ SLIM_SETTINGS_FIELDS = frozenset(
         "semantic_conflict_notice_sync_wait_ms",
         "config_warnings",
         "config_file_loaded",
-        "claims_required",
     }
 )
 
@@ -1177,7 +1176,7 @@ def test_settings_field_set_matches_slim_contract() -> None:
     # runtime-injected field (never a file key, not in the registry).
     # 0.17.0 P2-5.2: claims_required added (grey-period switch, default off).
     # 0.17.1: mdeberta judge keys added (ckpt/model_dir/notice_min_prob/batch).
-    assert len(SLIM_SETTINGS_FIELDS) == 26
+    assert len(SLIM_SETTINGS_FIELDS) == 25
     assert set(Settings.__dataclass_fields__) == SLIM_SETTINGS_FIELDS
 
 
