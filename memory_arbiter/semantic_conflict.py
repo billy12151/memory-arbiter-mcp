@@ -465,6 +465,52 @@ def coexistence_veto(
     return None
 
 
+# Same-dimension unit table (owner 2026-09-28 ①②)：量纲表——同维单位下的
+# 数值物理可比（3 秒 vs 500 毫秒），judge 兜底分类；不同维/无单位不触发。
+_UNIT_DIMENSIONS: "dict[str, set[str]]" = {
+    "time": {"秒", "毫秒", "ms", "s", "sec", "second", "seconds", "分钟", "min",
+             "minute", "minutes", "小时", "h", "hour", "hours", "天", "日",
+             "day", "days", "周", "week", "刻钟"},
+    "length": {"米", "m", "km", "千米", "公里", "cm", "厘米", "毫米", "mm",
+               "mile", "英里", "尺", "ft"},
+    "weight": {"kg", "千克", "克", "g", "吨", "t", "mg", "磅", "lb", "斤", "两"},
+    "volume": {"升", "l", "litre", "liter", "ml", "毫升", "加仑", "gallon"},
+    "rate": {"qps", "rps", "tps", "kbps", "mbps", "gbps"},
+    "misc": {"℃", "°c", "hz", "khz", "mhz", "ghz", "v", "kv", "a", "ma"},
+}
+
+
+def _unit_dimensions(text: str) -> set[str]:
+    """Unit dimensions present in ``text`` (unit tokens only)."""
+    dims: set[str] = set()
+    for token in re.findall(r"[a-z℃°]+|[一-鿿]{1,4}", (text or "").lower()):
+        for dim, units in _UNIT_DIMENSIONS.items():
+            if token in units:
+                dims.add(dim)
+    return dims
+
+
+def _values_all_equivalent(text_a: str, text_b: str) -> bool:
+    """等值守卫 (owner 2026-09-28 采纳，v2 收窄)：只比较**带量纲单位的数值**
+    （"500ms"/"0.5秒" 折算同值 → 等值；时间/长度/重量等同维单位）。
+
+    v1 用 _normalized_values 提取全部数字 token——共享日期前缀（2026/09/08）
+    的真对立对（csv vs json）被数字集相等误杀（e2e 回归抓到）。收窄后裸
+    数字（日期/版本号/无单位计数）不参与守卫，量测值才触发。"""
+    def scaled(text: str) -> "list[tuple[str, tuple[str, ...]]]":
+        vals = []
+        for num, unit in re.findall(
+            r"(\d+(?:\.\d+)?)\s*([一-鿿a-zA-Z℃°]{1,6})", (text or "").lower(),
+        ):
+            dims = _unit_dimensions(unit)
+            if dims:
+                vals.append((normalize_value(num + unit), tuple(sorted(dims))))
+        return sorted(vals)
+
+    a, b = scaled(text_a or ""), scaled(text_b or "")
+    return bool(a) and bool(b) and a == b
+
+
 def decide_evidence(left_text: str, right_text: str) -> EvidenceDecision:
     """Classify a short pair using only narrow, explainable evidence."""
     left_norm = _normalize_evidence_text(left_text)

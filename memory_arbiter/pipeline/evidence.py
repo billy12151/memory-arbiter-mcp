@@ -24,6 +24,7 @@ from ..models import TrustedApplyingContext
 from ..embedder import ManagedEmbedder
 from ..semantic_conflict import (
     PairGateResult,
+    _values_all_equivalent,
     SemanticBackend,
     decide_evidence,
     direct_value_verdict,
@@ -950,6 +951,9 @@ class EvidencePipeline:
         if outcome_kind not in ("notice", "possible"):
             # clear / below_threshold / error → unresolved (fail-open counted)
             return ("unresolved", None)
+        # 等值守卫（同通道 C）：claim 值与 peer 行归一值集相等 → 同值不同面
+        if _values_all_equivalent(left_text, row_text):
+            return ("unresolved", None)
         slot_key = _retired_gate_slot_key(
             record.get("workspace_canonical") or record.get("workspace"),
             str(claim["attr_norm"]), str(record.get("subject") or ""),
@@ -1142,6 +1146,13 @@ class EvidencePipeline:
                     model_below_threshold += 1
                     continue
                 is_conflict = outcome == "notice"
+                # 等值守卫（owner 2026-09-28）：claim 渲染句 × peer 行的归一
+                # 值集完全相等（unit-folded）→ 同值不同面，clear 不落 notice
+                #（B-equiv 500ms vs 0.5秒 误报机制）。
+                if _values_all_equivalent(left_text, right_text):
+                    unresolved += 1
+                    _unres_reasons["unit_equivalent"] = _unres_reasons.get("unit_equivalent", 0) + 1
+                    continue
                 slot_key = _retired_gate_slot_key(
                     record.get("workspace_canonical") or record.get("workspace"),
                     str(claim["attr_norm"]), str(record.get("subject") or ""),
@@ -1325,7 +1336,7 @@ class EvidencePipeline:
                 left, right = entry["left"], entry["right"]
                 left_text, right_text = entry["left_text"], entry["right_text"]
                 decision = entry["decision"]
-                if outcome in ("notice", "possible"):
+                if outcome in ("notice", "possible") and not _values_all_equivalent(left_text, right_text):
                     self._record_backlog_notice(
                         left, right, left_text, right_text, decision,
                         left_text[:32], left_text, right_text,
@@ -2692,6 +2703,10 @@ class EvidencePipeline:
                 ctx["model_conflict_below_threshold"] = (
                     ctx.get("model_conflict_below_threshold", 0) + 1
                 )
+                continue
+            # 等值守卫（owner 2026-09-28）：同通道 C/桥，500ms vs 0.5秒 形态
+            if _values_all_equivalent(str(item["text_a"]), str(item["text_b"])):
+                ctx["model_unit_equivalent"] = ctx.get("model_unit_equivalent", 0) + 1
                 continue
             self._land_dispatch_notice(
                 ctx, dispatch_conn, peer_rows, int(item["peer_id"]), item["hit"],

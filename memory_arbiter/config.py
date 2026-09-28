@@ -60,9 +60,9 @@ class Settings:
     # 0.17.1 owner 拍板: P(conflict) ≥ this → normal notice; below → counted
     # only. possible_conflict → info notice (no threshold — ~1% rate).
     semantic_conflict_mdeberta_notice_min_prob: float = 0.80
-    # 0.17.1 §3.2 攒批: device default (CPU 8); startup knee probe may
-    # override the effective value (doctor reports it).
-    semantic_conflict_mdeberta_batch: int = 8
+    # 0.17.1 §3.2 攒批 (owner 2026-09-28 拍板)：0 = auto 按设备分档——
+    # 有 GPU（Apple Silicon MPS / NVIDIA）16，无 GPU 8；显式数值覆盖 auto。
+    semantic_conflict_mdeberta_batch: int = 0
     semantic_conflict_gpu_layers: int = -1  # 0.17.1 vestigial: unused by the torch judge
     semantic_conflict_on_write: str = "async"
     # A3 (0.15.14): Qwen offload layer count. -1 = full Metal offload (the
@@ -288,10 +288,10 @@ class Settings:
             semantic_conflict_mdeberta_notice_min_prob=mdeberta_min_prob_val,
             semantic_conflict_mdeberta_batch=clamp_int(
                 pick_int_field(
-                    semantic_cfg.get("mdeberta_batch"), 8,
+                    semantic_cfg.get("mdeberta_batch"), 0,
                     name="semantic_conflict.mdeberta_batch",
                 ),
-                1, 64, name="semantic_conflict.mdeberta_batch", warnings=config_warnings,
+                0, 64, name="semantic_conflict.mdeberta_batch", warnings=config_warnings,
             ),
             semantic_conflict_on_write=semantic_on_write,
             semantic_conflict_notice_sync_wait_ms=clamp_int(

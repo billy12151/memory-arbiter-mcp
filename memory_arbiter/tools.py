@@ -1396,13 +1396,14 @@ class MemoryTools:
             if self._semantic_backend is not None:
                 return self._semantic_backend
             assert self.settings.semantic_conflict_mdeberta_ckpt is not None
-            from .semantic_judge import IsolatedMDeBERTaBackend
+            from .semantic_judge import IsolatedMDeBERTaBackend, device_default_batch
 
+            configured_batch = int(self.settings.semantic_conflict_mdeberta_batch or 0)
             self._semantic_backend = IsolatedMDeBERTaBackend(
                 self.settings.semantic_conflict_mdeberta_ckpt,
                 self.settings.semantic_conflict_mdeberta_model_dir
                 or (self.settings.semantic_conflict_mdeberta_ckpt.parent / "mdeberta-base"),
-                batch_size=self.settings.semantic_conflict_mdeberta_batch,
+                batch_size=configured_batch if configured_batch > 0 else device_default_batch(),
                 n_threads=SEMANTIC_N_THREADS,
                 hard_timeout_ms=SEMANTIC_INFERENCE_TIMEOUT_MS,
                 load_timeout_ms=SEMANTIC_LOAD_TIMEOUT_MS,

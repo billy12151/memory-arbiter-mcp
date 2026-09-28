@@ -73,6 +73,21 @@ def checkpoint_sha8(ckpt_path: Path) -> str:
     return digest.hexdigest()[:8]
 
 
+def device_default_batch() -> int:
+    """Owner 2026-09-28 拍板：批默认按设备分档——有 GPU 16、无 GPU 8。
+    torch-free 探测（parent 进程不 import torch）：Apple Silicon（darwin
+    arm64）= MPS 统一内存 GPU；Linux 上 /proc/driver/nvidia 存在 = NVIDIA。
+    config 显式数值（>0）覆盖 auto。"""
+    import platform
+    import sys
+
+    if sys.platform == "darwin" and platform.machine() == "arm64":
+        return 16
+    if Path("/proc/driver/nvidia").exists():
+        return 16
+    return 8
+
+
 def _mdeberta_inference_process(conn: Any, config: dict[str, Any]) -> None:
     """Child entry point. Owns only torch state, never MemoryDB state.
 
