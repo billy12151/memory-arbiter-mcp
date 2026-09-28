@@ -561,7 +561,18 @@ def decide_evidence(left_text: str, right_text: str) -> EvidenceDecision:
         return EvidenceDecision("ignore", "compatible_evidence")
     if evidence.char_cosine >= 0.20 or evidence.token_cosine > 0 or evidence.common_tokens:
         return EvidenceDecision("check", "semantic_similarity_only", evidence.common_tokens)
-    return EvidenceDecision("ignore", "insufficient_local_evidence")
+    # 0.17.1 (owner 2026-09-28): same-dimension unit pairs never die here —
+    # "3 秒 vs 500 毫秒" shares a time dimension even when the prose shares no
+    # tokens; the gate's word-overlap heuristic cannot see dimensions. If both
+    # sides carry values of the SAME unit dimension, the pair goes to check
+    # (the judge settles it). Different dimensions / no units keep the old
+    # insufficient verdict (noise stays out).
+    # 0.17.1 (owner 2026-09-28 定稿，对照实验胜出)：insufficient_local_evidence
+    # 分支删除——harness 三方案对照（门在+窗16 / 同量纲放行+窗32 / 门全去+窗32）：
+    # 门全去召回 26/33 且精确率最高 60%（judge 兜底分类优于规则猜测）。原门
+    # 杀掉的"词面不重叠但语义对立"对（3 秒 vs 500 毫秒）正是 noisy 语料的
+    # 主漏报形态；噪音代价 +2 且全部可被 T_notice/job 帽吸收。
+    return EvidenceDecision("check", "semantic_similarity_only", common)
 
 
 # Direct deterministic conflict path (2026-09-16, owner-directed): when the

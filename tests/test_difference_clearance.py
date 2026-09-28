@@ -100,7 +100,9 @@ def test_top3_rank_gate_skips_deep_check_pairs(tmp_path: Path) -> None:
     assert {a, check_peer_deep} not in sets, "the identical shape BEYOND top-3 must be gate-blocked"
     # The fillers are `ignore`-routed (no common tokens): they are neither
     # queued nor counted; the deep pair is SKIPPED by the gate, not cleared.
-    assert outcome["machine_cleared"] == 0, outcome
+    # 0.17.1 owner ②：insufficient 门已删——deep/filler 对落进机判清除
+    # （judge 兜底分类）而非 gate skip；不入判定队列的 negative 断言不变。
+    assert outcome["machine_cleared"] == 2, outcome
 
 
 def test_notify_pairs_queue_from_deep_ranks(tmp_path: Path) -> None:

@@ -94,9 +94,10 @@ def build_settings(
         workspace="default",
         isolation="none",  # 当年标定口径（eval_relevance_floor.py 同款默认）
         embedding_model_path=embed_model,
-        # recall/similarity 套件不起 Qwen；conflict 套件（c4）开启
+        # recall/similarity 套件不起判定模型；conflict 套件（c4）开启
+        # 0.17.1: 判定引擎=mDeBERTa（--qwen-model 参数名保留，值=ckpt 路径）
         semantic_conflict_enabled=qwen_model is not None,
-        semantic_conflict_model_path=qwen_model,
+        semantic_conflict_mdeberta_ckpt=qwen_model,
     )
 
 
@@ -696,7 +697,8 @@ def run_conflict_suite(
 
 
 def default_qwen_model() -> Path | None:
-    """Convenience default: the local install's semantic_conflict.model_path."""
+    """Convenience default: the local install's semantic_conflict.mdeberta_ckpt
+    (0.17.1; the legacy model_path key is retired)."""
     import json as _json
 
     cfg = Path.home() / ".config/memory-arbiter/config.json"
@@ -704,7 +706,7 @@ def default_qwen_model() -> Path | None:
         return None
     try:
         raw = _json.loads(cfg.read_text(encoding="utf-8"))
-        value = (raw.get("semantic_conflict") or {}).get("model_path")
+        value = (raw.get("semantic_conflict") or {}).get("mdeberta_ckpt")
         return Path(value).expanduser() if value else None
     except Exception:
         return None
@@ -819,7 +821,7 @@ def main() -> int:
     want_conflict = args.suite in {"conflict", "all"}
     if want_conflict and (qwen_model is None or not Path(qwen_model).exists()):
         print(
-            "error: conflict 套件需要 Qwen 模型（--qwen-model 或本机 config semantic_conflict.model_path）",
+            "error: conflict 套件需要判定模型（--qwen-model 传 mdeberta ckpt 路径，或本机 config semantic_conflict.mdeberta_ckpt）",
             file=sys.stderr,
         )
         return 2
@@ -900,6 +902,7 @@ def main() -> int:
             conflict_pairs += _load_jsonl(FIXTURES / "conflict" / "pairs_noisy.jsonl")
             with temp_library(
                 embed_model, qwen_model=qwen_model, sync_wait_ms=conflict_sync_wait_ms,
+                keep_db=args.keep_db if args.suite == "conflict" else None,
             ) as tools:
                 conflict = run_conflict_suite(
                     tools, conflict_pairs, setup_sync_wait_ms=args.setup_sync_wait_ms,

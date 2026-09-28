@@ -1594,23 +1594,51 @@ class ScanPipeline:
                             # different unit pairs on the same memory pair
                             # disagree. Snippets and spans track the strongest
                             # signal, not the first discovery.
-                            if not similarity_only and existing["state"] == "review_candidate" and decision.action == "notify":
-                                existing["state"] = "notice_ready"
-                                existing["route"] = "notice_ready"
-                                existing["left_snippet"] = text[:200] if pair[0] == anchor_id else hit_text[:200]
-                                existing["right_snippet"] = hit_text[:200] if pair[0] == anchor_id else text[:200]
-                                existing["deep_read"] = {
-                                    "left": {
-                                        "memory_id": pair[0],
-                                        "span": anchor_span if pair[0] == anchor_id else peer_span,
-                                        **({"workspace": echo_workspace} if echo_workspace else {}),
-                                    },
-                                    "right": {
-                                        "memory_id": pair[1],
-                                        "span": peer_span if pair[0] == anchor_id else anchor_span,
-                                        **({"workspace": echo_workspace} if echo_workspace else {}),
-                                    },
-                                }
+                            numeric_upgrade = (
+                                decision.reason == "numeric_value_candidate"
+                                and "numeric_value_candidate" not in existing["reasons"]
+                            )
+                            if not similarity_only and (
+                                (existing["state"] == "review_candidate" and decision.action == "notify")
+                                or numeric_upgrade
+                            ):
+                                # 0.17.1 owner ③（窗口 32）：同 memory pair 的
+                                # numeric discovery 到来时必须接管 deep_read/
+                                # snippets——先到的 similarity-only discovery
+                                #（如 filler 区同文对）不能永久占住 span，否则
+                                # 判定页把 Agent 带到无冲突证据的文本区。
+                                if numeric_upgrade and existing["state"] == "review_candidate":
+                                    existing["left_snippet"] = text[:200] if pair[0] == anchor_id else hit_text[:200]
+                                    existing["right_snippet"] = hit_text[:200] if pair[0] == anchor_id else text[:200]
+                                    existing["deep_read"] = {
+                                        "left": {
+                                            "memory_id": pair[0],
+                                            "span": anchor_span if pair[0] == anchor_id else peer_span,
+                                            **({"workspace": echo_workspace} if echo_workspace else {}),
+                                        },
+                                        "right": {
+                                            "memory_id": pair[1],
+                                            "span": peer_span if pair[0] == anchor_id else anchor_span,
+                                            **({"workspace": echo_workspace} if echo_workspace else {}),
+                                        },
+                                    }
+                                if existing["state"] == "review_candidate" and decision.action == "notify":
+                                    existing["state"] = "notice_ready"
+                                    existing["route"] = "notice_ready"
+                                    existing["left_snippet"] = text[:200] if pair[0] == anchor_id else hit_text[:200]
+                                    existing["right_snippet"] = hit_text[:200] if pair[0] == anchor_id else text[:200]
+                                    existing["deep_read"] = {
+                                        "left": {
+                                            "memory_id": pair[0],
+                                            "span": anchor_span if pair[0] == anchor_id else peer_span,
+                                            **({"workspace": echo_workspace} if echo_workspace else {}),
+                                        },
+                                        "right": {
+                                            "memory_id": pair[1],
+                                            "span": peer_span if pair[0] == anchor_id else anchor_span,
+                                            **({"workspace": echo_workspace} if echo_workspace else {}),
+                                        },
+                                    }
                             existing["reasons"].add(decision.reason)
                             existing["distance"] = min(existing["distance"], distance)
             ordered = [candidates[pair] for pair in sorted(candidates)]

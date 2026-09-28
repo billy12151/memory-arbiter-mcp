@@ -163,7 +163,10 @@ SEMANTIC_INTERNAL_QWEN_MAX_PAIRS = 3
 # candidates, not the globally most-similar rows — a wide window deduped per
 # peer keeps every plausible opponent represented; the per-peer dict then
 # keeps each opponent's closest row as its representative.
-SEMANTIC_CROSS_KNN_WINDOW = 16
+# 0.17.1 (owner 2026-09-28 ③)：窗口=clash 批处理上限(SEMANTIC_MDEBERTA_BATCH=8)
+# × 4 = 32——一次批前向可判完一整窗，噪音/样板行挤占（harness 首轮 ny-* 11 漏报
+# 的机制）在更宽窗口下被稀释；cost 不变（余弦门内存完成，判定只增带内对）。
+SEMANTIC_CROSS_KNN_WINDOW = 32
 # Gate-v2 G2 (owner 拍板 6): an evidence-channel best whose TRUE cosine
 # clears this is the text the user asked for (#91: raw KNN first yet
 # find-rank 15 after RRF rank-flattening) — the fusion boost bypasses rank
