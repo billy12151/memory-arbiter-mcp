@@ -3,6 +3,18 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [0.17.1 追加] — 未发版（claim 对比通道退役 + 判定输入上下文化，owner 2026-09-28 拍板）
+
+### Removed
+- **claim 对比通道整体退役**：通道 B（claims×claims：exact/vector 车道）、通道 C（claims×sentences）、单边桥、scan 慢道 claims 腿。理由：claim 属性无实体绑定（"数据库=MySQL" 与另一系统的 "数据库=Oracle" 无法区分），真实场景误报面大；通道 C harness 实测真召回 1/10。claims 数据层保留（写入/存储/backfill/继承/`claims.required` 门照旧）。
+- 覆盖句跳过（claim 覆盖的句子不再被排除出通道 A）随退役删除——否则 claim 覆盖行成检测死区。
+- `--qwen-model`（runner）/`semantic_conflict.model_path` 等 Qwen 判定入口全部移除。
+
+### Changed
+- **判定输入上下文化**：judge 输入从裸对立行对改为 subject + 对立行 + 前后各 1 句（`SEMANTIC_JUDGE_CONTEXT_BEFORE/AFTER` 参数化）。harness 实测：精确率 60%→64%（V4m@0.80）/70%（V21@0.90），召回 26→23（边界对被上下文压向保守，误报同步下降）。
+- `conflicts` 回执键 `claims_channel`/`claims_channel_c`/`rows_covered_by_claims` 移除（零键缺席惯例）。
+- embedder 新增 `MEMORY_ARBITER_EMBED_CPU=1` 环境开关：强制 embedding 走 CPU（同机 GPU 训练让路）。
+
 ## [0.17.1] — 未发版（feat/mdeberta-judge-0171 分支，owner 拍板只 commit 不发版）
 
 ### 概要
