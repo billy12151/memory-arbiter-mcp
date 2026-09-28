@@ -260,7 +260,9 @@ class _JudgeBatch:
 
     def drain(self, judge_fn: "Any") -> list[dict[str, Any]]:
         """judge_fn(list[(a, b)]) -> list[PairVerdict]; returns the queued
-        items with ``verdict`` attached, in queue order."""
+        items with ``verdict`` attached, in queue order. A judge_fn result
+        whose length disagrees with the request is failed wholesale (never
+        silently zipped short)."""
         out: list[dict[str, Any]] = list(self._items)
         self._items = []
         if not out:
@@ -270,6 +272,11 @@ class _JudgeBatch:
         verdicts: list[Any] = []
         for start in range(0, len(pairs), max(1, int(SEMANTIC_MDEBERTA_BATCH))):
             verdicts.extend(judge_fn(pairs[start : start + int(SEMANTIC_MDEBERTA_BATCH)]))
+        if len(verdicts) != len(out):
+            from ..semantic_judge import PairVerdict
+            bad = PairVerdict("no_conflict", {}, None, "mdeberta:unavailable",
+                              error=f"judge returned {len(verdicts)} verdicts for {len(out)} pairs")
+            verdicts = [bad] * len(out)
         for item, verdict in zip(out, verdicts):
             item["verdict"] = verdict
         return out
@@ -1202,6 +1209,11 @@ class EvidencePipeline:
             # 「干到一半被墙砍」与「自然跑完」在回执上可区分（§3.3 惯例：
             # 停走条件键，未撞墙不出现）。
             result["channel_c_deadline_stopped"] = True
+        if model_below_threshold:
+            result["channel_c_below_threshold"] = model_below_threshold
+        # info notice 上界观测（实施对抗 review P2：info 不占 normal 帽，
+        # 单写 info 数量需要可见——理论界 = claims×KNN 窗口）
+        result["channel_c_surfaced_total"] = len(surfaced)
         return result
 
     def drain_conflict_backlog(self, limit: int = 2) -> int:
@@ -1215,6 +1227,9 @@ class EvidencePipeline:
         silently completed)."""
         processed = 0
         skipped: list[int] = []  # unprocessable this pass (no backend) — rotate past, never freeze
+        judge_pool: list[dict[str, Any]] = []  # A-5 批量判定池（本轮收齐 pass2 一次判）
+        skipped_ids: list[int] = []  # pass2 判定失败留队（不 complete）
+        backend_holder: dict[str, Any] = {"backend": None}
         while processed < limit:
             entry = self.db.conflict_backlog.take_next(exclude_ids=skipped)
             if entry is None:
@@ -1244,6 +1259,7 @@ class EvidencePipeline:
                 continue
             if extraction is None:
                 backend = self._ensure_semantic_backend()
+                backend_holder["backend"] = backend
                 if backend is None:
                     # P2-4 livelock fix: skip-and-rotate instead of breaking —
                     # the entry stays pending for a backend-bearing pass while
@@ -1269,32 +1285,15 @@ class EvidencePipeline:
                     self.db.conflict_backlog.complete(int(entry["id"]))
                     processed += 1
                     continue
-                # 0.17.1 (owner A-5): the judge batch is collected per drain
-                # call — the batch-capable drain takes a WHOLE batch to clash
-                # in one call. Verdict mapping: notice/possible → notice;
-                # clear → nothing; error/technical → RETAIN (no complete —
-                # the entry waits for the next backend-bearing pass, same
-                # contract as the no-backend skip above; owner 2026-09-28
-                # reversed the 0.17.0 complete-on-technical-failure drop).
-                verdict = self._judge_pair(backend, left_text, right_text)
-                outcome = _judge_outcome(
-                    verdict, float(self.settings.semantic_conflict_mdeberta_notice_min_prob),
-                )
-                if outcome == "error":
-                    skipped.append(int(entry["id"]))
-                    if len(skipped) > 2 * limit:
-                        break
-                    continue
-                if outcome in ("notice", "possible"):
-                    self._record_backlog_notice(
-                        left, right, left_text, right_text, decision,
-                        left_text[:32], left_text, right_text,
-                        reason=f"backlog_judged:{verdict.label}",
-                        severity="normal" if outcome == "notice" else "info",
-                        model_signal=_JudgePairView.signal(verdict),
-                    )
-                self.db.conflict_backlog.complete(int(entry["id"]))
-                processed += 1
+                # 0.17.1 (owner A-5)：本 drain 轮收集判定池，pass2 一次批前向
+                # （先收后判，与 A-cross 同构）。判定映射：notice/possible →
+                # notice；clear → 出队；error/technical → 留队（不 complete，
+                # 与 backend 不可用分支同契约；owner 2026-09-28 翻转 0.17.0
+                # 的技术失败出队丢弃）。
+                entry["left"] = left
+                entry["right"] = right
+                entry["decision"] = decision
+                judge_pool.append(entry)
                 continue
             # Stored extraction replays through the deterministic gate (never
             # re-spends Qwen — owner design #8).
@@ -1308,6 +1307,34 @@ class EvidencePipeline:
                 )
             self.db.conflict_backlog.complete(int(entry["id"]))
             processed += 1
+        # ── pass 2: one batched judge call for the collected pool ───────────
+        if judge_pool and backend_holder["backend"] is not None:
+            from ..semantic_judge import PairVerdict as _PV
+            pairs = [(e["left_text"], e["right_text"]) for e in judge_pool]
+            verdicts = backend_holder["backend"].judge_pairs(pairs)
+            if len(verdicts) != len(pairs):
+                verdicts = [_PV("no_conflict", {}, None, "mdeberta:unavailable",
+                                error="judge verdict count mismatch")] * len(pairs)
+            min_prob = float(self.settings.semantic_conflict_mdeberta_notice_min_prob)
+            for entry, verdict in zip(judge_pool, verdicts):
+                outcome = _judge_outcome(verdict, min_prob)
+                if outcome == "error":
+                    # 留队重试（owner A-5）：下个 backend-bearing pass 再来
+                    skipped_ids.append(int(entry["id"]))
+                    continue
+                left, right = entry["left"], entry["right"]
+                left_text, right_text = entry["left_text"], entry["right_text"]
+                decision = entry["decision"]
+                if outcome in ("notice", "possible"):
+                    self._record_backlog_notice(
+                        left, right, left_text, right_text, decision,
+                        left_text[:32], left_text, right_text,
+                        reason=f"backlog_judged:{verdict.label}",
+                        severity="normal" if outcome == "notice" else "info",
+                        model_signal=_JudgePairView.signal(verdict),
+                    )
+                self.db.conflict_backlog.complete(int(entry["id"]))
+                processed += 1
         return processed
 
     def _record_backlog_notice(
@@ -2635,14 +2662,15 @@ class EvidencePipeline:
                 for _ in pairs
             ]
 
+        judged_started = time.monotonic()
         judged = batch.drain(_run_judge)
+        judged_ms = (time.monotonic() - judged_started) * 1000
+        per_pair_ms = int(judged_ms / max(1, len(judged)))
         for item in judged:
             verdict = item["verdict"]
-            started = time.monotonic()
             self._tools._record_pair_sample(
-                pair_ms=0, forward=verdict, reverse=None,
+                pair_ms=per_pair_ms, forward=verdict, reverse=None,
             )
-            del started
             outcome = _judge_outcome(verdict, min_prob)
             if outcome == "error":
                 error_text = str(verdict.error or "")
@@ -2653,6 +2681,9 @@ class EvidencePipeline:
                 )
                 self._record_job_degradation(ctx, reason)
                 ctx["incomplete_reason"] = ctx["incomplete_reason"] or reason
+                # 未判成的对必须回 backlog（与 drain 自己的失败留队契约同构，
+                # 实施对抗 review P1）：pass1 已标 settled，回滚让 sweep 收走。
+                reached_pair.discard(int(item["peer_id"]))
                 continue
             if outcome == "clear":
                 ctx["model_clear"] = ctx.get("model_clear", 0) + 1
@@ -2929,7 +2960,8 @@ class EvidencePipeline:
             result["judge_budget"] = judge_budget
             result["qwen_budget"] = judge_budget  # one-release compat echo
         # 0.17.1 §3.3 outcome counters — observability, zero values absent.
-        for key in ("model_clear", "model_conflict_below_threshold", "model_possible_count"):
+        for key in ("model_clear", "model_conflict_below_threshold",
+                    "model_possible_count", "model_notices_capped"):
             if ctx.get(key):
                 result[key] = int(ctx[key])
         return result

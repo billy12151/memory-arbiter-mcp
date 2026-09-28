@@ -36,8 +36,8 @@ Since 0.15.0 configuration is file-only: everything user-tunable lives in `~/.co
 Intent semantics:
 
 - Pointing `embedding.model_path` at a local GGUF model is the sole intent to enable sqlite-vec evidence recall — there is no `vec.enabled`/`embedding.provider`/`vec.dim` any more. The vector dimension comes from the model itself; the database records the active dimension as its fact source, and switching to a model with a different output dimension drops and recreates the vector tables at the new dimension at startup, flipping the index to `state=mismatch` until the full rebuild republishes into the fresh tables.
-- Pointing `semantic_conflict.model_path` at a local Qwen2.5-0.5B GGUF enables the semantic-conflict runtime, loads it at startup, and keeps it resident (frozen `preload`/`resident=true`). `semantic_conflict.enabled=false` is the explicit off-switch; unset + `model_path` means enabled.
-- When a capability is missing from a real (config-file) install — the embedding model is absent, or the Qwen model is absent while semantic conflict is not explicitly disabled — every tool response carries a persistent degraded-mode banner pointing at `mema setup --install`, and each agent's first call attaches a capability health card to the onboarding notice. `enabled=false` with a configured model is treated as a deliberate minimal install and stays quiet. `mema setup --install` is the execution mode of the setup helper: pip-installs the extras, downloads both GGUF models (resumable, HuggingFace with ModelScope fallback), and writes the finished config itself; bare `mema setup` remains guidance-only.
+- Pointing `semantic_conflict.mdeberta_ckpt` at a local mDeBERTa checkpoint (V4m) enables the semantic-conflict runtime, loads it at startup, and keeps it resident (frozen `preload`/`resident=true`). `semantic_conflict.enabled=false` is the explicit off-switch; unset + `mdeberta_ckpt` means enabled. Since 0.17.1 the Qwen/GGUF judge backend is deleted; a legacy `model_path` entry draws a migration warning.
+- When a capability is missing from a real (config-file) install — the embedding model is absent, or the mdeberta judge checkpoint is absent while semantic conflict is not explicitly disabled — every tool response carries a persistent degraded-mode banner pointing at `mema setup --install`, and each agent's first call attaches a capability health card to the onboarding notice. `enabled=false` with a configured model is treated as a deliberate minimal install and stays quiet. `mema setup --install` is the execution mode of the setup helper: pip-installs the extras, downloads both GGUF models (resumable, HuggingFace with ModelScope fallback), and writes the finished config itself; bare `mema setup` remains guidance-only.
 - Ranking is fixed hybrid (lexical + evidence fusion with reciprocal-rank fusion); there is no ranking-mode choice.
 - The HTTP endpoint path is fixed `/mcp` and request bodies are capped at 4 MB.
 
@@ -85,13 +85,9 @@ Use `memory_repair(task="rebuild_evidence", data={"dry_run":true})` to inspect m
 
 ## Conflict Detection Contract
 
-### Bidirectional four-field extraction
+### Three-class judge (0.17.1)
 
-Evidence KNN provides bounded short-pair recall and ranking only. Optional local Qwen2.5-0.5B runs once as A→B and once as B→A. Each result must be a strict JSON object with exactly four bounded string fields:
-
-```json
-{"attribute_a":"database","value_a":"MySQL","attribute_b":"database","value_b":"SQLite"}
-```
+Evidence KNN provides bounded short-pair recall and ranking only. Since 0.17.1 the optional judge is a local mDeBERTa encoder (V4m, CPU) that classifies each funnel-surviving pair as `conflict` / `no_conflict` / `possible_conflict` with calibrated probabilities: `conflict` at P ≥ 0.80 lands a normal notice, `possible_conflict` lands an `info` grey-zone notice, `no_conflict` clears silently. The write-time funnel gates (sentence prefilter, memory screen, cosine band, rule evidence) are unchanged.
 
 The model must not return a final conflict/coexistence decision, winner, or mutation. Code validates:
 

@@ -94,6 +94,12 @@ def _mdeberta_inference_process(conn: Any, config: dict[str, Any]) -> None:
 
         cfg = AutoConfig.from_pretrained(model_dir)
         base = AutoModel.from_config(cfg)
+        # P0 fix (implementation adversarial review): config.json may carry
+        # dtype float16 (the NLI upstream's export does) — from_config would
+        # build a Half encoder and the first forward would die on the
+        # fp32-head dtype split. The judge is CPU fp32 by contract; force it
+        # BEFORE load_state_dict so incoming fp32 weights are not cast down.
+        base = base.float()
         hidden = base.config.hidden_size
         labels = list(config["labels"])
         mechs = list(config["mechs"])
@@ -119,22 +125,24 @@ def _mdeberta_inference_process(conn: Any, config: dict[str, Any]) -> None:
              if k.startswith("mech_head.")},
         )
         # Buffers (lab_w/mech_w) and dropout prefixes are dropped on purpose;
-        # a genuinely incompatible skeleton surfaces as a large ``missing``.
-        if len(missing) > len(getattr(base, "_keys_to_ignore_on_load_missing", [])) + 8:
+        # the heads themselves must load EXACTLY (2 modules × 2 tensors + bias
+        # = exact key sets) — a silent partial head load would emit garbage
+        # logits while looking healthy.
+        if missing:
             raise RuntimeError(
-                f"checkpoint skeleton mismatch: {len(missing)} missing encoder keys"
+                f"checkpoint skeleton mismatch: {len(missing)} missing encoder keys: "
+                f"{sorted(missing)[:4]}…"
             )
         base.eval()
         lab_head.eval()
         mech_head.eval()
         tokenizer = AutoTokenizer.from_pretrained(model_dir)
-
-        conn.send({
-            "ok": True, "result": {
-                "loaded": True, "labels": labels, "mechs": mechs,
-                "model_version": f"mdeberta-v4m:{config['sha8']}",
-            },
-        })
+        # NO eager "loaded" send here: the parent's load exchange sends a
+        # "load" command and reads ITS response — an eager message would be
+        # consumed as that response while the real command lands in the loop
+        # as an unknown-command error that poisons the next judge call.
+        # Init errors above still send ok:False before returning, which the
+        # parent's load exchange reads as its response.
     except BaseException as exc:  # noqa: BLE001 - child must report, not die silently
         try:
             conn.send({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
@@ -143,13 +151,20 @@ def _mdeberta_inference_process(conn: Any, config: dict[str, Any]) -> None:
         return
 
     try:
-        softmax = torch.nn.Softmax(dim=-1)
         while True:
             request = conn.recv()
             command = request.get("command")
             if command == "shutdown":
                 return
             try:
+                if command == "load":
+                    conn.send({
+                        "ok": True, "result": {
+                            "loaded": True, "labels": labels, "mechs": mechs,
+                            "model_version": f"mdeberta-v4m:{config['sha8']}",
+                        },
+                    })
+                    continue
                 if command == "judge_pairs":
                     pairs = request["pairs"]
                     results: list[dict[str, Any]] = []
@@ -175,7 +190,9 @@ def _mdeberta_inference_process(conn: Any, config: dict[str, Any]) -> None:
                             cls = out.last_hidden_state[:, 0]
                             lab_logits = lab_head(cls)
                             mech_logits = mech_head(cls)
-                            probs = softmax(lab_logits, dim=-1).tolist()
+                            # functional softmax — nn.Softmax.forward takes no
+                            # `dim` kwarg (implementation-review P0#2)
+                            probs = torch.softmax(lab_logits, dim=-1).tolist()
                             mech_idx = mech_logits.argmax(dim=-1).tolist()
                             for pos, i in enumerate(chunk):
                                 batch_outputs[i] = {
@@ -371,9 +388,12 @@ class IsolatedMDeBERTaBackend:
         return response.get("result")
 
     def _request(self, command: str, timeout_ms: int, **payload: Any) -> Any:
-        acquired = self._request_lock.acquire(timeout=0)
-        if not acquired:
-            raise RuntimeError("mdeberta judge admitted concurrent request")
+        # Blocking acquire: the preload thread and the first write job race at
+        # startup; a timeout=0 rejection would fail every pair of that job
+        # (implementation adversarial review P1). Waiting callers share the
+        # caller's own timeout budget.
+        if not self._request_lock.acquire(timeout=max(0.001, timeout_ms / 1000.0)):
+            raise TimeoutError("mdeberta judge lock busy past caller timeout")
         try:
             with self._state_lock:
                 self._start_locked()
@@ -395,6 +415,14 @@ class IsolatedMDeBERTaBackend:
                     self._terminate_locked(count_restart=True)
                 self._record_child_death()
                 raise RuntimeError(self._last_error) from exc
+            except RuntimeError:
+                # A failed load (bad ckpt / contract mismatch) leaves the child
+                # alive but wedged: every later command would hit its
+                # unknown-command error forever. Terminate so the next attempt
+                # restarts a fresh child (GGUF-parity restart semantics).
+                with self._state_lock:
+                    self._terminate_locked(count_restart=True)
+                raise
             finally:
                 with self._state_lock:
                     if (

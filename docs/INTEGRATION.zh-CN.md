@@ -106,7 +106,6 @@ stdio 是默认传输。要让多个本地客户端共享一个社区版进程�
 
 ### 定时扫描：宽门
 
-`memory_repair(task="scan_candidates")` 枚举有界的 KNN/规则候选，不需要把整个库读进 agent 会话。扫描保留确定性基线，并且当本地 Qwen 运行时可用时（扫描增强恒开，冻结常量），对该页执行有界增强：规则候选被丰富为带抽取的 `attribute/value` 成员字段和 `value_groups`；原本需 `include_check` 显式开启的纯相似 pair，只要在任一方向抽取出合法的同属性/不同值，就并入 `candidates`。每页 Qwen pair 评估数上限 8、单页截止时间 60 s（冻结常量）；元数据 `entity/scope` 一致的已验证候选聚合为 `slot_groups`。单向输出、grounding 弱或 entity/scope 缺失保留为 `review_candidate`，供 agent 深读；Qwen 缺席/非法/超时/预算失败永远不会缩小基线集合，也不会移除任何规则候选。
 
 候选携带成员版本、证据 span、候选身份和深读调用。`scan_candidates` 本身不持久化分诊结果。对每个已复查候选，调用 `memory_repair(task="record_conflict")` 并传 `status="open"` 或 `status="not_a_conflict"`；否则它可能在后续扫描中再次出现。`slot_key` 只在 `status="open"` 时传——`not_a_conflict` 分诊仅通过 `candidate_key` 记录；若该槽位已有 open 组，会返回 `open_group_exists`。仅候选的 `not_a_conflict` 行使用 `candidate_key`，不会虚构 `scope="unknown"`。
 

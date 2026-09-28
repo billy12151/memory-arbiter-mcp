@@ -175,10 +175,9 @@ The complete user surface is 20 keys (0.15.14: added `semantic_conflict.n_gpu_la
   },
   "semantic_conflict": {
     "enabled": true,
-    "model_path": "~/.local/share/memory-arbiter/models/qwen2.5-0.5b-instruct-q4_k_m.gguf",
+    "mdeberta_ckpt": "~/.local/share/memory-arbiter/models/mdeberta-v4m_dual_v1.pt",
     "on_write": "async",
-    "notice_sync_wait_ms": 3000,
-    "n_gpu_layers": -1
+    "notice_sync_wait_ms": 3000
   },
   "claims": {
     "required": false

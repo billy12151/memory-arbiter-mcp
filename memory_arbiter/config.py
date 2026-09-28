@@ -51,9 +51,9 @@ class Settings:
     # at startup and stays resident.
     semantic_conflict_enabled: bool = False
     claims_required: bool = False
-    semantic_conflict_model_path: Path | None = None
     # 0.17.1: the mDeBERTa judge checkpoint (V4m). Configured → arbitration
     # enabled; unset → arbitration disabled (fail-open, doctor reports).
+    semantic_conflict_model_path: Path | None = None  # 0.17.1 vestigial: never populated from config (fixtures may set)
     semantic_conflict_mdeberta_ckpt: Path | None = None
     # config.json + tokenizer dir; default = <ckpt dir>/mdeberta-base (§3.6).
     semantic_conflict_mdeberta_model_dir: Path | None = None
@@ -63,12 +63,12 @@ class Settings:
     # 0.17.1 §3.2 攒批: device default (CPU 8); startup knee probe may
     # override the effective value (doctor reports it).
     semantic_conflict_mdeberta_batch: int = 8
+    semantic_conflict_gpu_layers: int = -1  # 0.17.1 vestigial: unused by the torch judge
     semantic_conflict_on_write: str = "async"
     # A3 (0.15.14): Qwen offload layer count. -1 = full Metal offload (the
     # default since grammar-free decoding restored GPU value: prefill speedup
     # ~1.1-1.25x), 0 = CPU-only, N = first N layers. Ignored where no GPU
     # backend is compiled in.
-    semantic_conflict_gpu_layers: int = -1
     # 0.15.8: restored as a config key (was frozen 5000 in 0.15.0). Default
     # 3000; 0 = the write response never waits for the post-commit check
     # (batch ingestion — the job still runs and notices still deliver on a
@@ -211,7 +211,7 @@ class Settings:
         if semantic_on_write not in {"async", "off"}:
             config_warnings.append(f"semantic_conflict.on_write={semantic_on_write!r} invalid; using async")
             semantic_on_write = "async"
-        semantic_model_raw = semantic_cfg.get("model_path")
+        semantic_model_raw = semantic_cfg.get("model_path")  # parsed only for the migration warning
         mdeberta_ckpt_raw = semantic_cfg.get("mdeberta_ckpt")
         # 0.17.1: legacy Qwen path configured → migration warning (the GGUF
         # backend is deleted; the key is dead). mdeberta_ckpt is the new
@@ -221,6 +221,7 @@ class Settings:
                 "semantic_conflict.model_path is retired in 0.17.1 (the Qwen/GGUF judge was "
                 "replaced by mDeBERTa); configure semantic_conflict.mdeberta_ckpt instead"
             )
+            semantic_model_raw = None  # the legacy value never reaches Settings
         mdeberta_dir_raw = semantic_cfg.get("mdeberta_model_dir")
         mdeberta_ckpt = Path(str(mdeberta_ckpt_raw)).expanduser() if mdeberta_ckpt_raw else None
         mdeberta_model_dir = (
@@ -282,7 +283,6 @@ class Settings:
                 semantic_cfg.get("enabled"), name="semantic_conflict.enabled",
                 default_bool=_semantic_auto_enable,
             ),
-            semantic_conflict_model_path=Path(str(semantic_model_raw)).expanduser() if semantic_model_raw else None,
             semantic_conflict_mdeberta_ckpt=mdeberta_ckpt,
             semantic_conflict_mdeberta_model_dir=mdeberta_model_dir,
             semantic_conflict_mdeberta_notice_min_prob=mdeberta_min_prob_val,
@@ -294,10 +294,6 @@ class Settings:
                 1, 64, name="semantic_conflict.mdeberta_batch", warnings=config_warnings,
             ),
             semantic_conflict_on_write=semantic_on_write,
-            semantic_conflict_gpu_layers=clamp_int(
-                pick_int_field(semantic_cfg.get("n_gpu_layers"), -1, name="semantic_conflict.n_gpu_layers"),
-                -1, 999, name="semantic_conflict.n_gpu_layers", warnings=config_warnings,
-            ),
             semantic_conflict_notice_sync_wait_ms=clamp_int(
                 pick_int_field(
                     semantic_cfg.get("notice_sync_wait_ms"), NOTICE_SYNC_WAIT_MS,
@@ -327,7 +323,7 @@ _REMOVED_VEC_KEYS = frozenset({"enabled", "dim"})
 _REMOVED_EMBEDDING_KEYS = frozenset({"provider", "n_ctx", "reserved_tokens", "max_unit_chars"})
 _REMOVED_HTTP_KEYS = frozenset({"path", "stateless", "json_response", "max_request_body_size"})
 _REMOVED_SEMANTIC_KEYS = frozenset({
-    "backend", "max_concurrency", "queue_max_size", "n_ctx", "n_threads", "n_batch",
+    "backend", "max_concurrency", "queue_max_size", "n_ctx", "n_threads", "n_batch", "n_gpu_layers",
     "resident", "preload", "job_timeout_ms", "inference_timeout_ms", "load_timeout_ms",
     "min_pair_budget_ms", "max_evidence_units", "scan_enhance", "scan_max_pairs",
     "scan_budget_ms", "workspace_qwen_budget_ms",

@@ -254,7 +254,9 @@ def _make_tools(tmp_path: Path, **settings_kwargs) -> MemoryTools:
 
 
 def test_banner_fires_for_real_config_with_missing_models(tmp_path):
-    tools = _make_tools(tmp_path, config_file_loaded=True)
+    tools = _make_tools(
+        tmp_path, config_file_loaded=True, semantic_conflict_enabled=True,
+    )  # 0.17.1：enabled 且 ckpt 缺失 → 语义降级行出现；deliberate opt-out 静音
     text = "\n".join(tools.db.state.warnings)
     assert "降级模式" in text
     assert "向量召回未启用" in text
@@ -277,7 +279,7 @@ def test_banner_honours_deliberate_semantic_opt_out(tmp_path):
         config_file_loaded=True,
         embedding_model_path=tmp_path / "m.gguf",  # missing file → embedding line stays
         semantic_conflict_enabled=False,
-        semantic_conflict_model_path=tmp_path / "q.gguf",  # configured → deliberate opt-out
+        semantic_conflict_mdeberta_ckpt=tmp_path / "q.gguf",  # configured → deliberate opt-out
     )
     text = "\n".join(tools.db.state.warnings)
     assert "向量召回未启用" in text
@@ -294,7 +296,7 @@ def test_banner_quiet_when_install_is_full(tmp_path):
         config_file_loaded=True,
         embedding_model_path=embedding,
         semantic_conflict_enabled=True,
-        semantic_conflict_model_path=qwen,
+        semantic_conflict_mdeberta_ckpt=qwen,
     )
     assert not any("降级模式" in warning for warning in tools.db.state.warnings)
 
@@ -309,7 +311,7 @@ def test_setup_health_states(tmp_path):
     qwen = tmp_path / "q.gguf"
     qwen.write_bytes(b"fake")
     opted_out = _make_tools(
-        tmp_path, semantic_conflict_enabled=False, semantic_conflict_model_path=qwen,
+        tmp_path, semantic_conflict_enabled=False, semantic_conflict_mdeberta_ckpt=qwen,
     )
     assert opted_out._setup_health()["semantic_model"] == "disabled"
 

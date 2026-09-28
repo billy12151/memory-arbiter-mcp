@@ -12,7 +12,7 @@ from typing import Any, Callable, cast
 from .acl import CallerWorkspace, WorkspaceScope, forbidden_payload, memory_public_stub, raw_workspace, visible_memory
 from .arbitration import compare_memories  # noqa: F401 (monkeypatch seam, see pipeline/read.py:226)
 from .config import Settings
-from .constants import EMBED_PREFIX_STS, EMBEDDING_MAX_SECTION_CHARS, EMBEDDING_N_CTX, EMBEDDING_RESERVED_TOKENS, QWEN_BUDGET_MS, QWEN_CANDIDATE_DISTANCE, QWEN_CANDIDATE_TOP_K, SCAN_TASK_RECHECK_SECONDS, SCAN_TASK_STALE_DAYS, SEMANTIC_INFERENCE_TIMEOUT_MS, SEMANTIC_LOAD_TIMEOUT_MS, SEMANTIC_N_THREADS, SEMANTIC_PAIR_LONG_DECODE_TOKENS, SEMANTIC_PAIR_RING_SIZE, WORKSPACE_MIN_NAME_LEN, WORKSPACE_RECALL_ADMISSION, WORKSPACE_RECALL_CUTOFF, is_default_workspace_term
+from .constants import EMBED_PREFIX_STS, EMBEDDING_MAX_SECTION_CHARS, EMBEDDING_N_CTX, EMBEDDING_RESERVED_TOKENS, SCAN_TASK_RECHECK_SECONDS, SCAN_TASK_STALE_DAYS, SEMANTIC_INFERENCE_TIMEOUT_MS, SEMANTIC_LOAD_TIMEOUT_MS, SEMANTIC_N_THREADS, SEMANTIC_PAIR_LONG_DECODE_TOKENS, SEMANTIC_PAIR_RING_SIZE, WORKSPACE_MIN_NAME_LEN, WORKSPACE_RECALL_ADMISSION, WORKSPACE_RECALL_CUTOFF, is_default_workspace_term
 from .db import MemoryDB
 from .embedder import ManagedEmbedder
 from .models import TrustedApplyingContext, utc_now_iso
@@ -135,13 +135,13 @@ class MemoryTools:
         """Capability health for the first-call onboarding notice (P1)."""
         embedding = self.settings.embedding_model_path
         embedding_state = "ok" if (embedding is not None and embedding.is_file()) else "missing"
-        semantic_path = self.settings.semantic_conflict_model_path
+        semantic_ckpt = self.settings.semantic_conflict_mdeberta_ckpt
         if self.settings.semantic_conflict_enabled:
             semantic_state = (
-                "ok" if (semantic_path is not None and semantic_path.is_file()) else "missing"
+                "ok" if (semantic_ckpt is not None and semantic_ckpt.is_file()) else "missing"
             )
-        elif semantic_path is not None:
-            # enabled=false with a configured model: deliberate opt-out.
+        elif semantic_ckpt is not None:
+            # enabled=false with a configured checkpoint: deliberate opt-out.
             semantic_state = "disabled"
         else:
             semantic_state = "missing"
@@ -180,14 +180,10 @@ class MemoryTools:
         if embedding is None or not embedding.is_file():
             missing.append("✗ 向量召回未启用（embedding 模型未找到）")
         if self.settings.semantic_conflict_enabled:
-            semantic_missing = (
-                self.settings.semantic_conflict_model_path is None
-                or not self.settings.semantic_conflict_model_path.is_file()
-            )
-        else:
-            semantic_missing = self.settings.semantic_conflict_model_path is None
-        if semantic_missing:
-            missing.append("✗ 冲突检测未启用（mdeberta 判定模型未配置：装 [mdeberta] extra、下载 V4m ckpt、配 semantic_conflict.mdeberta_ckpt）")
+            ckpt = self.settings.semantic_conflict_mdeberta_ckpt
+            semantic_missing = ckpt is None or not ckpt.is_file()
+            if semantic_missing:
+                missing.append("✗ 冲突检测未启用（mdeberta 判定模型未配置：装 [mdeberta] extra、下载 V4m ckpt、配 semantic_conflict.mdeberta_ckpt）")
         if not missing:
             return None
         return "\n".join([

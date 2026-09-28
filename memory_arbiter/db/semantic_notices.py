@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 from typing import Any, cast, TYPE_CHECKING
 
@@ -92,6 +93,11 @@ class SemanticNoticeStore:
         source = raw_members if len(raw_members) >= 2 else fallback
         members: list[dict[str, Any]] = []
         attribute = str((payload.get("slot_key") or {}).get("attribute") or qwen.get("attribute") or "")
+        # 0.17.1 §3.4: judged notices carry a 12-hex pair-hash anchor — show
+        # the left quote head instead (the anchor stays in slot_key/payload).
+        if re.fullmatch(r"[0-9a-f]{12}", attribute):
+            left_quote = str((payload.get("member_versions") or [{}])[0].get("evidence", {}).get("quote") or "")
+            attribute = left_quote[:40] or attribute
         for index, raw in enumerate(source[:256]):
             evidence = raw.get("evidence") if isinstance(raw.get("evidence"), dict) else {}
             value = str(raw.get("normalized_value") or raw.get("value_raw") or raw.get("value") or "")
@@ -366,16 +372,24 @@ class SemanticNoticeStore:
         """0.17.1 owner A-4 (job-level top-5): the newest judged notices
         involving ``memory_id``, newest first. Includes each row's source and
         severity so the job-cap demotion can rank and demote."""
+        # member_versions is canonical JSON ({"memory_id":5,...} — no spaces);
+        # a LIKE on it is a substring trap (":5" hits ":52"), so parse in
+        # Python over a bounded recent-candidate window instead.
         with self._db.connection() as conn:
             rows = conn.execute(
-                # member_versions is a JSON array of {"memory_id": N, ...};
-                # the '"memory_id": N' substring rides the serialised form.
-                """SELECT * FROM conflicts
-                   WHERE member_versions LIKE ?
-                   ORDER BY id DESC LIMIT ?""",
-                (f'%\"memory_id\": {int(memory_id)}%', int(limit)),
+                "SELECT * FROM conflicts ORDER BY id DESC LIMIT ?",
+                (int(limit) * 8,),
             ).fetchall()
-        return [self._decode(row) for row in rows]
+        picked: list[dict[str, Any]] = []
+        target = int(memory_id)
+        for row in rows:
+            ids = [int(x) for x in re.findall(
+                r'"memory_id":\s*(\d+)', row["member_versions"] or "")]
+            if target in ids:
+                picked.append(self._decode(row))
+                if len(picked) >= limit:
+                    break
+        return picked
 
     def demote_semantic_notice_to_info(self, notice_id: int) -> bool:
         """0.17.1 owner A-4: demote a capped notice to severity=info — the

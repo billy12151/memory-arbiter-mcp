@@ -374,9 +374,6 @@ SCAN_DUPLICATES_MAX_PAGES = 200
 
 # workspace normalization Qwen guard (A/B: top-3 beats top-5; over-distance
 # candidates must never reach the model — see tools._suggest_workspace_candidate)
-QWEN_CANDIDATE_DISTANCE = 0.25  # 0.17.0 前缀重标暂缓：sts 下 11 对真实 alias 距离 max 0.4264 超此值，但负例分布未测（0.45 有相似名折叠风险，scan 家族夹具即证）——补负例语料后重标（挂观察）
-QWEN_CANDIDATE_TOP_K = 3
-QWEN_BUDGET_MS = 750
 
 # workspace recall / normalization thresholds (global; NOT per-isolation)
 WORKSPACE_MATCH_DISTANCE = 0.25  # 0.17.0 前缀重标暂缓：sts 下 11 对真实 alias 距离 max 0.4264 超此值，但负例分布未测（0.45 有相似名折叠风险，scan 家族夹具即证）——补负例语料后重标（挂观察）
@@ -517,9 +514,6 @@ REMOVED_ENV_NAMES = (
     "MEMORY_ARBITER_WORKSPACE",
     "MEMORY_ARBITER_WORKSPACE_MATCH_DISTANCE",
     "MEMORY_ARBITER_WORKSPACE_MIN_NAME_LEN",
-    "MEMORY_ARBITER_WORKSPACE_QWEN_BUDGET_MS",
-    "MEMORY_ARBITER_WORKSPACE_QWEN_CANDIDATE_DISTANCE",
-    "MEMORY_ARBITER_WORKSPACE_QWEN_CANDIDATE_TOP_K",
     "MEMORY_ARBITER_WORKSPACE_RECALL_ADMISSION",
     "MEMORY_ARBITER_WORKSPACE_RECALL_CUTOFF",
     "MEMORY_ARBITER_WORKSPACE_WEAK_VECTOR_WEIGHT",
