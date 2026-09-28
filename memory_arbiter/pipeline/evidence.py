@@ -1895,6 +1895,8 @@ class EvidencePipeline:
                 peer_id=int(peer_id), hit=hit, unit=unit, decision=decision,
                 peer=peer, left_version=left_version, right_version=right_version,
                 text_a=unit.text, text_b=str(hit.get("text") or ""),
+                decision_values=(str(decision.left_value or ""), str(decision.right_value or ""))
+                if (decision.left_value or decision.right_value) else None,
                 judge_text_a=row_window(
                     content, int(unit.start_offset or 0), int(unit.end_offset or 0),
                     subject=own_subject_text,
@@ -1955,8 +1957,11 @@ class EvidencePipeline:
                     ctx.get("model_conflict_below_threshold", 0) + 1
                 )
                 continue
-            # 等值守卫（owner 2026-09-28）：同通道 C/桥，500ms vs 0.5秒 形态
-            if _values_all_equivalent(str(item["text_a"]), str(item["text_b"])):
+            # 等值守卫（owner 2026-09-28，对抗轮收窄）：只比较确定性层抽取的
+            # 值对——decision_values 存在且归一相等 → 同值不同面 clear。
+            # 全行值集相等但含无量纲数字（1000条 vs 2000条）不再误杀。
+            dv = item.get("decision_values")
+            if outcome in ("notice", "possible") and dv is not None and _values_all_equivalent(dv[0], dv[1]):
                 ctx["model_unit_equivalent"] = ctx.get("model_unit_equivalent", 0) + 1
                 continue
             self._land_dispatch_notice(

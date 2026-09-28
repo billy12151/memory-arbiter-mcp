@@ -230,7 +230,7 @@ _PRODUCT_HELPS: dict[str, Any] = {
     },
     "memory_repair": {
         "description": "Maintenance and repair operations. Prefer dry_run first; cleanup, activation, and protected-memory metadata changes still require authorized=true when the underlying operation requires it.",
-        "tasks": ["rebuild_evidence", "scan_pipeline", "scan_queue", "scan_candidates", "scan_duplicates", "scan_workspace_anomalies", "cleanup_history", "set_entity", "activate_pending", "replay_backup", "normalize_workspaces", "semantic_control", "notice", "record_conflict", "claims_backfill", "help"],
+        "tasks": ["rebuild_evidence", "scan_pipeline", "scan_queue", "scan_candidates", "scan_duplicates", "scan_workspace_anomalies", "cleanup_history", "set_entity", "activate_pending", "replay_backup", "normalize_workspaces", "semantic_control", "notice", "record_conflict", "help"],
         "examples": {
             "rebuild_evidence": {"task": "rebuild_evidence", "data": {"dry_run": True, "memory_ids": [123]}},
             "set_entity": {"task": "set_entity", "data": {"memory_id": 123, "entity": "project-x", "scope": "charter"}},
@@ -1318,12 +1318,6 @@ class ProductSurfaces:
             return self._invalid_product_call(
                 "memory_repair", f"unknown scan_queue action: {action_value} (page|submit|status)", task,
             )
-        if task == "claims_backfill":
-            # 0.17.0 P2-5.4 + D2 (owner 2026-09-23): agent-supplied claims
-            # backfill — mode='pending' lists memories lacking current claims
-            # (id cursor via data.after_id); mode='apply' submits the caller
-            # LLM's extractions. The unattended Qwen channel is retired.
-            return self._tools._claims_backfill_task(data if isinstance(data, dict) else {})
         if task == "scan_duplicates":
             return self._scan_duplicates_task(task, payload)
         if task == "cleanup_history":
