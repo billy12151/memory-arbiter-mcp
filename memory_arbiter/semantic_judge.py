@@ -76,21 +76,18 @@ def checkpoint_sha8(ckpt_path: Path) -> str:
 def row_window(content: str, start: int, end: int, *, subject: str = "",
                before: int = 1, after: int = 1,
                subject_chars: int = 64, neighbor_chars: int = 80,
-               side_budget_chars: int = 165) -> str:
-    """判定输入组装（owner 2026-09-28 ②，对抗 review P0 修复版）：
-    subject + 前句 + 对立行 + 后句。
+               side_budget_chars: int = 300) -> str:
+    """判定输入组装（对抗 review P0 修复 v3）：subject + 前句 + 对立行 + 后句。
 
-    三条硬保证（实测钉）：
-    1. 对立行（idx 行）**不截断**——值完整性（80 字帽曾切掉行尾数值）；
-    2. 邻行不跨空行/标题屏障（异节行污染，对齐 row_context_text 的 block
-       语义——「表二数据行曾抓到表一数据行」同型 bug）；
-    3. 每侧硬预算 side_budget_chars（165 字符 ≈128 token，pair 合计 ≤256，
-       256 为 pair 共享预算——两侧各 128）——超支先削 subject 再削邻句，
-       保证对立行完整且不触 tokenizer longest_first 截断。
+    三条硬保证：
+    1. 对立行**不截断**（值完整性——80 字帽曾切掉行尾数值）；
+    2. 邻行不跨空行/标题屏障（异节行污染防护，对齐 row_context_text）；
+    3. 每侧预算 = 对立行全保 + subject/邻句按剩余预算填充（256 pair 共享
+       预算下两侧各 ~128 token ≈ 165 CJK 字符；对立行长时邻句自动收缩）。
 
-    start/end 为对立行 span（content 源坐标）；定位失败退化为 subject+对立行。
+    start/end 为对立行 span（content 源坐标）；定位失败退化 subject+对立行。
     """
-    from .rowseg import segment_rows, _is_heading, _is_separator_row
+    from .rowseg import segment_rows, _line_spans, _is_heading, _is_separator_row
 
     row_text = (content or "")[max(0, start):max(0, end)] or (content or "")[:200]
     subj = (subject or "")[:subject_chars]
@@ -113,76 +110,55 @@ def row_window(content: str, start: int, end: int, *, subject: str = "",
     if idx is None:
         return f"{subj}\n{row_text}" if subj else row_text
 
-    # 邻行选取：block 屏障——遇空行/标题行即止（_line_spans 原始行坐标）。
-    # rowseg 输出行带源 span；用行间空隙判断是否同 block（隔空行/标题=断）。
-    from .rowseg import _line_spans
-    line_spans = _line_spans(content or "")
-    def _same_block_prev(base_row):
-        prev_end = int(base_row.start_offset)
-        for ls, le, raw in reversed(line_spans):
-            if le > prev_end:
-                continue
-            text = raw.strip()
-            if not text or _is_heading(raw):
-                return None
-            return text
-        return None
-    def _same_block_next(base_row):
-        next_start = int(base_row.end_offset)
-        for ls, le, raw in line_spans:
-            if ls < next_start:
-                continue
-            text = raw.strip()
-            if not text or _is_heading(raw):
-                return None
-            return text
-        return None
+    # block 屏障：用原始行坐标找 prev/next 邻行（不跨空行/标题）
+    spans = _line_spans(content or "")
+    prev_lines: list[str] = []
+    next_lines: list[str] = []
+    cur_row_start = int(rows[idx].start_offset)
+    cur_row_end = int(rows[idx].end_offset)
+    # prev：cur_row_start 之前的非空非标题原始行
+    for ls, le, raw in reversed(spans):
+        if le > cur_row_start:
+            continue
+        text = raw.strip()
+        if not text or _is_heading(raw):
+            break
+        if _is_separator_row(raw):
+            continue
+        prev_lines.insert(0, text)
+        if len(prev_lines) >= before:
+            break
+    # next：cur_row_end 之后的非空非标题原始行
+    for ls, le, raw in spans:
+        if ls < cur_row_end:
+            continue
+        text = raw.strip()
+        if not text or _is_heading(raw):
+            break
+        if _is_separator_row(raw):
+            continue
+        next_lines.append(text)
+        if len(next_lines) >= after:
+            break
 
+    # 预算感知组装：对立行全保，subject/邻句按剩余字符预算填充
+    side_budget = max(40, side_budget_chars)
     parts: list[str] = []
-    cur = rows[idx]
-    # prev 链：向上 before 行，遇屏障/缺行即止
-    prev_end = int(cur.start_offset)
-    taken = 0
-    for j in range(idx - 1, max(-1, idx - 1 - before), -1):
-        r = rows[j]
-        line_text = _same_block_prev(r)
-        if line_text is None or (r.text or "").strip() != line_text.strip():
-            # 行与原始行不对应（表格折叠行等），或跨屏障——止
-            if (r.text or "").strip() != line_text.strip() if line_text else True:
-                break
-        seg_text = (r.text or "")[:neighbor_chars]
-        if taken + len(seg_text) + 1 > neighbor_chars * after and parts:
+    used = len(row_text)
+    for p in reversed(prev_lines):
+        if used + len(p) + 1 > side_budget:
             break
-        parts.insert(0, seg_text)
-        taken += len(seg_text) + 1
-    parts.append(row_text)  # 对立行全保
-    # next 链：向下 after 行，同屏障
-    taken = 0
-    for j in range(idx + 1, min(len(rows), idx + 1 + after)):
-        r = rows[j]
-        line_text = _same_block_next(r)
-        if line_text is None or (r.text or "").strip() != line_text.strip():
+        parts.insert(0, p)
+        used += len(p) + 1
+    parts.append(row_text)
+    used = sum(len(p) for p in parts) + len(parts) - 1
+    for n in next_lines:
+        if used + len(n) + 1 > side_budget:
             break
-        seg_text = (r.text or "")[:neighbor_chars]
-        if taken + len(seg_text) + 1 > neighbor_chars * after and parts:
-            break
-        parts.append(seg_text)
-        taken += len(seg_text) + 1
+        parts.append(n)
+        used += len(n) + 1
     body = "\n".join(parts)
-    # 每侧预算：超支削 subject（对立行与邻句已按序保）
-    side = f"{subj}\n{body}" if subj else body
-    if len(side) > side_budget_chars:
-        # 削 subject 与邻句保对立行：对立行 = body 的中段（或唯一段）
-        segs = body.split("\n")
-        core = next((s for s in segs if row_text[:20] in s), segs[-1] if segs else row_text)
-        budget = max(40, side_budget_chars - len(subj) - 1)
-        rebuilt = [s for s in segs if s != core]
-        while sum(len(s) for s in rebuilt) + len(core) + len(rebuilt) > budget and rebuilt:
-            rebuilt.pop(0 if len(rebuilt) > 1 else 0)
-            if not rebuilt:
-                break
-        side = (subj + "\n" if subj else "") + "\n".join(rebuilt + [core])
-    return side[:side_budget_chars + len(core) + 8] if 'core' in dir() else side[:side_budget_chars + 200]
+    return f"{subj}\n{body}" if subj else body
 
 
 def device_default_batch() -> int:

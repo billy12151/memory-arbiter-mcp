@@ -170,3 +170,20 @@ def test_unload_disable_wins_over_inflight_flag(tmp_path: Path) -> None:
     result = backend.unload(timeout=5.0, disable=True)
     assert result["ok"] is True
     assert backend.status()["disabled"] is True
+
+
+def test_row_window_production_spans(tmp_path):
+    """生产输入（精确行 span）下窗口= subject+对立行+邻句，不触截断。"""
+    from memory_arbiter.semantic_judge import row_window
+    from memory_arbiter.rowseg import segment_rows
+    c = "星澜的读超时 500 毫秒。\n样板行样板行。\n星澜的读超时 3 秒。"
+    rows = segment_rows("", c)
+    out = row_window(c, rows[0].start_offset, rows[0].end_offset, subject="星澜网关")
+    assert "500 毫秒" in out
+    assert "样板行" in out
+    assert out.startswith("星澜网关")
+    # 长对立行不截断
+    long_row = "很长的对立行" * 30
+    c2 = f"短句。\n{long_row}"
+    out2 = row_window(c2, len("短句。\n"), len("短句。\n") + len(long_row))
+    assert long_row in out2
