@@ -414,63 +414,6 @@ def score_conflict(raw: dict) -> dict[str, Any] | None:
     }
 
 
-def score_conflict_claims(raw: dict) -> dict[str, Any] | None:
-    """Gate-v2 G7b: per-channel metrics for the claims corpus (B =
-    deterministic claims×claims, C = claims×sentence KNN), plus the merged
-    totals. Row shape matches the conflict suite; `channel` rides the
-    corpus."""
-    conflict = raw.get("conflict_claims")
-    if conflict is None:
-        return None
-    valid = [row for row in conflict if not row["skipped_member_replay"]]
-
-    def _bucket(rows: list[dict]) -> dict[str, Any]:
-        sync = sum(1 for r in rows if r["sync"])
-        async_ = sum(1 for r in rows if r["async"])
-        miss = sum(1 for r in rows if r["notice_missing"])
-        identified = sync + async_
-        true_rows = [r for r in rows if r["label"] == "true_conflict"]
-        true_identified = sum(
-            1 for r in rows if r["label"] == "true_conflict" and (r["sync"] or r["async"])
-        )
-        identified_rows = [r for r in rows if r["sync"] or r["async"]]
-        return {
-            "n": len(rows),
-            "sync": {"count": sync, "rate": _pct(sync, len(rows))},
-            "async": {"count": async_, "rate": _pct(async_, len(rows))},
-            "miss": {"count": miss, "rate": _pct(miss, len(rows))},
-            "identified": {"count": identified, "rate": _pct(identified, len(rows))},
-            "recall": {
-                "count": true_identified,
-                "total": len(true_rows),
-                "rate": _pct(true_identified, len(true_rows)),
-            },
-            "precision": {
-                "count": true_identified,
-                "total": len(identified_rows),
-                "rate": _pct(true_identified, len(identified_rows)),
-            },
-        }
-
-    def _by_label(rows: list[dict]) -> dict[str, Any]:
-        labels = sorted({r["label"] for r in rows})
-        return {
-            label: _bucket([r for r in rows if r["label"] == label])
-            for label in labels
-        }
-
-    b_rows = [r for r in valid if r.get("channel") == "B"]
-    c_rows = [r for r in valid if r.get("channel") == "C"]
-    return {
-        "channel_b": _bucket(b_rows),
-        "channel_b_by_label": _by_label(b_rows),
-        "channel_c": _bucket(c_rows),
-        "channel_c_by_label": _by_label(c_rows),
-        "merged": _bucket(valid),
-        "skipped_member_replay": len(conflict) - len(valid),
-    }
-
-
 def score_conflict_comprehensive(raw: dict) -> dict[str, Any] | None:
     """0.17.0 Q1/H1 (owner D4): the headline conflict metric — 综合召回.
     conflict ∪ conflict_claims 两语料合并的 any-channel 口径：
@@ -688,12 +631,6 @@ def compute_perf(raw: dict) -> dict[str, Any] | None:
             )
             for r in with_receipt
         )
-        qwen_filter_vetoed = sum(
-            int(
-                ((r.get("deterministic_filter") or {}).get("internal_qwen_vetoed")) or 0
-            )
-            for r in with_receipt
-        )
         perf["conflict_window"] = {
             "n": len(valid),
             "receipt_n": len(with_receipt),
@@ -717,7 +654,6 @@ def compute_perf(raw: dict) -> dict[str, Any] | None:
                 else None
             ),
             "internal_qwen_confirmed": qwen_filter_confirmed,
-            "internal_qwen_vetoed": qwen_filter_vetoed,
             "pairs_examined_capped_rows": sum(
                 1
                 for r in with_receipt
@@ -1021,7 +957,7 @@ def render_markdown(scored: dict, gate_result: dict[str, Any] | None) -> str:
     comprehensive = scored.get("conflict_comprehensive")
     if comprehensive:
         lines += [
-            "## 冲突综合召回（D4 headline：conflict ∪ conflict_claims，any-channel）",
+            "## 冲突综合召回（D4 headline，any-channel）",
             "",
             f"- Recall = **{comprehensive['recall']['rate']}**（{comprehensive['recall']['count']}/{comprehensive['recall']['total']}）",
             f"- Precision = **{comprehensive['precision']['rate']}**（{comprehensive['precision']['count']}/{comprehensive['precision']['total']}）",
@@ -1040,9 +976,6 @@ def render_markdown(scored: dict, gate_result: dict[str, Any] | None) -> str:
             f"（回执级 direct 直出 {attribution['a_direct_verdicts_total']} ·"
             f" Qwen internal {attribution['a_qwen_internal_total']} ·"
             f" A-cross {attribution['a_qwen_cross_total']}）",
-            f"- claims 语料 identified：B = **{attribution['channel_b_identified']}** ·"
-            f" C = **{attribution['channel_c_identified']}**"
-            f"（C Qwen 派发 {attribution['channel_c_qwen_total']}）",
             "",
         ]
     perf = scored.get("perf")

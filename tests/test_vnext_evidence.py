@@ -2755,14 +2755,11 @@ def test_backlog_job_budget_stops_before_next_pair_not_during_inference(tmp_path
     # truncated flags that the check was bounded, not exhaustive
     # (second-round review).
     result.pop("elapsed_ms", None)
-    result.pop("claims_channel", None)  # 0.17.0 P2-5.3 通道回执键
-    result.pop("claims_channel_c", None)  # gate-v2 G6b 通道 C 回执键
     result.pop("judge_budget", None); result.pop("qwen_budget", None)  # Q1 additive receipt key（本用例 a_cross 扣池 1）
     # 0.17.0 P2-3/P2-4: rows receipt keys + budget-skipped pairs backlog
     result.pop("rows_mode", None)
     result.pop("rows_examined", None)
     result.pop("backlogged", None)
-    result.pop("claims_channel", None)
     # 0.17.1 攒批语义：pass1 逐对收对（慢后端在批前向里才走钟，pass1 内
     # 时钟不动 → 公平墙不咬），两对一次批前向各落一条 notice——公平墙
     # 语义从「逐对中断」变为「每块结算」，积压由 backlog 承接（不变式）。

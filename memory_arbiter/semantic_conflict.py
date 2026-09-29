@@ -19,17 +19,6 @@ from .constants import (
     EMBED_PREFIX_STS,
 )
 
-ACTION_TYPES = {
-    "value_changed",
-    "scope_changed",
-    "polarity_changed",
-    "source_of_truth_changed",
-    "lifecycle_changed",
-    "policy_changed",
-    "uncertain",
-}
-NON_ACTION_TYPES = {"equivalent", "compatible", "unrelated"}
-
 _REPLACEMENT_TERMS = [
     "以后以", "替换", "改为", "不再采用", "之前不对", "旧设计", "新设计",
     "新口径", "旧口径", "下线", "不公开", "公开", "不采用", "采用",
@@ -46,18 +35,6 @@ _STOPWORDS = {
     "一个", "两个", "这个", "那个", "使用", "采用", "固定", "不要", "不能",
     "不应", "不是", "已经完成",
 }
-
-_CJK_RE = re.compile(r"[一-鿿]")
-
-def evidence_is_cjk(left: dict[str, Any], right: dict[str, Any]) -> bool:
-    """True when either side's evidence/metadata carries CJK — the pair
-    prompt follows the evidence language (pair-v8); mixed pairs stay
-    Chinese (the Chinese prompt is the calibrated default)."""
-    for env in (left, right):
-        for key in ("quote", "content", "subject"):
-            if _CJK_RE.search(str(env.get(key) or "")):
-                return True
-    return False
 
 
 @dataclass
@@ -260,22 +237,6 @@ def _lineage_primary_version(text: str) -> "tuple[int, ...] | None":
     if not versions:
         return None
     return max(versions)
-# 0.17.0 D1 (owner 2026-09-23): version-like claims attrs are timeline
-# evolution, never opposing claims — the claims-channel counterpart of the
-# lineage veto above, applied to the attr axis. Pattern match (regex+vocab
-# blend, same style as _LINEAGE_MARKER_RE), NOT an enumerated allow-list:
-# the word-list route was retired once already (0.16.4 evolution domain
-# replaced it); pure vocab cannot cover variants like 客户端版本/release notes.
-# Word boundaries on the English vocabulary (adversarial review P2): plain
-# substrings matched build_command / tags / release_channel / docker-build
-# steps — real config conflicts got silently exempted. CJK terms need no
-# boundary (they carry their own).
-_VERSIONAL_ATTR_RE = re.compile(
-    r"版本|发版|\b(?:version|commit|revision|release|tag|build)\b",
-    re.IGNORECASE,
-)
-
-
 
 _VALUE_RE = re.compile(
     r"(?<![\w.])v?\d+(?:\.\d+){0,2}\s*"
@@ -345,28 +306,14 @@ def _normalized_values(text: str) -> list[str]:
     return values
 
 
-def coexistence_veto(
-    left: dict[str, Any],
-    right: dict[str, Any],
-    forward: "Any | None" = None,
-    reverse: "Any | None" = None,
-) -> str | None:
+def coexistence_veto(left: dict[str, Any], right: dict[str, Any]) -> str | None:
     """Return a deterministic coexistence reason code, or None when unknown.
-    0.17.1: extraction params retained for the single remaining internal
-    caller (decide_evidence passes none — quote-substring legacy path)."""
+    Dimension = the raw quote/content text (the extraction-shape callers and
+    the ``coexist_version_value_evolution`` value branch retired with the
+    slot-extraction engine, 0.17.1)."""
     left_text = str(left.get("quote") or left.get("content") or "").casefold()
     right_text = str(right.get("quote") or right.get("content") or "").casefold()
-    if forward is not None or reverse is not None:
-        left_dimension = " ".join(filter(None, (
-            getattr(forward, "attribute_a", "") if forward is not None else "",
-            getattr(reverse, "attribute_b", "") if reverse is not None else "",
-        ))).casefold()
-        right_dimension = " ".join(filter(None, (
-            getattr(forward, "attribute_b", "") if forward is not None else "",
-            getattr(reverse, "attribute_a", "") if reverse is not None else "",
-        ))).casefold()
-    else:
-        left_dimension, right_dimension = left_text, right_text
+    left_dimension, right_dimension = left_text, right_text
     dimension_markers = {
         "coexist_environment_mismatch": (("测试环境", "生产环境"), ("staging", "production"), ("dev", "prod")),
         "coexist_region_mismatch": (("中国区", "海外区"), ("us-east", "eu-west")),
@@ -383,11 +330,6 @@ def coexistence_veto(
             for a, b in pairs
         ):
             return code
-    if forward is not None:
-        va, vb = normalize_value(getattr(forward, "value_a", "")), normalize_value(getattr(forward, "value_b", ""))
-        version_shape = re.compile(r"^(?:v\d+(?:\.\d+)*|\d+\.\d+\.\d+(?:\.\d+)*)$", re.IGNORECASE)
-        if version_shape.match(va) and version_shape.match(vb):
-            return "coexist_version_value_evolution"
     evolution = (
         "替换为", "替换成", "升级为", "升级到", "迁移到", "迁移至", "不再采用",
         "改为", "改成", "切换到", "切换为", "换成", "变为", "变更为", "调整为",

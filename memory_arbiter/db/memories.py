@@ -562,7 +562,7 @@ class MemoriesStore:
         subject the caller could not read, and cross-workspace near-duplicates
         are not this check's business. ``limit`` caps the scan fallback used
         when no embedder/index is available (ORDER BY id keeps the cap
-        deterministic); the primary recall path is subject_tags_knn.
+        deterministic); the primary recall path is memory_summary_knn.
         """
         if not self._db_available:
             return []
@@ -609,12 +609,15 @@ class MemoriesStore:
     ) -> list[dict[str, Any]]:
         """0.17.0 P2-7: write-time duplicate-hint recall over memory_summary_vec.
 
-        Same rowid-IN pre-filter contract as subject_tags_knn; rows exist
-        only for ACTIVE memories (the summary index tracks the active set,
-        refresh_summary_vector deletes on exit). One extra embed per write
-        versus the subject-tags query it accompanies — retitle-tolerant
-        recall is the point (the subject gate alone killed retitle
-        near-duplicates).
+        Same rowid-IN pre-filter contract as the other vec KNN readers;
+        rows exist only for ACTIVE memories (the summary index tracks the
+        active set, refresh_summary_vector deletes on exit). The extra embed
+        per write buys retitle-tolerant recall — the subject gate alone
+        killed retitle near-duplicates. (0.17.1 review: the params list kept
+        a third element from the retired subject_tags_knn shape after the
+        SQL collapsed to one COALESCE placeholder, so every call hit
+        sqlite3.Error and silently returned [] — the scoped-recall test now
+        pins the working path.)
         """
         if (
             not self._db_available or not self.state.sqlite_vec_available
@@ -623,7 +626,7 @@ class MemoriesStore:
             return []
         requested_k = max(1, int(k))
         eligible_params: list[Any] = [
-            int(exclude_memory_id), workspace_canonical, workspace_canonical,
+            int(exclude_memory_id), workspace_canonical,
         ]
         try:
             query = """SELECT v.id AS id, m.subject AS subject, m.tags AS tags,
@@ -646,73 +649,6 @@ class MemoriesStore:
             return [dict(row) for row in rows]
         except sqlite3.Error:
             return []
-
-    def subject_tags_knn(
-        self,
-        query_embedding: list[float],
-        *,
-        k: int,
-        exclude_memory_id: int,
-        workspace_canonical: str | None,
-        conn: sqlite3.Connection | None = None,
-    ) -> list[dict[str, Any]]:
-        """KNN recall of same-workspace active rows over subject_tags_vec.
-
-        Returns the id/subject/tags/event_time fields the duplicate-hint
-        fine-ranking consumes (unlike active_subject_tag_rows it carries no
-        ingest_time). 0.16.12 P3-T2 rowid-IN rewrite: the workspace/exclusion
-        predicates live in an ``v.id IN (SELECT m.id FROM memories ...)``
-        subquery that sqlite-vec pushes into the KNN scan as a true pre-filter
-        (spike-verified), so ``k = requested_k`` with no window loop — foreign
-        workspaces can no longer crowd the window. Returns [] whenever the
-        index or the extension is unavailable — callers fall back to the
-        capped scan. ``conn``: optional caller-owned read connection.
-        """
-        if (
-            not self._db_available or not self.state.sqlite_vec_available
-            or not query_embedding or not str(workspace_canonical or "").strip()
-        ):
-            return []
-        requested_k = max(1, int(k))
-        eligible_params: list[Any] = [
-            int(exclude_memory_id), workspace_canonical, workspace_canonical,
-        ]
-        try:
-            query = f"""SELECT v.id AS id, m.subject AS subject, m.tags AS tags,
-                               m.event_time AS event_time, m.content AS content
-                        FROM subject_tags_vec v
-                        JOIN memories m ON m.id=v.id
-                        WHERE v.embedding MATCH ? AND k=?
-                          AND m.status='active'
-                          AND v.id IN (SELECT m2.id FROM memories m2
-                                       WHERE m2.status='active' AND m2.id != ?
-                                       AND (m2.workspace_canonical = ?
-                                            OR ((m2.workspace_canonical IS NULL
-                                                 OR m2.workspace_canonical = '')
-                                                AND m2.workspace = ?)))
-                        ORDER BY v.distance"""
-            params = [json.dumps(query_embedding), requested_k, *eligible_params]
-            if conn is not None:
-                rows = conn.execute(query, params).fetchall()
-            else:
-                with self.connection() as owned:
-                    rows = owned.execute(query, params).fetchall()
-        except sqlite3.Error:
-            return []
-        out: list[dict[str, Any]] = []
-        for row in rows[:requested_k]:
-            try:
-                tags = json.loads(row["tags"]) if row["tags"] else []
-            except (TypeError, ValueError):
-                tags = []
-            out.append({
-                "id": int(row["id"]),
-                "subject": str(row["subject"] or ""),
-                "tags": [str(tag) for tag in tags] if isinstance(tags, list) else [],
-                "event_time": row["event_time"],
-                "content": str(row["content"] or ""),
-            })
-        return out
 
     def upsert_subject_tags_vector(self, memory_id: int, embedding: list[float]) -> bool:
         """Publish/refresh one memory's subject+tags vector (write-time hint index).

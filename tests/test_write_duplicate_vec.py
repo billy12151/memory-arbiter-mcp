@@ -266,9 +266,9 @@ def test_vec_knn_filters_inactive_and_excludes_self(tmp_path: Path) -> None:
         "ok"
     ]
     query = CharHistogramEmbedder.embed_text(
-        "", WritePipeline._subject_tags_embed_text("KNN 过滤验证", ["vec"]),
+        "", MemoryTools._summary_embed_text("KNN 过滤验证", ["vec"], "body for KNN 过滤验证"),
     ).embedding
-    rows = tools.db.subject_tags_knn(
+    rows = tools.db.memory_summary_knn(
         query,
         k=10,
         exclude_memory_id=int(active["id"]),
@@ -277,10 +277,12 @@ def test_vec_knn_filters_inactive_and_excludes_self(tmp_path: Path) -> None:
     assert [row["id"] for row in rows] == [], "superseded rows must not be recalled"
 
 
-def test_vec_knn_window_grows_past_foreign_workspaces(tmp_path: Path) -> None:
-    """vec0's k-window is global: 30 closer rows from OTHER workspaces must
-    not starve the scoped recall (the growth ceiling is the unscoped active
-    count, evidence-knn style)."""
+def test_vec_knn_scoped_recall_excludes_foreign_workspaces(tmp_path: Path) -> None:
+    """0.16.12 P3-T2 rowid-IN pre-filter: the workspace/exclusion predicates
+    push INTO the vec0 scan, so 30 same-shape rows from OTHER workspaces
+    cannot crowd the k-window — the scoped nearest row is recalled exactly
+    (the subject-tags_vec read leg retired 0.17.1; the summary vector is the
+    live duplicate-hint recall)."""
     tools = make_vec_tools(tmp_path)
     # Foreign rows share most characters with the query text, so their
     # histograms sit closer than the target's own workspace peers.
@@ -289,9 +291,12 @@ def test_vec_knn_window_grows_past_foreign_workspaces(tmp_path: Path) -> None:
     target = _write(tools, "金营项目发版流程说明", ["release"], workspace="w")
     excluded = _write(tools, "完全无关的第二条", ["other"], workspace="w")
     query = CharHistogramEmbedder.embed_text(
-        "", WritePipeline._subject_tags_embed_text("金营项目发版流程说明", ["release"]),
+        "",
+        MemoryTools._summary_embed_text(
+            "金营项目发版流程说明", ["release"], "body for 金营项目发版流程说明",
+        ),
     ).embedding
-    rows = tools.db.subject_tags_knn(
+    rows = tools.db.memory_summary_knn(
         query, k=5, exclude_memory_id=int(excluded["id"]), workspace_canonical="w",
     )
     assert [row["id"] for row in rows] == [int(target["id"])]
@@ -306,7 +311,9 @@ def test_knn_failure_falls_back_to_scan_hint(
     def _raise(**kwargs):
         raise RuntimeError("vec exploded")
 
-    monkeypatch.setattr(tools.db, "subject_tags_knn", _raise)
+    # 0.17.0 P2-7 起 duplicate-hint 召回走 memory_summary_knn——fault
+    # injection 必须钉在活路径上，钉在已退役的 subject_tags_knn 上是假绿。
+    monkeypatch.setattr(tools.db, "memory_summary_knn", _raise)
     result = tools.memory_write(
         content="fallback body", subject="回退扫描验证", tags=["fb"], workspace="w",
     )

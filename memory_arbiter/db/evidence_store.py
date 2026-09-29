@@ -606,12 +606,11 @@ class EvidenceStore:
 
     def scan_rows(self, memory_id: int, memory_version: int) -> list[dict[str, Any]]:
         """0.17.0 P2-3.1: current-version row segments for the scan side's
-        INTERNAL examination. Same dict shape as scan_units — ``unit_index``
-        carries row_index on purpose so _examine_internal stays byte-for-byte
-        shared with the write side (whose internal rows land with the same
-        row indexes; the 0.17.0 detector bump retires the old unit-indexed
-        rows). Empty list = no rows published yet (pre-backfill), caller
-        falls back to units."""
+        INTERNAL examination. ``unit_index`` carries row_index on purpose so
+        _examine_internal stays byte-for-byte shared with the write side
+        (whose internal rows land with the same row indexes; the 0.17.0
+        detector bump retired the old unit-indexed rows and their selector).
+        Empty list = no rows published yet (pre-backfill)."""
         try:
             with self._db.connection() as conn:
                 rows = conn.execute(
@@ -638,12 +637,6 @@ class EvidenceStore:
             return decoded
         except sqlite3.Error:
             return []
-
-    def scan_units(self, memory_id: int, memory_version: int) -> list[dict[str, Any]]:
-        """0.17.0 C6: the legacy scan-units selector now serves ROW rows
-        (same dict shape: eid/text/offsets/content_hash/embedding). Kept for
-        the audit surface; the pipeline itself reads scan_rows."""
-        return self.scan_rows(memory_id, memory_version)
 
     @staticmethod
     def _blob_to_vector(blob: bytes) -> list[float]:

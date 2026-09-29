@@ -63,7 +63,7 @@ def candidate_cos_gate(
         if not vector:
             continue
         cos = vector_cosine(own_vec, vector)
-        # Degenerate-vector guard (same doctrine as _attr_cos_or_none): a
+        # Degenerate-vector guard: byte-identical embeddings carry zero signal — a
         # byte-identical hit vector carries ZERO discrimination — fake test
         # embedders collapse distinct texts onto one constant vector, a real
         # model never does. Treat as "no cosine evidence": pass the pair

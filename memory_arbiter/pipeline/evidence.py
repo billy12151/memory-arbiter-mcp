@@ -52,36 +52,6 @@ _TECHNICAL_REASONS = {
 }
 
 
-_NEGATION_COMPILED = None
-
-
-def _negation_opposition(left_text: str, right_text: str) -> bool:
-    """G6: the G4 negation vocab hitting EXACTLY ONE side — an independent
-    opposition signal, never mixed with the value-differ signal."""
-    global _NEGATION_COMPILED
-    import re as _re
-    from ..semantic_conflict import _NEGATION_WORDS
-    if _NEGATION_COMPILED is None:
-        _NEGATION_COMPILED = _re.compile(_NEGATION_WORDS, _re.IGNORECASE)
-    left_hit = bool(_NEGATION_COMPILED.search(left_text or ""))
-    right_hit = bool(_NEGATION_COMPILED.search(right_text or ""))
-    return left_hit != right_hit
-
-
-def _values_differ_norm(decision: Any) -> bool:
-    """G6 owner 修正: value-equal pairs are settled at adjudication — the
-    ordering bonus is only for opposing evidence; text pairs whose equality
-    cannot be decided score 0 (Qwen case c)."""
-    left_value = getattr(decision, "left_value", None)
-    right_value = getattr(decision, "right_value", None)
-    if not left_value or not right_value:
-        return False
-    try:
-        return normalize_value(left_value) != normalize_value(right_value)
-    except Exception:
-        return True
-
-
 def _retired_gate_slot_key(workspace: Any, attribute: Any, subject: Any) -> dict[str, str]:
     """Gate-v2 G3 slot identity without metadata provenance (owner 拍板):
     {"entity": workspace 名, "attribute": 抽取属性, "scope": subject 前 32 字}.
@@ -164,50 +134,6 @@ def _conflict_notice_payload(
     if extra:
         payload.update(extra)
     return payload
-
-
-def _attr_cos_or_none(
-    embedder: "Any", forward: "Any",
-) -> "float | None":
-    """P2-3.3 attr-vector cosine for the single-direction gate: None when the
-    attributes already match STRICTLY (no embed spent) or no embedder — the
-    gate then falls back to strict-equality-only (legacy/scan semantics)."""
-    from ..semantic_conflict import normalize_attribute, vector_cosine
-    if forward is None or embedder is None:
-        return None
-    attr_a = getattr(forward, "attribute_a", None)
-    attr_b = getattr(forward, "attribute_b", None)
-    if not attr_a or not attr_b:
-        return None
-    if normalize_attribute(str(attr_a)) == normalize_attribute(str(attr_b)):
-        return None
-    ea = embedder.embed_text(prefix=EMBED_PREFIX_STS, body=str(attr_a))
-    eb = embedder.embed_text(prefix=EMBED_PREFIX_STS, body=str(attr_b))
-    if not ea.embedding or not eb.embedding:
-        return None
-    # Degenerate-vector guard: byte-identical embeddings carry ZERO
-    # discrimination between the two attribute strings (fake embedders
-    # collapse distinct strings onto one vector; a real model never does).
-    # Reporting cos=1.0 here would wave mismatched attributes through on
-    # testimony the embedder cannot actually give — fall back to strict.
-    if list(ea.embedding) == list(eb.embedding):
-        return None
-    return vector_cosine(list(ea.embedding), list(eb.embedding))
-
-
-def _conflict_envelope(memory: dict[str, Any], quote: str) -> dict[str, Any]:
-    """0.17.0 Q1 (相分裂): pair envelopes were a job closure, now a pure
-    function shared by the internal and cross dispatch phases. Gate-v2 G3:
-    metadata.entity/scope retired — the prompt keeps the (now always empty)
-    metadata slot so the protocol shape is stable."""
-    return {
-        "quote": quote[:1000], "subject": str(memory.get("subject") or "")[:200],
-        "tags": list(memory.get("tags") or [])[:20],
-        "workspace_canonical": memory.get("workspace_canonical") or memory.get("workspace"),
-        "memory_id": int(memory.get("id") or 0), "version": int(memory.get("version") or 1),
-        "event_time": memory.get("event_time"),
-        "metadata": {},
-    }
 
 
 def _job_fair_deadline(semantic_worker: "SemanticConflictWorker", publish_done_at: "list[float]") -> "float | None":
@@ -855,24 +781,6 @@ class EvidencePipeline:
         return {"status": "incomplete", "reason": f"publish_{published.get('outcome')}",
                 "index_only": True, "notices_created": 0}
 
-    def process_conflicts(self, memory_id: int, snapshot: dict[str, Any]) -> dict[str, Any]:
-        """Standalone full-A entry (tests, direct callers): deterministic →
-        internal judge → A-cross dispatch, in the owner-D1 order with the
-        job-global pool. The write job does NOT use this — the wrapper in
-        tools.py calls the phase methods directly (确定性相 → internal → 派发相；
-        0.17.1 起 claim 对比通道 B/C 已退役)."""
-        ctx = self.conflicts_deterministic_phase(memory_id, snapshot)
-        terminal = ctx.get("terminal")
-        if terminal is None:
-            self.conflicts_internal_judge_phase(ctx)
-            self.conflicts_dispatch_phase(ctx)
-            result = self.conflicts_finalize_receipt(ctx)
-        else:
-            result = terminal
-        if terminal is None:
-            self.conflicts_job_level_notice_cap(ctx)
-        return self.conflicts_receipt_tail(ctx, result)
-
     def conflicts_deterministic_phase(self, memory_id: int, snapshot: dict[str, Any]) -> dict[str, Any]:
         """0.17.0 Q1 相分裂 (owner plan §3.2) — phase 1 of 3: indexing publish,
         G5 clean list, candidate collection/ordering, internal keeper
@@ -956,7 +864,6 @@ class EvidencePipeline:
             "repeatability_skipped": 0,
             "internal_found": 0,
             "internal_qwen_confirmed": 0,
-            "internal_qwen_vetoed": 0,
             "surfaced": 0,
             "surfaced_peer_ids": set(),
             "dropped_unlocalizable": 0,
@@ -1635,16 +1542,10 @@ class EvidencePipeline:
             ),
         )
 
-    def _judge_pair(
-        self, backend: Any, text_a: str, text_b: str,
-        retry_allowed: "bool | None" = None,
-    ) -> Any:
+    def _judge_pair(self, backend: Any, text_a: str, text_b: str) -> Any:
         """0.17.1: one pair through the mDeBERTa judge → PairVerdict. The
-        retry gate is vestigial for the batch engine (the child has no decode
-        retry) but the single-flight admission can still refuse under
-        concurrency — that surfaces as an error verdict, the fail-open path.
-        ``retry_allowed`` is accepted for call-site compatibility."""
-        del retry_allowed
+        single-flight admission can refuse under concurrency — that surfaces
+        as an error verdict, the fail-open path."""
         if hasattr(backend, "judge_pair"):
             try:
                 return backend.judge_pair(text_a, text_b)
@@ -1912,9 +1813,7 @@ class EvidencePipeline:
         per_pair_ms = int(judged_ms / max(1, len(judged)))
         for item in judged:
             verdict = item["verdict"]
-            self._tools._record_pair_sample(
-                pair_ms=per_pair_ms, forward=verdict, reverse=None,
-            )
+            self._tools._record_pair_sample(pair_ms=per_pair_ms)
             outcome = _judge_outcome(verdict, min_prob)
             if outcome == "error":
                 error_text = str(verdict.error or "")
@@ -2156,8 +2055,6 @@ class EvidencePipeline:
             result["candidate_gates"] = gate_rows
         if ctx["internal_qwen_confirmed"]:
             filter_summary["internal_qwen_confirmed"] = ctx["internal_qwen_confirmed"]
-        if ctx["internal_qwen_vetoed"]:
-            filter_summary["internal_qwen_vetoed"] = ctx["internal_qwen_vetoed"]
         if ctx["dropped_unlocalizable"]:
             # 0.17.0 P2-3.5 (owner ruling #9): dropped unlocalizable pairs are
             # never silent — the counter rides every completed receipt.
@@ -2188,7 +2085,7 @@ class EvidencePipeline:
         truncation-terminal branch, and process_conflicts all ride it (the
         tail was previously stamped three ways and had already drifted: the
         terminal branch forgot elapsed, finalize stamped pairs_examined: 0
-        unconditionally, breaking the §3.3 zero-values-never-appear rule).
+        unconditionally).
 
         0.17.1: the key is ``judge_budget`` (renamed from qwen_budget;
         harness runner/score read the new key in the same commit). The old

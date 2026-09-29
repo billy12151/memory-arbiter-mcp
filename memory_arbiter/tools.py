@@ -12,7 +12,7 @@ from typing import Any, Callable, cast
 from .acl import CallerWorkspace, WorkspaceScope, forbidden_payload, memory_public_stub, raw_workspace, visible_memory
 from .arbitration import compare_memories  # noqa: F401 (monkeypatch seam, see pipeline/read.py:226)
 from .config import Settings
-from .constants import EMBED_PREFIX_STS, EMBEDDING_MAX_SECTION_CHARS, EMBEDDING_N_CTX, EMBEDDING_RESERVED_TOKENS, SCAN_TASK_RECHECK_SECONDS, SCAN_TASK_STALE_DAYS, SEMANTIC_INFERENCE_TIMEOUT_MS, SEMANTIC_LOAD_TIMEOUT_MS, SEMANTIC_N_THREADS, SEMANTIC_PAIR_LONG_DECODE_TOKENS, SEMANTIC_PAIR_RING_SIZE, WORKSPACE_MIN_NAME_LEN, WORKSPACE_RECALL_ADMISSION, WORKSPACE_RECALL_CUTOFF, is_default_workspace_term
+from .constants import EMBED_PREFIX_STS, EMBEDDING_MAX_SECTION_CHARS, EMBEDDING_N_CTX, EMBEDDING_RESERVED_TOKENS, SCAN_TASK_RECHECK_SECONDS, SCAN_TASK_STALE_DAYS, SEMANTIC_INFERENCE_TIMEOUT_MS, SEMANTIC_LOAD_TIMEOUT_MS, SEMANTIC_N_THREADS, SEMANTIC_PAIR_RING_SIZE, WORKSPACE_MIN_NAME_LEN, WORKSPACE_RECALL_ADMISSION, WORKSPACE_RECALL_CUTOFF, is_default_workspace_term
 from .db import MemoryDB
 from .embedder import ManagedEmbedder
 from .models import TrustedApplyingContext, utc_now_iso
@@ -257,50 +257,22 @@ class MemoryTools:
             ),
         }
 
-    def _record_pair_sample(self, *, pair_ms: int, forward: Any, reverse: Any) -> None:
-        """A1 ring: one sample per examined pair (forward+reverse combined)."""
-        def token_sum(field: str) -> int | None:
-            values: list[int] = []
-            for signal in (forward, reverse):
-                value = getattr(signal, field, None)
-                if isinstance(value, int):
-                    values.append(value)
-            return sum(values) if values else None
-
-        self._pair_samples.append({
-            "pair_ms": int(pair_ms),
-            "prompt_tokens": token_sum("prompt_tokens"),
-            "generated_tokens": token_sum("generated_tokens"),
-            "retried": bool(
-                getattr(forward, "retried", False) or getattr(reverse, "retried", False)
-            ),
-            "at": time.time(),
-        })
+    def _record_pair_sample(self, *, pair_ms: int) -> None:
+        """A1 ring: one sample per examined pair. The Qwen decode telemetry
+        (prompt/generated tokens, retry flag) retired with the slot-extraction
+        engine — the ring carries wall-clock pair duration only."""
+        self._pair_samples.append({"pair_ms": int(pair_ms), "at": time.time()})
 
     def _pair_timing_summary(self) -> dict[str, Any]:
-        """Aggregates over the recent ring: separates queue competition
-        (long pair_ms with modest tokens) from long decodes and retries."""
+        """Aggregates over the recent ring: mean/p95 wall-clock pair duration."""
         samples = list(self._pair_samples)
         if not samples:
             return {"samples": 0}
         durations = sorted(int(item["pair_ms"]) for item in samples)
-        generated = [
-            int(item["generated_tokens"]) for item in samples
-            if isinstance(item.get("generated_tokens"), int)
-        ]
-        retried = sum(1 for item in samples if item.get("retried"))
-        long_decode = sum(
-            1 for item in generated if item >= SEMANTIC_PAIR_LONG_DECODE_TOKENS
-        )
         return {
             "samples": len(samples),
             "mean_pair_ms": round(sum(durations) / len(durations)),
             "p95_pair_ms": durations[max(0, math.ceil(0.95 * len(durations)) - 1)],
-            "retried_ratio": round(retried / len(samples), 3),
-            "long_decode_ratio": round(long_decode / len(samples), 3),
-            "mean_generated_tokens": (
-                round(sum(generated) / len(generated)) if generated else None
-            ),
         }
 
     def _enqueue_local_text_index(
@@ -1449,7 +1421,6 @@ class MemoryTools:
                 "ckpt_sha8": None,
                 "model_dir": str(self.settings.semantic_conflict_mdeberta_model_dir or ""),
                 "model_version": None,
-                "model_state": "unloaded",
                 "device": "cpu",
                 "batch_size": int(self.settings.semantic_conflict_mdeberta_batch),
                 "last_error": None,
@@ -1559,38 +1530,6 @@ class MemoryTools:
                 disable_result["warnings"] = ["semantic backend disabled for new jobs, but current inference is still in flight"]
             return disable_result
         return {"outcome": "invalid_action", "valid_actions": ["status", "pause", "resume", "enable", "unload", "disable"]}
-
-    def _enqueue_semantic_conflict_check(
-        self, memory_id: int | None, record: Any, *, after_evidence: bool = False,
-        trusted_applying_context: TrustedApplyingContext | None = None,
-    ) -> dict[str, Any]:
-        if memory_id is None:
-            return {"status": "skipped", "reason": "backup_only"}
-        if not after_evidence:
-            return {"status":"deferred","reason":"waiting_for_evidence_index"}
-        if self.settings.semantic_conflict_on_write == "off":
-            return {"status": "off"}
-        stored = self.db.get_memory(int(memory_id)) or {}
-        content = (record.get("content") if isinstance(record, dict) else getattr(record, "content", None))
-        if content is None:
-            content = stored.get("content") or ""
-        version = int(stored.get("version") or self.db.get_memory_version(int(memory_id)) or 1)
-        task_id = f"semantic:{int(memory_id)}@{version}"
-        snapshot = {
-            "memory_id": int(memory_id),
-            "version": version,
-            # 0.16.12 P2-T2: prefer the maintained content_sha column over a
-            # fresh hash (identical value by construction; NULL falls back).
-            "content_hash": (
-                str(stored.get("content_sha") or "")
-                or hashlib.sha256(str(content or "").encode("utf-8")).hexdigest()
-            ),
-            "task_id": task_id,
-            "dedupe_key": task_id,
-        }
-        if trusted_applying_context is not None:
-            snapshot["trusted_applying_context"] = trusted_applying_context.to_dict()
-        return self._semantic_worker.enqueue(int(memory_id), snapshot)
 
     def _process_semantic_conflict_job(self, memory_id: int, snapshot: dict[str, Any]) -> dict[str, Any]:
         # C2 (0.17.0 worker merge): the job IS the indexer now. index_only

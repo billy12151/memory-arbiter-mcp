@@ -5,6 +5,20 @@ Versions follow semantic versioning.
 
 ## [0.17.1 追加] — 未发版（claim 对比通道退役 + 判定输入上下文化，owner 2026-09-28 拍板）
 
+### Fixed (0.17.0+0.17.1 独立 review 批，2026-09-29)
+
+- **P1 `memory_summary_knn` 参数/占位符错位——写时重复提示的语义召回通道自 0.17.0 P2-7 起整体静默失效。** SQL 收敛为 COALESCE 单 workspace 占位符后，params 列表仍沿用退役 subject_tags_knn 形状的 3 元素（多一个 workspace 参数）→ 每次调用 sqlite3.Error 被 except 臂吞掉返回 []，所有写入静默降级到 `active_subject_tag_rows` 扫描兜底。修复参数列表；重指向的 scoped-recall 测试（原 fault-injection 钉在已退役的 subject_tags_knn 上，假绿）现钉住活路径。
+- 假绿测试修复：`test_knn_failure_falls_back_to_scan_hint` 的 fault injection 重指向 `memory_summary_knn`；`test_vec_knn_*` 两个直调测试改骑 summary 向量空间（query 用 `_summary_embed_text` 口径构造）。
+
+### Removed (独立 review 死代码清扫——零引用项逐一 grep 实证，约 30 项)
+
+- **换引擎残留**：`SEMANTIC_PAIR_MAX_ATTEMPTS`/`SEMANTIC_PAIR_RETRY_*` 三常量（pair-v6 截断重试协议）、`SEMANTIC_PAIR_LONG_DECODE_TOKENS` 与 A1 环的 token/retry 死字段（`PairVerdict` 无此属性，`semantic_pair_timing` 的 `retried_ratio`/`long_decode_ratio`/token 指标结构性恒零——按 §3.3 零值不出场惯例裁撤，环保留下 pair_ms 统计）、`ACTION_TYPES`/`NON_ACTION_TYPES`（Qwen action-type 词表）、`evidence_is_cjk`（pair-v8 语言路由）、`coexistence_veto` 的 forward/reverse 抽槽参数与 `coexist_version_value_evolution` 分支（唯一调用方两参形态）、`_judge_pair` 的 `retry_allowed` 形参、`internal_qwen_vetoed` 恒零计数器（含 eval/score 读取端）、`_enqueue_semantic_conflict_check` 死方法（C2 合并后唯一调用方被删，残留旧两队列契约，误调用会静默丢索引）。
+- **claims 退役残留**：`_VERSIONAL_ATTR_RE`（claims D1 版本豁免正则）、eval `gen_claims_corpus.py` 整文件、`score_conflict_claims()` 死函数、runner 的 claims 转发分支与恒 None `channel` 键、score 报告的恒零 "claims 语料 identified" 行与过期 "∪ conflict_claims" 标题、golden 生成器的不可达 claims 条目（重生成 golden 零漂移实证）、`tests/test_qwen_budget_reorder.py` 孤儿常量、`test_vnext_evidence.py` 重复 pop 退役键。
+- **单元向量/旧链路残留**：`EvidenceStore.scan_units`（audit 表面无受益人）、`subject_tags_knn` 读腿 + `db/core.py` 门面（0.17.0 P2-7 起 duplicate-hint 走 `memory_summary_knn`，vec 表写入保留服务 C4 排序）、`_enqueue_semantic_conflict_check`（见上）、`BACKLOG_STATUSES`、`EVIDENCE_QUEUE_MAX_SIZE`（C2 合并后 SEMANTIC_QUEUE_MAX_SIZE 接管）、`OperationsPipeline.wait_evidence_worker_drained` 零调用转发层。
+- **其他**：`_negation_opposition`/`_NEGATION_COMPILED`/`_values_differ_norm`/`_attr_cos_or_none`/`_conflict_envelope`（G6 收尾/判定上下文化后孤儿化）、`EvidencePipeline.process_conflicts`（相分裂后零调用编排）、`PAIR_SCORE_W_OVERLAP`、`SEMANTIC_RESIDENT`、`SCAN_PIPELINE_KICK_*` 三常量（scan_pipeline 本地 DEFAULT_* 同值接管）、`WRITE_SIMILAR_SUBJECT_RATIO`/`WRITE_SIMILAR_CONTENT_COSINE`（P2-7 双轴规则接管）与只调死旋钮的 `eval/sweep_similar_threshold.py`、import 即崩的 `eval/diagnose_pair_stages.py`/`diagnose_en_pair.py`（引用已删的 `IsolatedGGUFSemanticBackend`/`evidence_knn`）、`_ASCII_RUN_RE`（v0.3.0 时代最老孤儿）、semantic_status 回退字典的 `"model_state"` 幽灵键。
+
+## [0.17.1 追加] — 未发版（claim 对比通道退役 + 判定输入上下文化，owner 2026-09-28 拍板）
+
 ### Removed
 - **claim 对比通道整体退役**：通道 B（claims×claims：exact/vector 车道）、通道 C（claims×sentences）、单边桥、scan 慢道 claims 腿。理由：claim 属性无实体绑定（"数据库=MySQL" 与另一系统的 "数据库=Oracle" 无法区分），真实场景误报面大；通道 C harness 实测真召回 1/10。claims **整体退役**（owner 2026-09-29 拍板连表删）：`memory_claims`/`memory_claim_vec` 两表 DDL 删除、存量库启动幂等 DROP；`claims.required` 写入门、`memory_repair(task='claims_backfill')`、写入/编辑/继承/回执全链退役，claims 参数出 schema（未知键软着陆警告）。
 - 覆盖句跳过（claim 覆盖的句子不再被排除出通道 A）随退役删除——否则 claim 覆盖行成检测死区。

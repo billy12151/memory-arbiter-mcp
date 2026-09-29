@@ -506,19 +506,6 @@ class MemoryDB:
             workspace_canonical=workspace_canonical,
         )
 
-    def subject_tags_knn(
-        self,
-        query_embedding: list[float],
-        *,
-        k: int,
-        exclude_memory_id: int,
-        workspace_canonical: str | None,
-    ) -> list[dict[str, Any]]:
-        return self.memories.subject_tags_knn(
-            query_embedding, k=k, exclude_memory_id=exclude_memory_id,
-            workspace_canonical=workspace_canonical,
-        )
-
     def upsert_subject_tags_vector(self, memory_id: int, embedding: list[float]) -> bool:
         return self.memories.upsert_subject_tags_vector(memory_id, embedding)
 

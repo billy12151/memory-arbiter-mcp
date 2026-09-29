@@ -137,8 +137,6 @@ class OperationsPipeline:
     def current_client(self) -> "str | None":
         return self._tools.current_client()
 
-    def wait_evidence_worker_drained(self, *args: Any, **kwargs: Any) -> bool:
-        return self._tools.wait_evidence_worker_drained(*args, **kwargs)
 
     def wait_semantic_worker_drained(self, *args: Any, **kwargs: Any) -> bool:
         # C2: replay's B-D2 guarantee (complete receipt ⇒ index persisted)

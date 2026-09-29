@@ -13,8 +13,9 @@ Contract (plan §6 + review A7):
   the backlog starvation goes from silent-and-unbounded to visible-and-
   bounded (owner intent). Evictions are counted, never hidden.
 - The semantic worker consumes pending rows ONLY when the job queue is empty
-  (new writes always win); a stored extraction replays through the
-  deterministic gates without a fresh Qwen call.
+  (new writes always win); a stored extraction (legacy rows only — new
+  entries never carry one) replays through the deterministic gates without
+  a fresh judge call.
 """
 
 from __future__ import annotations
@@ -29,8 +30,6 @@ if TYPE_CHECKING:
     from .core import MemoryDB
 
 CONFLICT_BACKLOG_MAX = 500  # owner-fixed cap; eviction counter reports overflow
-
-BACKLOG_STATUSES = ("pending", "done", "stale")
 
 
 def conflict_backlog_ddl() -> str:

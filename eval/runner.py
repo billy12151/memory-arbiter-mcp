@@ -474,11 +474,6 @@ def _remember_envelope(
         "metadata": metadata,
         "agent_id": EVAL_AGENT,
     }
-    # Gate-v2 G7b: claims ride the write (attr/value pairs; the server's
-    # grounding contract requires value ⊂ content — the corpus loader
-    # asserts that before anything is written).
-    if envelope.get("claims"):
-        data["claims"] = envelope["claims"]
     started = time.perf_counter()
     result = tools.memory("remember", data)
     elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
@@ -600,9 +595,6 @@ def run_conflict_suite(
             {
                 "pair_id": pair["pair_id"],
                 "label": pair["label"],
-                # Gate-v2 G7b: B/C channel tag from the claims corpus
-                # (absent for the regular conflict corpus).
-                "channel": pair.get("channel"),
                 "skipped_member_replay": left_id is None or right_id is None,
                 "sync": None,
                 "async": None,
@@ -750,7 +742,7 @@ def main() -> int:
         "--qwen-model",
         type=Path,
         default=None,
-        help="语义冲突 Qwen GGUF（conflict 套件）",
+        help="语义判定 mDeBERTa ckpt 路径（conflict 套件；参数名保留自 Qwen 时代）",
     )
     parser.add_argument("--out", type=Path, default=REPO / "eval" / "results")
     parser.add_argument("--label", default="run", help="产物文件名标签")
@@ -948,8 +940,6 @@ def main() -> int:
         "batch_find_consistency": batch_consistency,
         "similarity": similarity,
         "conflict": conflict,
-        # Gate-v2 G7b: the claims corpus results (B/C channels), same row
-        # shape as conflict rows + a "channel" field from the corpus.
     }
     args.out.mkdir(parents=True, exist_ok=True)
     out_path = args.out / f"{args.suite}-{args.label}.json"

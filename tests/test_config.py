@@ -1070,7 +1070,6 @@ from memory_arbiter.constants import (
     EMBEDDING_RESERVED_TOKENS,
     REMOVED_ENV_NAMES,
     SEMANTIC_PRELOAD,
-    SEMANTIC_RESIDENT,
 )
 from memory_arbiter.db import MemoryDB
 from memory_arbiter.db.meta import vec_table_dimension
@@ -1311,10 +1310,8 @@ def test_semantic_mdeberta_ckpt_alone_auto_enables_and_preloads(
     assert status["enabled"] is True
     assert status["configured"] is True
     assert status["engine"] == "mdeberta"
-    # preload/resident froze to true: a configured checkpoint loads at startup
-    # and stays resident.
+    # preload froze to true: a configured checkpoint loads at startup.
     assert SEMANTIC_PRELOAD is True
-    assert SEMANTIC_RESIDENT is True
 
 
 def test_semantic_legacy_model_path_warns_and_does_not_enable(

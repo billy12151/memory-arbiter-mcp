@@ -121,32 +121,13 @@ SEMANTIC_JOB_TIMEOUT_MS = 5000
 SEMANTIC_INFERENCE_TIMEOUT_MS = 30000
 SEMANTIC_LOAD_TIMEOUT_MS = 120000
 SEMANTIC_MIN_PAIR_BUDGET_MS = 1000
-# Pair-extraction feedback retry (pair-v6): a single protocol invalid output
-# (over-limit field / truncated JSON / wrong schema) earns one retry with a
-# feedback turn. Truncation retries shrink the evidence quotes and widen the
-# output budget — worst-case n_ctx: system(~250) + metadata(~101) +
-# 2x400-char quotes(~460) + previous raw(<=384) + feedback(~30) + 384 output
-# ~= 1610 < 2048; the truncation retry (~240-char quotes, 512 output) lands
-# lower still. Unknown-field/backend failures never retry.
-SEMANTIC_PAIR_MAX_ATTEMPTS = 2
-SEMANTIC_PAIR_RETRY_QUOTE_CHARS = 240
-# pair-v10（owner 2026-09-25 行上下文方案，对抗 review P2）：truncation retry
-# 的渲染必须同步缩 context——不缩则双长行+双侧满 context 的 retry 形态被
-# n_ctx 守卫确定性关死（est×1.3+64+512 ≥ 2048），长对一次 invalid 即终局。
-SEMANTIC_PAIR_RETRY_CONTEXT_CHARS = 120
-SEMANTIC_PAIR_RETRY_MAX_TOKENS = 512
 # A1 ring (0.15.14): recent examined-pair samples kept for status/doctor
-# aggregation (mean/p95 pair_ms, retried ratio, long-decode ratio). A sample
-# whose generated tokens reach this share of the 384-token output budget
-# counts as a long decode — the slow-but-valid rambling/copy mode that
-# neither queue competition nor retries explain.
+# aggregation (mean/p95 pair_ms).
 SEMANTIC_PAIR_RING_SIZE = 20
-SEMANTIC_PAIR_LONG_DECODE_TOKENS = 256
 # C2 (0.17.0 unit retirement): the worker merge moved indexing into the
 # semantic job, so this queue now carries the combined index+detect load —
 # it inherits the old evidence-queue watermark (200) instead of 100.
 SEMANTIC_QUEUE_MAX_SIZE = 200
-EVIDENCE_QUEUE_MAX_SIZE = 200
 # C2: wall-clock cap for the job's embed+publish phase. Normal batched embeds
 # are ~300ms/memory; a GPU rebuild-class stall must fail the job fast
 # (incomplete → retry) instead of parking the single worker thread and
@@ -293,13 +274,11 @@ CLAIMS_MAX_NOTICES_PER_WRITE = 5
 #         + 0.20*values_differ(normalized unequal) + 0.15*negation
 # Order-only boundary invariant: a mis-rank wastes budget, never flips a
 # verdict. Weights are initial values — recalibrated at G7 (五轮基线).
-PAIR_SCORE_W_OVERLAP = 0.40
 PAIR_SCORE_W_CONFLICT_BAND = 0.40
 PAIR_SCORE_W_NUMERIC_ROUTE = 0.25
 PAIR_SCORE_W_VALUES_DIFFER = 0.20
 PAIR_SCORE_W_NEGATION = 0.15
 SEMANTIC_PRELOAD = True
-SEMANTIC_RESIDENT = True
 
 # scheduled-task guidance notice (scan_log.jsonl freshness): a library whose
 # newest completed scan is older than this, or that has never completed one,
@@ -313,28 +292,6 @@ SCAN_CHAIN_STALE_HOURS = 1
 # would re-read scan_log.jsonl end to end.
 SCAN_TASK_RECHECK_SECONDS = 3600
 
-# Write-time duplicate hint: subject gate over candidate recall, then a
-# content-confirmation gate (owner 2026-09-16 redesign, three-measurement
-# evidence from the eval harness). The old tag-Jaccard second gate is GONE:
-# on the real library it blocked true cross-habit rewrites (duplicate writes
-# whose tags drifted, Jaccard 0.29–0.70) while waving through same-subject
-# serials (98% of subject-similar pairs are same-topic continuations, not
-# duplicates — content-similarity median 0.15). The subject bar 0.95→0.80
-# same day (gate only fired at ratio ≥0.968, missing natural-suffix
-# rewrites; 0.80 recovers 8/12 on the natural-gradient corpus, 0/36 false
-# positives — see eval/sweep_similar_threshold.py).
-# Content gate: full-body char-trigram cosine (semantic_conflict._char_ngrams
-# + _cosine, the deterministic pre-filter's own implementation) ≥ 0.40.
-# Calibration on 14 positives / 154 negatives (real library + corpus):
-# negatives top out at 0.374, positives ≥0.427 → 0.40 sits mid-band with
-# recall 11/14 and 0 false positives. Bodies under the char floor skip the
-# confirmation and hint anyway flagged low_confidence (set variance is too
-# high on short texts; prefer recall). Vector confirmation was measured and
-# REJECTED: paraphrase-type near-dups (0.87–0.92) and serials (0.81–0.93)
-# are inseparable at 0.5B-embedding resolution — that split belongs to the
-# Qwen scan line, not this millisecond sync channel.
-WRITE_SIMILAR_SUBJECT_RATIO = 0.8
-WRITE_SIMILAR_CONTENT_COSINE = 0.4
 # 0.17.0 P2-7 校准轮（cand1 数据）：双轴 OR 规则——(subject≥0.45 且
 # content≥0.22) 或 (subject≥0.80 且 content≥0.15)。语料实测分布：真近重复
 # (含 noisy 改写) s∈[0.32,1.0]/c∈[0.17,0.74]，组内样板互撞带 s≈0.10/c∈
@@ -428,11 +385,6 @@ BATCH_READ_FULL_BUDGET_MAX_BYTES = 100 * 1024
 # keep the MAX_TAGS=100 bound; the total cap applies to the merged on-row set.
 MAX_MEMORY_TOTAL_TAGS = 32
 
-# Pipeline kick defaults: one kick is a bounded synchronous batch (the task
-# re-kicks until complete; no resident walker per §6⑦).
-SCAN_PIPELINE_KICK_TIME_BUDGET_S = 45.0
-SCAN_PIPELINE_KICK_MAX_MEMORIES = 400
-SCAN_PIPELINE_NEIGHBOR_K = 10
 # 0.16.2 §1.5: machine-decidable check routes only generate within the top-3
 # neighbour ranks; notify routes keep the full top-10 (real-conflict recall
 # has no threshold). A rank tightening, not an absolute distance band.

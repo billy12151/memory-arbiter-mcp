@@ -58,8 +58,6 @@ def test_job_qwen_budget_pool_arithmetic() -> None:
 # ── 共享场景构造 ────────────────────────────────────────────────────────────
 
 _OWN_ROWS = ("连接池上限为 99，队列长度为 99。", "连接池上限为 100，队列长度为 100。")
-_OWN_CLAIM_RENDER = "连接池上限=99"
-_OWN_CLAIM = {"attr": "连接池上限", "value": "99"}  # grounding：value 须为正文子串
 
 
 def _subject_hit(peer: dict[str, Any]) -> dict[str, Any]:

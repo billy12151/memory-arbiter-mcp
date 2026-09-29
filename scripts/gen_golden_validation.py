@@ -73,10 +73,7 @@ FIELD_KIND: dict[str, str] = {
     "authorized": "none", "batch": "none", "batch_size": "int_range",
     "before_time": "iso8601", "candidate_key": "shape", "canonical": "str_len",
     "chosen_value": "str_len",
-    # "claims" (0.17.0 P2-5) predates this table's last regen — its custom
-    # validator (attr/value caps, word counts) has no FIELD_KIND mapping; "manual"
-    # records the legal-shape case without inventing hostile injections.
-    "claims": "manual", "clear": "none", "confidence": "float_unit",
+    "clear": "none", "confidence": "float_unit",
     "conflict_id": "int_id", "conflict_point": "str_len", "content": "bytes",
     "content_hash": "none", "content_mode": "none", "debug_ranking": "none",
     "decided_by": "none", "decisions": "none", "deduplicate": "none", "deep": "none",
@@ -128,7 +125,7 @@ LEGAL_SAMPLE: dict[str, Any] = {
     "after_id": 1, "alias": "alias-x", "anchor_memory_id": 1, "apply_plan": [{"memory_id": 1}],
     "audit_id": 1, "authorized": True, "batch": 10, "batch_size": 10,
     "before_time": "2026-12-31T00:00:00+00:00", "candidate_key": {"k": "v"},
-    "canonical": "ws", "chosen_value": "v", "claims": [], "clear": False, "confidence": 0.5,
+    "canonical": "ws", "chosen_value": "v", "clear": False, "confidence": 0.5,
     "conflict_id": 1, "conflict_point": "port", "content": "body text",
     "content_hash": "deadbeef", "content_mode": "preview", "debug_ranking": False,
     "decided_by": "owner", "decisions": [], "deduplicate": True, "deep": False,
@@ -150,7 +147,7 @@ LEGAL_SAMPLE: dict[str, Any] = {
     "protection_level": "normal", "queries": [{"id": "q1", "query": "hello"}],
     "query": "hello", "query_embedding": [0.1, 0.2], "reason": "because",
     "ref": "chat", "remove_tags": ["t"], "resolution_memory_id": 1,
-    "results": [{"memory_id": 1, "claims": []}], "scope": "sc",
+    "results": [{"memory_id": 1}], "scope": "sc",
     "slow_lane": False,
     "slot_key": {"s": "v"}, "source": "scan", "source_ref": "ref",
     "source_type": "agent_generated", "span": {"start": 0}, "spans": {"1": {"start": 0}},
