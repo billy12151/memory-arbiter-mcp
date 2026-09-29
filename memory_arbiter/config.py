@@ -240,15 +240,18 @@ class Settings:
                 "auto-enabled (and preloaded at startup). Set enabled=false to disable."
             )
         mdeberta_min_prob = semantic_cfg.get("mdeberta_notice_min_prob")
-        try:
-            mdeberta_min_prob_val = (
-                max(0.0, min(1.0, float(mdeberta_min_prob))) if mdeberta_min_prob is not None else 0.80
-            )
-        except (TypeError, ValueError):
-            mdeberta_min_prob_val = 0.80
-            config_warnings.append(
-                f"semantic_conflict.mdeberta_notice_min_prob={mdeberta_min_prob!r} invalid; using 0.80"
-            )
+        # 标准 helper 链：NaN/Inf/越界全部走警告（手写 max/min 链会把 NaN
+        # 静默吞成 1.0 = 正式 notice 永不出的配置错误）。
+        mdeberta_min_prob_val = clamp_float(
+            parse_float(
+                mdeberta_min_prob, 0.80,
+                name="semantic_conflict.mdeberta_notice_min_prob",
+                warnings=config_warnings,
+            ),
+            0.0, 1.0,
+            name="semantic_conflict.mdeberta_notice_min_prob",
+            warnings=config_warnings,
+        )
 
         settings = cls(
             db_path=pick_env_path("db_path", "MEMORY_ARBITER_DB_PATH", cwd / "memory_arbiter.sqlite3"),

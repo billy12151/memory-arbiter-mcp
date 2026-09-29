@@ -302,3 +302,52 @@ def test_worker_idle_drain_skipped_when_off(tmp_path: Path) -> None:
     tools.settings.semantic_conflict_on_write = "sync"
     processed = tools._evidence.drain_conflict_backlog(limit=2)
     assert processed == 1
+
+
+def test_drain_judge_pool_terminates(tmp_path: Path, monkeypatch) -> None:
+    """0.17.1 review P0 回归：判定池分支的条目 pass2 前不 complete 且
+    processed 不增，必须同时进 take_next 排除表——否则 while 每轮重取同一
+    头部条目无限循环（judge_pool 无限膨胀）。"""
+    import signal
+
+    sys.path.insert(0, str(REPO / "tests"))
+    from test_vnext_evidence import make_tools
+
+    tools = make_tools(tmp_path)
+    tools.settings.semantic_conflict_on_write = "sync"
+    meta = {"entity": "svc", "scope": "prod"}
+    a = tools.memory_write(
+        content="连接池上限为 10。", subject="a", tags=[], metadata=meta)["data"]
+    b = tools.memory_write(
+        content="连接池上限为 99。", subject="b", tags=[], metadata=meta)["data"]
+    assert tools.wait_semantic_worker_drained(timeout=5)
+    store = tools.db.conflict_backlog
+    result = store.enqueue(
+        candidate_key_hash="kjp-1",
+        left_memory_id=a["id"], left_version=1,
+        right_memory_id=b["id"], right_version=1,
+        left_text="连接池上限为 10。", right_text="连接池上限为 99。",
+        pair_score=0.7,  # 无 extraction → 走判定池分支
+    )
+    assert result["outcome"] == "queued"
+
+    from memory_arbiter.semantic_judge import PairVerdict
+
+    class _StubBackend:
+        def judge_pairs(self, pairs):
+            return [PairVerdict("no_conflict", {}, None, "stub") for _ in pairs]
+
+    monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: _StubBackend())
+
+    def _handler(signum, frame):
+        raise TimeoutError("drain did not terminate — judge-pool livelock")
+
+    old = signal.signal(signal.SIGALRM, _handler)
+    signal.alarm(15)
+    try:
+        processed = tools._evidence.drain_conflict_backlog(limit=2)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)
+    assert processed == 1
+    assert store.counts().get("done") == 1, "判定 clear 条目必须出队"

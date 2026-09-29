@@ -14,7 +14,10 @@ sys.path.insert(0, str(REPO))
 
 tag = sys.argv[1]
 DOC = {
-    "qxq": None,                       # 产品现状（EBD_PREFIX_STS=query 前缀）
+    # 历史 qxq 消融臂（EMBED_PREFIX_STS 曾=query 前缀）。产品侧该常量已改
+    # 空串（裸文本，0.17.0 终局），qxq 与 bare 两臂现恒等——保留仅为结果
+    # 文件名兼容。
+    "qxq": None,
     "bare": "",                        # 写入侧裸文本
     "official": "title: none | text: ",  # EmbeddingGemma 官方文档提示
 }
@@ -37,7 +40,7 @@ if val is not None:
             mod.EMBED_PREFIX_STS = val
     print(f"[prefix patch] doc side EMBED_PREFIX_STS={val!r}; query side = product default")
 else:
-    print("[prefix patch] none (product default qxq)")
+    print("[prefix patch] none (product default = bare text; same as the qxq arm)")
 
 sys.argv = [
     "runner", "--suite", "recall",

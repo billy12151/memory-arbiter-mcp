@@ -15,6 +15,20 @@ Versions follow semantic versioning.
 - `conflicts` 回执键 `claims_channel`/`claims_channel_c`/`rows_covered_by_claims` 移除（零键缺席惯例）。
 - embedder 新增 `MEMORY_ARBITER_EMBED_CPU=1` 环境开关：强制 embedding 走 CPU（同机 GPU 训练让路）。
 
+### Fixed (0.17.1 追加包：d00ffa6..HEAD 两轮 review 修复批——41 confirmed / 16 项代码修复 + 清扫，2026-09-29)
+
+完整报告：`docs/mema-v0.17.1-两轮review-2026-09-29.md`（BillyProject/docs）。
+
+- **P0 backlog drain 死循环**：判定池条目 pass2 前不 complete/不计数/不进 `take_next` 排除表 → worker 无限重取同一头部条目（入池即进排除表修复 + 终止回归钉）。
+- **P0 存量库 claims 向量影子表孤儿**：sqlite-vec 0.1.x DROP vec0 主表不连带清影子表 → 启动 DROP 后补 `memory_claim_vec_%` sweep（owner 拍板：删）；vec0 模块未装载的库上 DROP 报错改为跳过记账（装 vec 后首启再清）。
+- **P1 硬超时误触发崩溃熔断**：`TimeoutError ⊂ OSError` 被 child-death 子句吞 → 3 次超时永久禁用判定引擎（恢复 GGUF 时代 `except TimeoutError: raise` 防线 + 回归钉）。
+- **P1 测试网假绿**：4e8d987 删 `ModelSignal` 后 4 个测试文件残留旧协议 fake，NameError 被 `_judge_pair_compat` 吞掉静默走 fail-closed → prefilter 三处补 stub/语义修正（negative fake 改 candidate=False 走 no_conflict 通道）+ e2e `_FormatBackend` 迁 judge_pair(s) 协议（mutation probe 验证覆盖活性）。
+- **P2 七项**：audit.py `semantic_model` 溯源恒 null（漏改消费者，改读 mdeberta_ckpt）；`model_notices_capped` 计数随积压膨胀（只计真降级）；`CONFLICT_DETECTOR_VERSION` 未随 722eaee 判定输入定版换代（bump `mdeberta-v4m-v3` → 启动 re-arm 全量重扫，与本就要求的发版前置一致）；`SEMANTIC_JUDGE_CONTEXT_BEFORE/AFTER` 只接 A-cross（internal/backlog 补齐，三通道判定输入口径统一）；`notice_min_prob` 解析 NaN 吞成 1.0（改 parse_float+clamp_float 链）；降级 banner 指路无效命令（按缺失项分路指引）；eval runner 产物补记判定阈值。
+- **P2 doctor 不可达分支**：`_c_semantic_judge_model` 读不存在的 `ctx.tools`（首版即必 AttributeError 且被吞，breaker 状态从未可见）→ 删分支，接线留建议。
+- 继承修复：`_CJK_RE` NameError 炸弹（4e8d987 误删定义）+ 8 个死导入补回/清理。
+- 死代码/文档清扫 20+ 项（claims 死参数、skip_peers 死链、include_content 全链、GGUF slow 孤儿区、`_NoSurfacingRecorder`/`_ScriptedLLM` 等 F821 残留、README/example/INTEGRATION 双语失实段）。
+- lint/类型门归零：ruff 11 错误（多为上述 F821）与 mypy 3 错误全修。
+
 ## [0.17.1] — 未发版（feat/mdeberta-judge-0171 分支，owner 拍板只 commit 不发版）
 
 ### 概要
@@ -29,7 +43,7 @@ Versions follow semantic versioning.
 ### 判定语义（owner 九项拍板）
 - conflict 且 P≥0.80 → normal notice；conflict 低置信 → 计数不落；possible → **severity=info**（无 action_required，Agent 自裁）；no_conflict → clear。
 - **internal 相写时不判死**：一切结局 pending 附模型意见，终裁归扫描侧强模型（旧 dismissed veto 退役）。
-- **通知帽改 job 级 top5**：conflict 正式 + possible info 按嫌疑分合并排序取 5，其余降级 info（`model_notices_capped` 回执）；正式 notice 附「另有 N 条 info 项」。
+- **通知帽改 job 级 top5**：conflict 正式 + possible info 按嫌疑分合并排序取 5，其余降级 info（`model_notices_capped` 回执）。
 - 攒批：各相位先收后判一次批前向（A-cross 两遍法），deadline 检查粒度=每块；backlog drain 按批档批量取、技术失败留队重试。
 - notice 适配：slot attribute=句对 sha256 差异锚（claim 通道保留真属性）、`model_signal`/`model_version` 进 payload（`qwen_signal` 一版兼容读）、direct 路径保留真抽取属性。
 
@@ -40,13 +54,13 @@ Versions follow semantic versioning.
 - 纯 Qwen 协议测试文件删除（test_qwen3_routing/test_qwen_perf_gates/test_pair_timing_ring/test_worker_forwarding/backpressure/inflight_hygiene）+ Qwen 协议用例清理。
 
 ### 保留（漏斗门不动）
-`_SENT_PREFILTER`、G5 记忆级筛选、余弦带 [0.60,0.98)、`decide_evidence`/`coexistence_veto`/`direct_value_verdict`、`is_cross_evolution`/`attr_is_versional`、KNN 窗口 16、对池 10/internal 帽 3/CLAIMS 帽 5、公平墙 5s、notice_sync_wait 3s 语义、通道 B 全部、scan 路（本就不跑模型）。llama-cpp-python 依赖保留（embedder 的 EmbeddingGemma 在用）。
+`_SENT_PREFILTER`、G5 记忆级筛选、余弦带 [0.60,0.98)、`decide_evidence`/`coexistence_veto`/`direct_value_verdict`、`is_cross_evolution`/`attr_is_versional`、KNN 窗口 16、对池 10/internal 帽 3/job 级 notice 帽 5、公平墙 5s、notice_sync_wait 3s 语义、scan 路（本就不跑模型）。llama-cpp-python 依赖保留（embedder 的 EmbeddingGemma 在用）。
 
 ### 升级指引
 1. `pip install memory-arbiter-mcp[mdeberta]`（torch CPU wheel ~200MB）；
 2. 下载 `mdeberta-v4m_dual_v1.pt`（1.1GB）+ `mdeberta-base/`（config+tokenizer）；
 3. config：`semantic_conflict.mdeberta_ckpt` 指向 ckpt（自动启用+预加载）。未配置=写时仲裁停用（scan/Agent 兜底不受影响），doctor 报告。
-升级前请清空 conflict_backlog（旧引擎条目避免跨引擎重放歧义）；发版前置=全量重扫（detector 已 bump `mdeberta-v4m-v2`）。
+升级前请清空 conflict_backlog（旧引擎条目避免跨引擎重放歧义）；发版前置=全量重扫（detector 已 bump `mdeberta-v4m-v3`）。
 
 ## [0.17.0] — 2026-09-22
 

@@ -1,29 +1,22 @@
-"""Local extraction protocol and isolated GGUF process supervision.
-
-The model extracts comparable attribute/value fields from candidate evidence
-pairs. Deterministic gates may accept, reject, or request extraction; advisory
-semantic notices still require an agent to read both memories before acting.
+"""Deterministic conflict-evidence primitives and the engine-agnostic
+adjudication helpers (``decide_evidence`` / ``coexistence_veto`` /
+``direct_value_verdict`` / ``notice_dedupe_key``). Since 0.17.1 the judged
+verdicts come from the mDeBERTa backend (``semantic_judge``) — this module
+owns no prompt or retry protocol; advisory semantic notices still require an
+agent to read both memories before acting.
 """
 from __future__ import annotations
 
 import hashlib
-import json
 import math
 import re
-import threading
-import time
 from dataclasses import dataclass, field
 from decimal import Decimal
-from pathlib import Path
 from typing import Any, Protocol
 
 from .difference_classifier import _cn_to_int
 from .constants import (
     EMBED_PREFIX_STS,
-    SEMANTIC_PAIR_MAX_ATTEMPTS,
-    SEMANTIC_PAIR_RETRY_MAX_TOKENS,
-    SEMANTIC_PAIR_RETRY_CONTEXT_CHARS,
-    SEMANTIC_PAIR_RETRY_QUOTE_CHARS,
 )
 
 ACTION_TYPES = {
@@ -54,6 +47,8 @@ _STOPWORDS = {
     "不应", "不是", "已经完成",
 }
 
+_CJK_RE = re.compile(r"[一-鿿]")
+
 def evidence_is_cjk(left: dict[str, Any], right: dict[str, Any]) -> bool:
     """True when either side's evidence/metadata carries CJK — the pair
     prompt follows the evidence language (pair-v8); mixed pairs stay
@@ -63,53 +58,6 @@ def evidence_is_cjk(left: dict[str, Any], right: dict[str, Any]) -> bool:
             if _CJK_RE.search(str(env.get(key) or "")):
                 return True
     return False
-# pair-v6 note: the prompt text is deliberately identical to pair-v5. Two
-# few-shot variants teaching long-evidence fragment selection were tried and
-# rejected by experiment (2026-09-09 calibration matrix): any added example
-# broke side attribution on the Tier1 calibration pair (the 0.5B adopted
-# positional heuristics from the example, e.g. copying the B-side opening into
-# value_a) — same lesson as the rejected "compress to the core value" wording.
-# pair-v7 (2026-09-16): system prompt still untouched (the v6 lesson stands);
-# the only change is an optional rule-candidate-values line in the USER turn
-# (present only when decide_evidence extracted values on both
-# sides.
-# Since 0.15.14 (A2) decoding is grammar-free: no response_format anywhere on
-# this path (its per-token grammar evaluation halved decode throughput, and
-# even on the retry it cost 3-5x the alternative — see _pair_retry_feedback);
-# the value/attribute caps are enforced post-hoc (L3 truncation + grounding
-# gates). One retry is kept for schema/truncation/empty-field failures, built
-# from the SPECIFIC violation the first attempt tripped with the offending
-# output deliberately NOT echoed back (echo locks the 0.5B into the failed
-# copy state; both measured 2026-09-11). A queue gate (A6) may skip the
-# retry while other requests wait.
-
-
-_WORKSPACE_RESPONSE_FORMAT = {
-    "type": "json_object",
-    "schema": {
-        "type": "object",
-        "properties": {
-            "candidate": {"type": ["string", "null"]},
-            "relation": {
-                "type": "string",
-                "enum": ["alias", "typo", "same_project", "same_family", "related", "unrelated", "uncertain"],
-            },
-            "confidence": {"type": "number"},
-            "evidence": {"type": "string", "maxLength": 200},
-        },
-        "required": ["candidate", "relation", "confidence", "evidence"],
-        "additionalProperties": False,
-    },
-}
-
-_WORKSPACE_PROMPT = """你是 mema 的 workspace 归一候选建议器，只输出 JSON，不要解释。
-输入是一个新记忆的 workspace 原文 + 短证据(标题/关键句) + 若干候选 workspace。
-任务：判断该 workspace 是否应归一到某个候选，只做建议，不做最终裁决。
-字段：candidate(建议归一到的候选名，或 null)，relation(alias|typo|same_project|same_family|related|unrelated|uncertain)，confidence(0..1)，evidence(一句话理由)。
-规则：同一项目不同写法/错别字/中英名互指 → alias/typo，高 confidence。
-同客户不同子域(售后/运维/培训/回访)、仅主题相关 → related/same_family，中低 confidence。
-明显无关 → unrelated，candidate=null。
-拿不准 → uncertain，candidate=null，低 confidence。"""
 
 
 @dataclass

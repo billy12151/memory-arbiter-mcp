@@ -4,8 +4,8 @@
 1. 新库不再建 memory_claims / memory_claim_vec；
 2. 存量库（0.17.0 时代带表带数据）启动 additive completion 幂等 DROP，
    数据一并清除（检测线已零读取，无消费方）；
-3. 全链无残留引用：write/update 的 claims 参数出 schema（未知键硬拒）、
-   _persist_claims* 与 ClaimsStore 消亡。
+3. 全链无残留引用：write/update 的 claims 参数出 schema（未知键软着陆：
+   警告+忽略）、_persist_claims* 与 ClaimsStore 消亡。
 """
 
 from __future__ import annotations

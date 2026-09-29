@@ -12,10 +12,14 @@ Design contract:
   restart on child death. The protocol is JSON-lines-shaped dict exchange over
   a multiprocessing Pipe (the GGUF backend pickled dataclasses; here both
   sides exchange plain dicts so the child needs no imports from this module).
-- Label contract is PINNED: the child echoes its LABELS after load; the
-  parent refuses to serve if the echo differs from SEMANTIC_MDEBERTA_LABELS
-  (a future checkpoint that reorders/renames classes must fail loudly, not
-  misjudge silently).
+- Label protocol is PINNED: the parent passes SEMANTIC_MDEBERTA_LABELS to
+  the child and the child echoes it back after load; the parent refuses to
+  serve if the echo differs. This pins parent↔child protocol-constant
+  consistency (a tampered or drifting child fails loudly, not misjudges
+  silently) — it does NOT validate the checkpoint's class order: the ckpt
+  and config.json carry no label metadata, so before swapping in a
+  re-trained checkpoint, manually verify its training-time class order
+  matches SEMANTIC_MDEBERTA_LABELS.
 - Device is CPU fp32 only (mDeBERTa MPS dtype assertion bug, train.py:106).
 - Batch interface is primary: judge_pairs(list[(text_a, text_b)]) with
   length-sorted dynamic padding; single pair = batch of 1.
@@ -95,7 +99,7 @@ def row_window(content: str, start: int, end: int, *, subject: str = "",
 
     三条硬保证：
     1. 对立行**不截断**（值完整性——80 字帽曾切掉行尾数值）；
-    2. 邻行不跨空行/标题屏障（异节行污染防护，对齐 row_context_text）；
+    2. 邻行不跨空行/标题屏障（异节行污染防护）；
     3. 对立行无条件全保（不参与预算、不被邻句挤掉）；邻行 80 字帽+300
        总预算=定稿口径（H1 形态 23/33·13FP）。实验记录：行前置 final2/3
        21/33、无帽 final4 21/33——长邻行（同表他行带对立值）整行进上下
@@ -215,7 +219,7 @@ def _mdeberta_inference_process(conn: Any, config: dict[str, Any]) -> None:
         max_len = int(config["max_len"])
 
         cfg = AutoConfig.from_pretrained(model_dir)
-        base = AutoModel.from_config(cfg)
+        base = AutoModel.from_config(cfg)  # type: ignore[no-untyped-call]
         # P0 fix (implementation adversarial review): config.json may carry
         # dtype float16 (the NLI upstream's export does) — from_config would
         # build a Half encoder and the first forward would die on the
@@ -531,6 +535,13 @@ class IsolatedMDeBERTaBackend:
                 if command != "load":
                     return self._exchange(command, timeout_ms, **payload)
                 return {"loaded": True}
+            except TimeoutError:
+                # 硬超时已在 _exchange 内收口（terminate+restart+timed_out
+                # 计数、_last_error 已设）——超时≠子进程死亡，不得再进
+                # child-death 路径：TimeoutError ⊂ OSError，不在这里先接，
+                # 3 次超时就会误触发崩溃熔断永久禁用判定引擎（GGUF 防线
+                # 随 4e8d987 丢失，0.17.1 review 复原）。
+                raise
             except (EOFError, BrokenPipeError, OSError) as exc:
                 with self._state_lock:
                     self._last_error = f"mdeberta child exited: {exc}"

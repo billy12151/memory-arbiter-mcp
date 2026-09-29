@@ -165,41 +165,6 @@ def test_decide_evidence_date_hyphens_are_not_signs() -> None:
 
 
 
-class _ScriptedLLM:
-    """Fake chat-completion endpoint replaying canned raw outputs in order.
-    Since 0.15.14 (A2/L0) the product calls it WITHOUT response_format
-    (grammar-free decode); caps are enforced post-hoc by L3 truncation."""
-
-    def __init__(self, outputs: list[str]) -> None:
-        self._outputs = list(outputs)
-        self.calls: list[dict[str, Any]] = []
-
-    def create_chat_completion(self, **kwargs: Any) -> dict[str, Any]:
-        self.calls.append(kwargs)
-        raw = self._outputs.pop(0) if len(self._outputs) > 1 else self._outputs[0]
-        return {
-            "choices": [{"message": {"content": raw}}],
-            "usage": {"prompt_tokens": 700, "completion_tokens": 50},
-        }
-
-
-def _backend_with_scripted_llm(
-    monkeypatch: pytest.MonkeyPatch, outputs: list[str],
-) -> tuple[Any, _ScriptedLLM]:
-
-    backend = LocalGGUFSemanticBackend(Path("unused.gguf"))
-    llm = _ScriptedLLM(outputs)
-    monkeypatch.setattr(backend, "_build_llm", lambda: llm)
-    return backend, llm
-
-
-
-
-
-
-
-
-
 _GUILOTINE_QUOTE_A = (
     "永不截断：合并覆盖≥50%全文献条目升级全文+hit_spans 转标注"
     "（owner 拍板：服务端不替 Agent 挑重要命中，法规 RAG 漏但书是系统性偏差）"

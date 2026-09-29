@@ -24,31 +24,12 @@ from ..constants import (
 from ..semantic_conflict import _SENT_PREFILTER, vector_cosine
 
 
-def claim_value_spans(content: str, claims: "list[dict[str, Any]]") -> "list[tuple[int, int]]":
-    """claim 值在正文中的字面定位（数据层工具）。0.17.1 起不再用于通道 A
-    覆盖句过滤（claim 对比通道退役）；保留供 claims 写入校验/工具复用。"""
-    spans: "list[tuple[int, int]]" = []
-    if not content:
-        return spans
-    for claim in claims or []:
-        value = str(claim.get("value") or "")
-        if not value:
-            continue
-        start = content.find(value)
-        if start >= 0:
-            spans.append((start, start + len(value)))
-    return spans
-
-
-def row_prefilter(
-    rows: "list[Any]", claim_spans: "tuple[tuple[int, int], ...] | list[tuple[int, int]]" = (),
-) -> "Iterator[Any]":
+def row_prefilter(rows: "list[Any]") -> "Iterator[Any]":
     """③ 句子初筛（编排可选层：写入调用、扫描跳过）— yield rows that carry
     an extractable value, a negation word, a time anchor, or are table rows;
     pure prose rows never originate a KNN query. 0.17.1 (owner 拍板)：claim
     对比通道 B/C/桥退役，claim 覆盖句跳过随之删除——被 claim 覆盖的句子重新
-    从通道 A 发起（否则成检测死区）；claim_spans 参数保留兼容旧调用方但不再
-    参与过滤。"""
+    从通道 A 发起（否则成检测死区），本层不再有任何 claims 耦合。"""
     for row in rows:
         if str(getattr(row, "kind", "") or "") == "table_row":
             yield row

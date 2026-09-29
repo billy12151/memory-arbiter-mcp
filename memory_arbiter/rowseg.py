@@ -28,11 +28,6 @@ ROW_MIN_CHARS = 8
 # yields nothing splittable. The span is the SAME slice the text came from —
 # content[start:end] == row text keeps the span contract intact.
 FALLBACK_ROW_CHARS = 200
-# 行上下文 envelope（owner 2026-09-25 方案 D1）：每部分独立截断，合计不超
-# CONTEXT_MAX_CHARS——只进 Qwen prompt（属性名恢复），绝不进向量/索引。
-CONTEXT_HEADING_CHARS = 80
-CONTEXT_NEIGHBOR_CHARS = 110
-CONTEXT_MAX_CHARS = 300
 
 
 @dataclass(frozen=True)
@@ -132,72 +127,6 @@ def _emit_table_rows(
         text = _table_row_text(header, cells)
         if len(text) >= ROW_MIN_CHARS:
             rows.append(("table_row", text, start, end))
-
-
-def row_context_text(
-    content: str, start_offset: int, end_offset: int, *, max_chars: int = CONTEXT_MAX_CHARS,
-) -> str:
-    """行上下文 envelope（owner 2026-09-25 方案）：主行所属标题 + 前一行 +
-    后一行，供 Qwen 恢复属性归属（「## 连接池配置」屏障下的「上限调整为
-    200」）。合约为**属性名可从上下文恢复、值必须取自主行**——grounding
-    只读 envelope 的 quote（主行），机制上挡住从上下文捞值。
-
-    邻行 = 主行之前/之后最近的非空、非标题、非表格分隔行的原始行文本；标题 =
-    主行之前最近的 ``#`` 标题。**空行是邻行屏障**（对齐 segment_rows 的
-    block 语义）：跨过空行后该方向不再取邻行——防异表/异节的行挂进本行
-    归属语境（对抗 review P3 实测：表二数据行曾抓到表一数据行）。跨行句
-    （行级分段折叠空白后一行可跨多个源行）所在源行不算邻行。截断方向：
-    prev 行保尾（尾部贴主行）、next 行保头（头部贴主行）、标题保头，各
-    分部截断（标题 80 / 邻行 110），合计再裁 max_chars；无任何可用片段
-    返回 ""——调用方据此不设 context 键，prompt 不渲染该段（向后兼容）。"""
-    heading = ""
-    prev_line = ""
-    next_line = ""
-    lines = _line_spans(content or "")
-    # prev：自主行向上，遇空行/标题即止（邻行不跨 section——归属语境污染防护）；
-    # 分隔行透明跳过（表头-分隔行-数据行同块）
-    for line_start, line_end, raw in reversed(lines):
-        if line_end > int(start_offset):
-            continue  # 主行所在或之后的行
-        text = raw.strip()
-        if not text or _is_heading(raw):
-            break
-        if _is_separator_row(raw):
-            continue
-        prev_line = text
-        break
-    # next：自主行向下，遇空行/标题即止；分隔行透明跳过
-    for line_start, line_end, raw in lines:
-        if line_start < int(end_offset):
-            continue  # 主行所在或之前的行
-        text = raw.strip()
-        if not text or _is_heading(raw):
-            break
-        if _is_separator_row(raw):
-            continue
-        next_line = text
-        break
-    # 标题：主行之前最近的 # 标题（跨空行仍成立——它就是本节标题）
-    for _line_start, _line_end, raw in reversed(lines):
-        if _line_end > int(start_offset):
-            continue
-        if _is_heading(raw):
-            heading = raw.strip().lstrip("#").strip()[:CONTEXT_HEADING_CHARS]
-            break
-    parts: list[str] = []
-    if heading:
-        parts.append(heading[:CONTEXT_HEADING_CHARS])
-    if prev_line:
-        # 尾部贴主行：截断切远离主行的头部、保贴主行的尾部（对抗 review P3）
-        parts.append(
-            prev_line[-CONTEXT_NEIGHBOR_CHARS:]
-            if len(prev_line) > CONTEXT_NEIGHBOR_CHARS else prev_line
-        )
-    if next_line:
-        parts.append(next_line[:CONTEXT_NEIGHBOR_CHARS])
-    if not parts:
-        return ""
-    return " / ".join(parts)[:max_chars]
 
 
 def segment_rows(subject: str, content: str) -> list[RowSegment]:

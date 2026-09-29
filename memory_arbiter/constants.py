@@ -96,21 +96,25 @@ EMBEDDING_DEFAULT_DIM = 768
 SEMANTIC_N_THREADS = 4
 
 # mDeBERTa judge (0.17.1, owner plan §3.1/§3.6): the write-time conflict
-# arbitration engine replacing Qwen. Label order is a PINNED CONTRACT — the
-# child echoes it at load and the parent refuses to serve on mismatch (a
-# re-trained checkpoint that reorders classes must fail loudly, not misjudge).
+# arbitration engine replacing Qwen. Label order is a PINNED PROTOCOL: the
+# parent passes this tuple to the child and the load-time echo check pins
+# parent↔child protocol-constant consistency (a tampered/drifting child
+# fails loudly). The checkpoint itself carries no label metadata on disk —
+# re-training/swapping a ckpt requires MANUALLY verifying this order still
+# matches the training-time class order (there is no disk-side check).
 SEMANTIC_MDEBERTA_LABELS = ("conflict", "no_conflict", "possible_conflict")
 SEMANTIC_MDEBERTA_MAX_LEN = 256
-# 0.17.1 owner 指令：判定输入= subject + 对立行 + 前后各 N 句（±2 为第 4 步
-# 实验变体）。预算感知组装见 semantic_judge.row_window——对立行全保，
-# subject 截 64 字符、前后句各截 80 字符，总长可控不触 256 截断。
+# 0.17.1 owner 指令：判定输入= subject + 对立行 + 前后各 1 句（722eaee 定版
+# 形态）。预算感知组装见 semantic_judge.row_window——对立行无条件全保，
+# subject 截 64 字符、邻行各截 80 字符，每侧（对立行+邻行）300 字符预算；
+# 组装结果可能超 256，由 tokenizer 侧 max_len 截断兜底。
 SEMANTIC_JUDGE_CONTEXT_BEFORE = 1
 SEMANTIC_JUDGE_CONTEXT_AFTER = 1
-# Batch size: device default (CPU 8 / MPS 16 — MPS unused for inference, the
-# dtype-assertion bug keeps us on CPU, but the key exists so the knee probe
-# has a fallback ladder), overridden by config and by the startup knee probe
-# (§3.2: probe 1/2/4/8/16, take the largest batch whose per-item latency is
-# within 1.2x of the best, write the result to doctor).
+# Batch size constant (fallback 8). The config key
+# semantic_conflict.mdeberta_batch defaults to 0 = device-tiered auto
+# (semantic_judge.device_default_batch: Apple Silicon / NVIDIA GPU 16,
+# otherwise CPU 8); an explicit config value >0 overrides the tier. There is
+# no startup knee probe.
 SEMANTIC_MDEBERTA_BATCH = 8
 
 SEMANTIC_JOB_TIMEOUT_MS = 5000

@@ -343,8 +343,11 @@ def _c_conflicts_backlog(ctx: _DoctorCtx) -> Finding:
 def _c_semantic_judge_model(ctx: _DoctorCtx) -> Finding | None:
     """0.17.1: the judge is the mDeBERTa checkpoint. Checks, in order:
     configured-but-missing checkpoint file, dependency availability (torch /
-    transformers — the ``mdeberta`` extra), label contract echo when the
-    backend is instantiated, and crash-breaker state. An unset ckpt means the
+    transformers — the ``mdeberta`` extra), the parent↔child label-protocol
+    echo when the backend is instantiated (pins the shared protocol constants
+    against a tampered/drifting child — the checkpoint's own class order has
+    no disk-side validation; verify LABELS against a re-trained ckpt
+    manually), and crash-breaker state. An unset ckpt means the
     user opted out of write-time arbitration (not this check's business — the
     degraded banner covers it)."""
     ckpt = ctx.settings.semantic_conflict_mdeberta_ckpt
@@ -368,27 +371,10 @@ def _c_semantic_judge_model(ctx: _DoctorCtx) -> Finding | None:
             "pip install memory-arbiter-mcp[mdeberta]",
             evidence={"ckpt": str(ckpt)},
         )
-    # Backend instantiated (a previous deep probe or a live worker): surface
-    # its last error / breaker state.
-    try:
-        backend = ctx.tools._ensure_semantic_backend()
-    except Exception:
-        backend = None
-    if backend is not None:
-        status = backend.status()
-        if status.get("disabled"):
-            return _finding(
-                "semantic.judge_model", False,
-                "mdeberta judge is DISABLED by the crash breaker "
-                f"({status.get('last_error')}); restart the service to clear",
-                evidence={k: status.get(k) for k in ("ckpt", "restarts", "timed_out")},
-            )
-        if status.get("last_error"):
-            return _finding(
-                "semantic.judge_model", False,
-                f"mdeberta judge reported an error: {status['last_error']}",
-                evidence={"ckpt": str(ckpt), "restarts": status.get("restarts")},
-            )
+    # Crash-breaker / last-error visibility needs the live backend instance,
+    # which doctor has no reference to (ctx carries conn+settings only) —
+    # that surfacing branch would need a backend-ref wired through the
+    # doctor entry; until then the configured-check below is the whole check.
     return _finding(
         "semantic.judge_model", True,
         f"mdeberta judge configured: {ckpt.name}",

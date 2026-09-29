@@ -483,21 +483,17 @@ class EvidenceStore:
         include_subject_rows: bool = True,
         include_memory_ids: "list[int] | set[int] | None" = None,
         subject_rows_only: bool = False,
-        include_content: bool = False,
     ) -> list[dict[str, Any]]:
         """KNN over row vectors (P2-2.4) — the conflict channel's candidate
         source. Identical rowid-IN pre-filter contract as EvidenceStore.knn
         (k applies to the filtered set); candidates are short sentences or
-        header-folded table rows, so Qwen always sees clean short text.
-        Default k=5 mirrors the write-time unit window (evidence.py).
+        header-folded table rows, so the mDeBERTa judge always sees clean
+        short text. Default k=5 mirrors the write-time unit window
+        (evidence.py).
         Gate-v2 G5: ``include_memory_ids`` restricts the candidate set to the
         screened neighbour list (k applies to the filtered set — spike
         fact); ``subject_rows_only`` turns the query into the title coarse
-        screen (one KNN per write, only kind='subject' rows).
-        R2 (0.17.0): ``include_content`` opts the memories.content column in
-        — the claims×sentence channel (channel C) takes it for
-        context/fingerprint; every other path keeps the column off (no
-        pointless IO)."""
+        screen (one KNN per write, only kind='subject' rows)."""
         if not self._db.state.sqlite_vec_available or not query_embedding:
             return []
         if parent_status_filter == "expired":
@@ -545,13 +541,10 @@ class EvidenceStore:
             f"JOIN memories m ON m.id=r.memory_id WHERE {' AND '.join(eligible_clauses)})"
             if filtered else ""
         )
-        # R2: m.content stays opt-in (include_content) — default paths skip
-        # the column to avoid pointless IO.
-        content_col = "m.content," if include_content else ""
         sql = f"""SELECT r.*, v.distance AS distance, m.status, m.subject, m.tags,
                      m.workspace, m.workspace_canonical, m.source_type,
                      m.confidence, m.protection_level, m.event_time,
-                     m.ingest_time, m.metadata, {content_col}
+                     m.ingest_time, m.metadata,
                      m.version AS memory_row_version, m.agent_id,
                      m.source_ref, m.created_at AS memory_created_at
                   FROM memory_row_vec v

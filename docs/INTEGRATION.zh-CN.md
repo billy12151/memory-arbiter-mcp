@@ -85,24 +85,18 @@ stdio 是默认传输。要让多个本地客户端共享一个社区版进程�
 
 ## 冲突检测契约
 
-### 双向四字段抽取
+### 三分类判定（0.17.1）
 
 证据 KNN 只提供有界的短 pair 召回和排序。0.17.1 起判定由本地 mDeBERTa（V4m）三分类完成：conflict≥0.80 出 normal notice、possible 出 info 灰区通知、no_conflict 静默 clear；写入漏斗门（初筛/G5/余弦带/规则证据）全部保留。
 
-```json
-{"attribute_a":"数据库选型","value_a":"MySQL","attribute_b":"数据库选型","value_b":"SQLite"}
-```
+模型绝不选出赢家、压制定时扫描或修改记忆。其概率与确定性漏斗共同生效——确定性直出路径（同键归一值不同，不经判定直接出 notice）仍要求：
 
-模型不得输出最终的 conflict/coexistence 判定、赢家或任何修改。代码校验：
+1. 机械抽取的属性/值对在行文本中有 grounding，机械的大小写/单位/数字/已确认别名推导除外；
+2. 归一后的值确实不同；
+3. 确定性的重复、兼容、环境/版本/地域/对象、观察时间、历史/当前、演进和测量范围 veto 均不命中；
+4. notice 具备充分的 `workspace_canonical + attribute + subject` 身份（gate-v2：metadata entity/scope 已退役，历史冲突组保留旧 slot 键）。
 
-1. 每个方向都有具体的同属性/不同值抽取；
-2. 交换两侧后，两个方向在归一属性和值到来源的映射上互相一致；
-3. 值在对应证据引用中有 grounding，机械的大小写/单位/数字/已确认别名推导除外；
-4. 归一后的值确实不同；
-5. 确定性的重复、兼容、环境/版本/地域/对象、观察时间、历史/当前、演进和测量范围 veto 均不命中；
-6. 正式槽位具备充分的 `workspace_canonical + attribute + subject` 身份（gate-v2：metadata entity/scope 已退役，历史冲突组保留旧 slot 键）。
-
-模糊的属性相似不能创建正式槽位。判定模型失败或缺席无权否决确定性的扫描候选。
+模糊的属性相似不能创建正式槽位。判定模型失败或缺席（mDeBERTa 未配置/不可用）不会否决确定性候选——管线 fail-open，未判成的对落冲突 backlog 留队、后续写入重试。
 
 ### 定时扫描：宽门
 
@@ -115,13 +109,13 @@ stdio 是默认传输。要让多个本地客户端共享一个社区版进程�
 
 只有完整的扫描边界——某页 `scan_candidates` 返回 `next_anchor_memory_id=null` 且确实扫过 anchor——才向 `scan_log.jsonl` 追加一行轻量审计记录（`scan_time`、`duration_sec`、`status=completed`、调用方身份、所配置的模型名）。中间页保持静默，逐页计数已移除：这个文件是审计证据，不是扫描结果日志。这个文件就是「定时任务存在」的机器可查证据：没有完成记录且无冲突扫描进度时，agent 会收到 `scan_never_run` 引导提示（info）；重建要求未满足升级为 `scan_required`（warning）；最新记录超过 14 天触发 `scan_stale`（info）。提示载荷带平台无关的 `setup.tasks` 规格（每小时冲突扫描 + 每日治理提醒），任务跑起来后自动消失；同一份证据也驱动 doctor 的 `conflicts.scan_required` / `conflicts.scan_stale` 体检项。完整规格随时可取：`memory(action="help", data={"topic": "scheduled_tasks"})`。
 
-### 写入时 notice：严门
+### 写入时 notice
 
-一条用户可见 notice 要求：两个方向都合法、方向映射一致、严格引用 grounding、归一值确实不同、槽位来源完整、无共存 veto。任何失败都会关闭 notice 路径，把该案例留给定时扫描复查。Notice 快照冻结成员版本、值分组、槽位来源、detector/prompt 版本、任务 id 和去重键。
+一条用户可见 notice 要求：判定模型给出 `conflict` 且 P ≥ `semantic_conflict.mdeberta_notice_min_prob`（默认 `0.80`）——或确定性直出判定（同键归一值不同、有 grounding）——且无共存 veto、槽位来源完整；`possible_conflict` 落 info 灰区通知。internal（同记忆）发现写时不判死：一律以 pending 落库并附模型意见，终裁归扫描侧强模型。Notice 快照冻结成员版本、值分组、槽位来源、detector/模型版本、任务 id 和去重键。
 
-写入成功后，服务器最多等待 `semantic_conflict.notice_sync_wait_ms`（0.15.8 起为活配置键，默认 `3000`，范围 `0–5000`）以完成有界的 notice 任务。等待超时后写入照常成功返回，同一个已接受任务继续异步执行——不会被取消或重算。队列满/入队被拒是另一回事：那时根本没有可等待任务。`checked_no_notice` 只表示该有界写入时任务内的每个候选都完成了严门检查，**不是**全库无冲突的声明。定时扫描仍是持久的召回兜底。
+写入成功后，服务器最多等待 `semantic_conflict.notice_sync_wait_ms`（0.15.8 起为活配置键，默认 `3000`，范围 `0–5000`）以完成有界的 notice 任务。等待超时后写入照常成功返回，同一个已接受任务继续异步执行——不会被取消或重算。队列满/入队被拒是另一回事：那时根本没有可等待任务。`checked_no_notice` 只表示该有界写入时任务内的每个候选都走完了漏斗，**不是**全库无冲突的声明。定时扫描仍是持久的召回兜底。
 
-job 预算（5000 ms，冻结）是队列公平预算，不是推理超时。只有后面已有其他 semantic job 等待时才启用，并且只在候选 pair 之间检查。已经开始的 Qwen 请求只受推理超时（30000 ms，冻结）约束；即使 job 预算期间耗尽，也会先完成当前 pair，再在开始下一 pair 前让出 worker。没有积压时，job 预算不生效。
+job 预算（5000 ms，冻结）是队列公平预算，不是推理超时。只有后面已有其他 semantic job 等待时才启用，并且只在候选 pair 之间检查。已开始的判定批次只受推理超时（30000 ms，冻结）约束；即使 job 预算期间耗尽，也会等该批返回、再开始下一批前让出 worker。未判成的对（超时/不可用/错误）留冲突 backlog 留队、后续写入重试；有预扣或跳过时回执带 `judge_budget` 分解。没有积压时，job 预算不生效。
 
 ## 单一冲突表
 

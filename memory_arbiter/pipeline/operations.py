@@ -2934,7 +2934,7 @@ class OperationsPipeline:
             "record": updated,
         }
         # 0.17.1：claims 数据层全退（owner 拍板连表删）——编辑落库/继承钩子
-        # 一并退役，update 的 claims 参数出 schema（未知键硬拒）。
+        # 一并退役，update 的 claims 参数出 schema（未知键软着陆：警告+忽略）。
         data["evidence_index"], data["semantic_conflict_check"] = (
             self._post_commit(memory_id_int, updated, recheck_conflicts=True)
         )

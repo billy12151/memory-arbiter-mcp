@@ -428,10 +428,9 @@ class MemoryDB:
         include_subject_rows: bool = True,
         include_memory_ids: "list[int] | set[int] | None" = None,
         subject_rows_only: bool = False,
-        include_content: bool = False,
     ) -> list[dict[str, Any]]:
         """0.17.0 P2-2.4: row-level KNN convenience (conflict channel)."""
-        return self.evidence.row_knn(query_embedding, k=k, parent_status_filter=parent_status_filter, workspace=workspace, exclude_memory_id=exclude_memory_id, exclude_workspaces=exclude_workspaces, conn=conn, include_subject_rows=include_subject_rows, include_memory_ids=include_memory_ids, subject_rows_only=subject_rows_only, include_content=include_content)
+        return self.evidence.row_knn(query_embedding, k=k, parent_status_filter=parent_status_filter, workspace=workspace, exclude_memory_id=exclude_memory_id, exclude_workspaces=exclude_workspaces, conn=conn, include_subject_rows=include_subject_rows, include_memory_ids=include_memory_ids, subject_rows_only=subject_rows_only)
 
     def insert_memory(
         self,

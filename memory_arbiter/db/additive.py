@@ -264,16 +264,34 @@ def ensure_additive_structures(conn: sqlite3.Connection) -> list[str]:
             applied.append(name)
     # 0.17.1（owner 2026-09-29 拍板）：claims 数据层全退——表连带 DROP。
     # 幂等：不存在的库无操作；存量库连数据一并清除（检测线已零读取，
-    # 数据无消费方）。向量影子表（memory_claim_vec_%）由 vec shadow 命名
-    # 规则覆盖，此处同清。
+    # 数据无消费方）。sqlite-vec 0.1.x DROP 虚拟主表不连带清影子表，
+    # memory_claim_vec_% 需显式 sweep（对齐 rebuild_vec_tables 口径），
+    # 否则跑过 claims 通道的存量库升级后影子表成永久孤儿。
     dropped = []
     for table in ("memory_claim_vec", "memory_claims"):
         existed = bool(conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
         ).fetchone())
         if existed:
-            conn.execute(f"DROP TABLE {table}")
+            try:
+                conn.execute(f"DROP TABLE {table}")
+            except sqlite3.OperationalError as exc:
+                # vec0 虚拟表的 DROP 需要模块注册：未装 sqlite-vec extra 的
+                # 库上报 "no such module: vec0"。本轮跳过 vec 表（普通表
+                # 照清、影子表 sweep 照跑），不阻塞 additive 收尾；装 vec
+                # 后的首次启动再清。
+                if "no such module" not in str(exc):
+                    raise
+                applied.append(f"claims_vec_drop_deferred({table})")
+                continue
             dropped.append(table)
+    claim_shadows = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' "
+        "AND name LIKE 'memory_claim_vec_%'"
+    ).fetchall()
+    for row in claim_shadows:
+        conn.execute(f'DROP TABLE IF EXISTS "{str(row[0])}"')
+        dropped.append(str(row[0]))
     if dropped:
         applied.append(f"claims_tables_dropped({','.join(dropped)})")
 

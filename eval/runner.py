@@ -912,6 +912,11 @@ def main() -> int:
             "embed_model_sha256": _sha256(Path(embed_model)),
             "qwen_model": str(qwen_model) if want_conflict else None,
             "qwen_model_sha256": _sha256(Path(qwen_model)) if want_conflict else None,
+            # 判定阈值入 env：不同 notice_min_prob 的 run 在产物/基线层可区分
+            # （V4m=0.80 / V21=0.90 各自校准，混用会误判回归）
+            "mdeberta_notice_min_prob": (
+                float(args.mdeberta_notice_min_prob) if want_conflict else None
+            ),
             "isolation": "none",
             "targets": len(targets),
             "distractors": len(distractors),

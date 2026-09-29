@@ -204,23 +204,3 @@ def test_internal_keepers_land_when_deterministic_phase_truncates(tmp_path, monk
     assert receipt["pairs_examined"] == 0
     assert not _Recorder.calls, "truncation terminal skips internal Qwen AND dispatch"
     assert "judge_budget" not in receipt  # C 未派发（allowed 缺失早退）→ 池零活动
-
-
-# ── 对抗 review 修复批（mema #1066 第二轮）────────────────────────────────────
-
-_NO_SURFACING_C = {"attribute_a": "连接池上限", "value_a": "99",
-                   "attribute_b": "连接池上限", "value_b": "99"}
-
-
-class _NoSurfacingRecorder(_Recorder):
-    """C 同值抽取 → unresolved 不浮出（版本守卫/backlog 归因不被 skip 集合遮蔽）。"""
-
-    @classmethod
-    def classify_pair(cls, left, right, **kw):
-        if "dispatch_hint" in left and left.get("quote") == cls.own_content[:1000]:
-            cls.calls.append(("C", str(right.get("quote") or "")))
-            return ModelSignal(True, "attribute_value_extraction", None, "",
-                               dict(_NO_SURFACING_C), None)
-        return super().classify_pair(left, right, **kw)
-
-

@@ -1,7 +1,8 @@
 """0.16.2 write-time pre-gate tests (owner, unified flow): provenance gate +
 difference classifier BEFORE the per-peer dedup in the KNN collection loop,
-and the internal-contradiction Qwen slot extraction (ready → annotated,
-definitive negative → persistent dismissal, technical failure → fail-open).
+and the internal-contradiction judge slot extraction (ready → annotated,
+definitive negative → lands pending with the model's opinion, never
+dismissed at write time — 0.17.1 owner 拍板; technical failure → fail-open).
 
 Live-library calibration behind the design (2026-09-13 simulation over
 51,437 KNN top-5 hits): ignore 41.3% (existing), classifier-clear 56.6%,
@@ -16,7 +17,7 @@ from pathlib import Path
 from memory_arbiter.evidence import evidence_content_hash
 from memory_arbiter.text import canon_scope
 
-from test_vnext_evidence import make_tools, _strict_pair_backend
+from test_vnext_evidence import ModelSignal, make_tools, _strict_pair_backend
 
 
 META = {"entity": "checkout-api", "scope": "production"}
@@ -51,7 +52,9 @@ def _hits(tools, peers, texts=None, distances=None):
 
 
 class _CountingBackend:
-    """Wraps a real gate-shaped backend and counts classify_pair calls."""
+    """Wraps a gate-shaped backend and counts judge calls. The inner backend
+    may expose either the live protocol (judge_pair/judge_pairs) or the
+    legacy classify_pair shim (routed through _judge_pair_compat)."""
 
     def __init__(self, inner):
         self._inner = inner
@@ -66,6 +69,9 @@ class _CountingBackend:
 
     def judge_pair(self, text_a, text_b):
         self.calls += 1
+        inner_judge = getattr(self._inner, "judge_pair", None)
+        if inner_judge is not None:
+            return inner_judge(text_a, text_b)
         from memory_arbiter.pipeline.evidence import _judge_pair_compat
         v = _judge_pair_compat(self._inner, text_a, text_b)
         if v is not None:
@@ -77,6 +83,9 @@ class _CountingBackend:
         self.calls += len(pairs)
         from memory_arbiter.pipeline.evidence import _judge_pair_compat
         from memory_arbiter.semantic_judge import PairVerdict
+        inner_judge = getattr(self._inner, "judge_pairs", None)
+        if inner_judge is not None:
+            return inner_judge(pairs)
         out = []
         for a, b in pairs:
             v = _judge_pair_compat(self._inner, a, b)
@@ -336,10 +345,12 @@ def test_internal_negative_judgement_lands_pending_with_opinion_no_dismissal(tmp
     monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: [])  # 0.17.0 P2-3 行级候选同注入
 
     class SameValue:
+        # 同值抽取 → judge 判 negative（candidate=False 走 compat 桥的
+        # no_conflict 通道）——negative 也不 dismiss，land pending 带 no_conflict 注释。
         @staticmethod
         def classify_pair(left, right, *args, **kwargs):
             return ModelSignal(
-                True, "attribute_value_extraction", None, "",
+                False, "attribute_value_extraction", None, "",
                 {"attribute_a": "重试次数", "value_a": "3",
                  "attribute_b": "重试次数", "value_b": "3"},
                 None,
@@ -356,6 +367,7 @@ def test_internal_negative_judgement_lands_pending_with_opinion_no_dismissal(tmp
     assert dismissed == 0
     pending = [r for r in tools.db.internal_conflicts.list_pending() if r["memory_id"] == mid["id"]]
     assert pending, "the negative-judged pair still lands pending (scan re-examines)"
+    assert "mdeberta:no_conflict" in pending[0]["reason"], pending[0]["reason"]
     # scan kick runs without error; suppression now belongs to scan-side gates
     kick = tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 50})
     assert kick["ok"], kick

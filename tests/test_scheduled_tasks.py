@@ -39,7 +39,9 @@ def test_scan_log_written_on_full_boundary_with_audit_fields(tmp_path: Path) -> 
     tools = tv.make_tools(tmp_path)
     tools.settings.semantic_conflict_on_write = "off"
     # Ensure both model fields are present so the audit entry records them.
-    tools.settings.semantic_conflict_model_path = tools.settings.embedding_model_path
+    # 0.17.1: scan_log.semantic_model records the mDeBERTa judge checkpoint
+    # (the retired Qwen model_path field no longer feeds the audit entry).
+    tools.settings.semantic_conflict_mdeberta_ckpt = tools.settings.embedding_model_path
     tools.start_update_monitor(UpdateMonitor(
         enabled=False, state_path=tmp_path / "notice_state.json",
     ))
@@ -60,7 +62,7 @@ def test_scan_log_written_on_full_boundary_with_audit_fields(tmp_path: Path) -> 
     assert isinstance(entry["duration_sec"], float) and entry["duration_sec"] >= 0
     assert entry["client"] is None and entry["agent_id"] is None  # stdio has no identity
     assert entry["embedding_model"] == str(tools.settings.embedding_model_path)
-    assert entry["semantic_model"] == str(tools.settings.semantic_conflict_model_path)
+    assert entry["semantic_model"] == str(tools.settings.semantic_conflict_mdeberta_ckpt)
     for dropped in (
         "anchors_scanned", "candidates", "knn_pairs", "rule_pass",
         "duplicates_truncated", "next_anchor_memory_id", "workspace",

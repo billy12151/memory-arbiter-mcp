@@ -9,14 +9,6 @@ silent-drop root causes (see mema memory id=919):
   3. true duplicates stay guarded (no Qwen call, no notice)
   4. sync-window three states (completed / async / wait=0 never blocks)
   5. pair prompt input caps quotes at 400 chars
-  6. live-degradation replays: the two 2026-09-08/09 qwen_invalid_output
-     samples (mema id=925 / id=926 evidence) must extract cleanly under the
-     current prompt+retry protocol
-
-Real-model variants live at the bottom under @pytest.mark.slow. Since 0.15.9.1 they
-run by default (the 0.15.8 release process relied on a manual "pytest -m slow" step
-that was missed): machines without the GGUF model pytest.skip cleanly, so the local
-full suite always exercises them and CI stays green via skips, never misses them.
 """
 from __future__ import annotations
 
@@ -87,27 +79,24 @@ def _job_snapshot(tools: MemoryTools, memory_id: int) -> dict[str, Any]:
 
 
 class _FormatBackend:
-    """Deterministic backend: extracts export_format=json|csv from the quote."""
+    """Deterministic backend: any examined pair judges conflict
+    (P=0.90 clears the 0.80 notice bar)."""
 
     calls = 0
 
-    @staticmethod
-    def _value(env: dict[str, Any]) -> str:
-        text = str(env["quote"]).casefold()
-        if "json" in text:
-            return "json"
-        if "csv" in text:
-            return "csv"
-        return "__unknown__"
+    @classmethod
+    def judge_pair(cls, text_a: str, text_b: str):
+        from memory_arbiter.semantic_judge import PairVerdict
+        cls.calls += 1
+        return PairVerdict(
+            "conflict",
+            {"conflict": 0.90, "no_conflict": 0.05, "possible_conflict": 0.05},
+            None, "test",
+        )
 
     @classmethod
-    def classify_pair(cls, left: dict[str, Any], right: dict[str, Any], *, deadline_monotonic: float | None = None) -> ModelSignal:
-        cls.calls += 1
-        parsed = {
-            "attribute_a": "export_format", "value_a": cls._value(left),
-            "attribute_b": "export_format", "value_b": cls._value(right),
-        }
-        return ModelSignal(True, "attribute_value_extraction", None, "", parsed, None)
+    def judge_pairs(cls, pairs):
+        return [cls.judge_pair(a, b) for a, b in pairs]
 
 
 def _write_pair(tools: MemoryTools, left: str, right: str) -> tuple[int, int]:
@@ -267,9 +256,9 @@ def test_sync_window_zero_never_blocks(tmp_path: Path, monkeypatch: pytest.Monke
 
     class _NeverBackend(_FormatBackend):
         @classmethod
-        def classify_pair(cls, left, right, *, deadline_monotonic=None):
+        def judge_pairs(cls, pairs):
             time.sleep(5)
-            return super().classify_pair(left, right, deadline_monotonic=deadline_monotonic)
+            return super().judge_pairs(pairs)
 
     _stub_knn_peer(monkeypatch, tools, int(peer["id"]), "zerobench 的取值为 csv。")
     monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: _NeverBackend())
@@ -387,82 +376,3 @@ def test_technical_reasons_registry_rows_cap() -> None:
     assert "evidence_units_capped" not in _TECHNICAL_REASONS
     assert "rows_capped" in _TECHNICAL_REASONS
     assert "notice_budget_exhausted" in _TECHNICAL_REASONS
-
-
-# ── slow: real Qwen2.5-0.5B model (pytest -m slow; excluded by default) ──────
-
-_SLOW_MODEL = Path(
-    "~/.local/share/memory-arbiter/models/semantic-conflict/"
-    "Qwen2.5-0.5B-Instruct/qwen2.5-0.5b-instruct-q4_k_m.gguf"
-).expanduser()
-
-
-@pytest.fixture(scope="module")
-def real_backend() -> "Any":
-    """Load the GGUF model ONCE per module and share it across the slow tests.
-
-    The classifier is stateless (production shares one resident instance
-    across all traffic); per-test cold loads were a 0.15.8-era convenience
-    that cost ~4x model loads per suite run. Skips cleanly on machines
-    without the model file, so CI never fails on it.
-
-    Teardown contract (owner rule, 2026-09-11): real-model tests must
-    release explicitly — unload, drop the reference, gc. Finalizing at
-    interpreter exit crashes in ggml_metal_device_free: pytest reports all
-    green while the process exits 134, poisoning the release gate's and
-    CI's exit-code checks.
-    """
-    if not _SLOW_MODEL.exists():
-        pytest.skip(f"real model not installed at {_SLOW_MODEL}")
-    import gc
-
-    from memory_arbiter.constants import SEMANTIC_N_CTX
-
-    backend = LocalGGUFSemanticBackend(_SLOW_MODEL, n_ctx=SEMANTIC_N_CTX, n_threads=4, n_batch=128)
-    backend.load()
-    yield backend
-    try:
-        backend.unload()
-    except Exception:
-        pass
-    del backend
-    gc.collect()
-
-
-def _real_gate(backend: Any, left: str, right: str):
-
-    def env(text: str) -> dict[str, Any]:
-        return {"quote": text[:400], "subject": "slow", "tags": ["slow"],
-                "workspace_canonical": "memory-arbiter-mcp", "memory_id": 1, "version": 1,
-                "event_time": None, "metadata": {"entity": "slow", "scope": "slow"}}
-
-    forward = backend.classify_pair(env(left), env(right), deadline_monotonic=None)
-    reverse = backend.classify_pair(env(right), env(left), deadline_monotonic=None)
-    gate = evaluate_single_direction_extraction(signal_extraction(forward), env(left), env(right)
-    )
-    return gate, forward, reverse
-
-
-
-def _assert_no_invalid_output(forward: "Any", reverse: "Any") -> None:
-    """The regression these replays guard: qwen_invalid_output (invalid_json /
-    invalid_schema) in either direction. unknown_field stays acceptable — it is
-    a protocol-legal negative, not a technical failure."""
-    for signal in (forward, reverse):
-        assert signal.candidate_type not in {"invalid_json", "invalid_schema"}, (
-            f"{signal.candidate_type}: {signal.error} raw={signal.raw[:200]}"
-        )
-
-
-def _faithful_env(
-    quote: str, *, subject: str, tags: list[str], workspace: str,
-    memory_id: int, version: int, event_time: "str | None",
-) -> dict[str, Any]:
-    """Envelope matching the live pair call: real subjects/tags/workspace from
-    the degrading memories. Teeth depend on it — with a minimal placeholder
-    envelope even the pre-fix code extracts these pairs cleanly (verified
-    2026-09-09 by replaying pair-v5 + no-retry against both fixtures)."""
-    return {"quote": quote[:400], "subject": subject, "tags": tags,
-            "workspace_canonical": workspace, "memory_id": memory_id, "version": version,
-            "event_time": event_time, "metadata": {}}
-

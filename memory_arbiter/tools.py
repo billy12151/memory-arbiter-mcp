@@ -156,11 +156,18 @@ class MemoryTools:
             "semantic_model": semantic_state,
         }
         if "missing" in health.values():
-            health["hint"] = (
-                "mema 正在以降级模式运行：缺失能力见上。"
-                "运行 mema setup --install 补齐（自动装依赖+下载模型+回写 config，"
-                "支持断点续传与 ModelScope 国内镜像）。"
-            )
+            hints = ["mema 正在以降级模式运行：缺失能力见上。"]
+            if health["embedding_model"] == "missing":
+                hints.append(
+                    "向量模型：运行 mema setup --install 补齐"
+                    "（自动装依赖+下载模型+回写 config，支持断点续传与国内镜像）。"
+                )
+            if health["semantic_model"] == "missing":
+                hints.append(
+                    "判定模型不在 setup --install 范围：装 [mdeberta] extra、"
+                    "下载 V4m ckpt 后在 config 设 semantic_conflict.mdeberta_ckpt。"
+                )
+            health["hint"] = " ".join(hints)
         return health
 
     def _setup_capability_banner(self) -> str | None:
@@ -190,7 +197,8 @@ class MemoryTools:
             "mema 正在以【降级模式】运行：",
             *missing,
             "当前只有基础全文搜索/写入可用，这不是 mema 的完整能力。",
-            "→ 运行 mema setup --install 补齐（自动装依赖+下载模型+回写 config，支持断点续传与国内镜像）",
+            "→ 向量模型缺失：运行 mema setup --install 补齐（自动装依赖+下载模型+回写 config）",
+            "→ 判定模型缺失：不在 setup --install 范围——装 [mdeberta] extra、下载 V4m ckpt、配 semantic_conflict.mdeberta_ckpt",
         ])
 
     def start_update_monitor(self, monitor: UpdateMonitor | None = None) -> None:
@@ -1433,7 +1441,7 @@ class MemoryTools:
     def _semantic_status(self, workspace_canonical: WorkspaceScope = None) -> dict[str, Any]:
         backend = self._get_semantic_backend_ref()
         ckpt = self.settings.semantic_conflict_mdeberta_ckpt
-        backend_status = (
+        backend_status: dict[str, Any] = (
             backend.status()
             if backend is not None else
             {
@@ -1602,14 +1610,15 @@ class MemoryTools:
             return terminal
         # 0.17.1 (owner 拍板)：claim 对比通道（B/C/桥）退役——claim 属性无实体
         # 绑定（"数据库 MySQL" vs "数据库 Oracle" 可能是不同系统），跨系统误报
-        # 面大且 C 实测召回 1/10。claims 数据层保留（写入/存储/继承/backfill），
-        # 冲突检测回归 A-cross 句子对 + internal 相 + 确定性直出。
+        # 面大且 C 实测召回 1/10。claims 已全退（检测通道 B/C + 配置门 +
+        # 数据层 DDL 连表删），冲突检测回归 A-cross 句子对 + internal 相 +
+        # 确定性直出。
         if terminal is None:
             ev.conflicts_internal_judge_phase(ctx)
         if terminal is None:
             # R1-2: a deterministic-phase truncation terminal skips internal
             # judge and the dispatch phase entirely (the pre-split semantics).
-            ev.conflicts_dispatch_phase(ctx, skip_peers=set())
+            ev.conflicts_dispatch_phase(ctx)
             result = ev.conflicts_finalize_receipt(ctx)
         else:
             result = terminal
@@ -1622,8 +1631,6 @@ class MemoryTools:
         # stamped in ONE place — the truncation-terminal branch previously
         # re-assembled it by hand and forgot elapsed_ms.
         result = ev.conflicts_receipt_tail(ctx, result)
-        result.pop("_surfaced_peers", None)  # internal cross-channel key, never in receipts
-        result.pop("_allowed_memory_ids", None)
         return result
 
     def memory_write(self, **payload: Any) -> dict[str, Any]:

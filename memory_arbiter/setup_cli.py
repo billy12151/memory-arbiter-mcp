@@ -9,9 +9,11 @@ download models, does **not** touch the network — failing installs of
 ``llama-cpp-python`` or a blocked model download are environment problems the
 user must handle, and setup only tells them precisely what to do. Passing
 ``--install`` flips the command into execution mode: it pip-installs the
-optional dependencies, downloads both GGUF models (embedding + semantic,
-HuggingFace with ModelScope fallback, resumable), and writes the finished
-config itself — one command an agent can run end-to-end. Dispatch is
+optional dependencies, downloads the embedding GGUF model (HuggingFace with
+ModelScope fallback, resumable), and writes the finished config itself — one
+command an agent can run end-to-end. The mDeBERTa judge checkpoint is NOT
+downloaded here: the user fetches it separately and configures
+``semantic_conflict.mdeberta_ckpt``. Dispatch is
 wired in ``server.main`` by intercepting ``argv[1]=="setup"``; no new console
 script is added (pyproject unchanged).
 """
@@ -566,8 +568,10 @@ def run_cli(argv: list[str]) -> int:
     """CLI entry: generate config, run checks, print remediation. Return exit code.
 
     ``--install`` switches from guidance to execution: pip-install the optional
-    dependencies, download both GGUF models (resumable, mirror fallback), and
-    write the finished config (including semantic_conflict.model_path) itself.
+    dependencies, download the embedding GGUF model (resumable, mirror fallback),
+    and write the finished config itself. The mDeBERTa judge checkpoint is not
+    downloaded here — the user fetches it and sets semantic_conflict.mdeberta_ckpt
+    in the config.
     """
     parser = argparse.ArgumentParser(
         prog="memory-arbiter setup",
@@ -577,7 +581,7 @@ def run_cli(argv: list[str]) -> int:
     parser.add_argument("--config-path", type=str, default=None, help="自定义 config.json 写入路径")
     parser.add_argument("--print-config", action="store_true", help="只打印将生成的 config 内容，不写盘")
     parser.add_argument("--no-config", action="store_true", help="跳过 config 生成，只跑环境自检")
-    parser.add_argument("--install", action="store_true", help="执行模式：装依赖 + 下载两个模型 + 回写 config（默认只指导不执行）")
+    parser.add_argument("--install", action="store_true", help="执行模式：装依赖 + 下载 embedding 模型 + 回写 config（mDeBERTa 判定 ckpt 由用户另行下载并配 semantic_conflict.mdeberta_ckpt；默认只指导不执行）")
     args = parser.parse_args(argv)
     if args.install and (args.print_config or args.no_config):
         parser.error("--install 与 --print-config/--no-config 不能同用（执行模式必须写 config）")

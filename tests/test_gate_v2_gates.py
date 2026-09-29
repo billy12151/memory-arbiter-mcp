@@ -1,6 +1,6 @@
-"""Gate-v2 G4: sentence prefilter (write-only optional layer), claims
-coverage skip, and the candidate cosine band — one shared implementation in
-pipeline/gates, orchestrated differently by the write job and the scan."""
+"""Gate-v2 G4: sentence prefilter (write-only optional layer) and the
+candidate cosine band — one shared implementation in pipeline/gates,
+orchestrated differently by the write job and the scan."""
 from __future__ import annotations
 
 from collections import namedtuple
@@ -9,7 +9,6 @@ import pytest
 
 from memory_arbiter.pipeline.gates import (
     candidate_cos_gate,
-    claim_value_spans,
     row_prefilter,
 )
 from memory_arbiter.semantic_conflict import _SENT_PREFILTER
@@ -37,23 +36,16 @@ def test_prefilter_drops_pure_prose_rows() -> None:
     # No claims: only the prose row is dropped. The "X是Y" text-value form is
     # a KNOWN accepted write-path gap (方案 §5) — the scan path judges it.
     assert [r.unit_index for r in row_prefilter(rows)] == []
-    # 0.17.1 owner 拍板：claim 覆盖句跳过随 claim 对比通道退役删除——claim_spans
-    # 参数保留但不过滤，覆盖句重新从通道 A 发起（否则成检测死区）。
+    # 0.17.1 owner 拍板：claim 覆盖句跳过随 claim 对比通道退役删除——
+    # row_prefilter 不再有任何 claims 耦合（无 claim_spans 参数），claim
+    # 覆盖句重新从通道 A 发起（否则成检测死区）。
     rows2 = [
         _S("超时阈值为 500ms。", "sentence", 0, 14, 1),
         _S("部署平台是 Vercel。", "sentence", 14, 23, 2),
     ]
-    passed = list(row_prefilter(rows2, [(14, 23)]))
-    # 纯散文行仍被初筛丢（初筛本身不变）；变化只是 claim 覆盖不再跳过
+    passed = list(row_prefilter(rows2))
+    # 纯散文行仍被初筛丢（初筛本身不变）
     assert [r.unit_index for r in passed] == [1]
-
-
-def test_claim_value_spans_position_based() -> None:
-    content = "前置内容。超时阈值为 500ms。后续同值 500ms 出现。"
-    spans = claim_value_spans(content, [{"value": "超时阈值为 500ms"}])
-    assert spans == [(5, 16)]  # find() pins the FIRST literal occurrence
-    # Unlocatable values (legacy/edited rows) contribute no span.
-    assert claim_value_spans(content, [{"value": "不存在的片段"}]) == []
 
 
 def test_cosine_gate_band_split() -> None:

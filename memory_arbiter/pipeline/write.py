@@ -341,7 +341,8 @@ class WritePipeline:
                 {"written": False, "error": "isolation=strict requires a workspace on every write"},
                 ok=False,
             )
-        # 0.17.1：claims.required 门已退役（claims 数据层保留、不参与检测），
+        # 0.17.1：claims.required 门已随 claims 全退退役（检测通道+配置门+
+        # 数据层 DDL 连表删），
         # 缺失不再教学/硬拒——评审 P1：灰度分支连同教学警告一并删除。
         # The validate_product_payload call above is the single validation
         # funnel: the MCP surface runs it before dispatch, and direct

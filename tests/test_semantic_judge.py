@@ -45,6 +45,9 @@ def _fake_child_target(conn, config):  # pragma: no cover - runs in child proces
             if behavior == "die_every_request":
                 conn.close()
                 return
+            if behavior == "sleep_on_judge":
+                import time as _time
+                _time.sleep(1.0)
             pairs = request["pairs"]
             results = []
             for _ in pairs:
@@ -154,6 +157,30 @@ def test_crash_breaker_disables_after_repeated_deaths(tmp_path: Path) -> None:
     # after the breaker trips, requests fail immediately (still error verdicts)
     verdicts = backend.judge_pairs([("a", "b")])
     assert verdicts[0].error is not None
+
+
+def test_hard_timeout_never_trips_crash_breaker(tmp_path: Path) -> None:
+    """0.17.1 review P1 回归：硬超时（parent 主动 terminate 存活 child）
+    不是子进程死亡——TimeoutError ⊂ OSError，若在 _request 的 OSError
+    child-death 子句被吞，3 次推理超时就误触发崩溃熔断永久禁用判定引擎
+    （GGUF 时代防线随 4e8d987 丢失后 mDeBERTa 移植复发的雷）。"""
+    ckpt = tmp_path / "mdeberta-v4m.pt"
+    ckpt.write_bytes(b"fake-checkpoint-bytes")
+    model_dir = tmp_path / "mdeberta-base"
+    model_dir.mkdir(exist_ok=True)
+    backend = IsolatedMDeBERTaBackend(
+        ckpt, model_dir,
+        batch_size=4, hard_timeout_ms=200, load_timeout_ms=2000,
+        process_target=_fake_child_target,
+        child_config_extra={"behavior": "sleep_on_judge"},
+    )
+    backend.load()
+    for _ in range(3):
+        v = backend.judge_pair("a", "b")
+        assert v.error is not None, "超时应产出技术失败 verdict"
+    status = backend.status()
+    assert status["timed_out"] >= 3
+    assert status["disabled"] is False, "超时不得计入崩溃熔断"
 
 
 def test_set_disabled_blocks_immediately(tmp_path: Path) -> None:

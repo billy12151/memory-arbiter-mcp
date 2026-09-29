@@ -6,7 +6,7 @@ import sqlite3
 import json
 import threading
 import time
-from typing import Any, Callable, TYPE_CHECKING, Iterator
+from typing import Any, TYPE_CHECKING, Iterator
 
 from ..db_generation import CONFLICT_DETECTOR_VERSION
 from ..constants import (
@@ -25,7 +25,6 @@ from ..evidence import evidence_content_hash
 from ..models import TrustedApplyingContext
 from ..embedder import ManagedEmbedder
 from ..semantic_conflict import (
-    PairGateResult,
     _values_all_equivalent,
     SemanticBackend,
     decide_evidence,
@@ -213,8 +212,8 @@ def _conflict_envelope(memory: dict[str, Any], quote: str) -> dict[str, Any]:
 
 def _job_fair_deadline(semantic_worker: "SemanticConflictWorker", publish_done_at: "list[float]") -> "float | None":
     """0.17.0 Q1 (相分裂): the fairness deadline was a job closure, now a
-    module function so the internal/cross dispatch phases AND the wrapper-
-    orchestrated channel C can share one wall-clock semantics. Detection-
+    module function so the internal/cross dispatch phases share one
+    wall-clock semantics. Detection-
     phase deadline = max(fairness wall, this job's own budget counted from
     publish completion); identical logic to the former closure."""
     value = semantic_worker.pending_job_deadline(
@@ -243,11 +242,11 @@ def _job_fair_deadline(semantic_worker: "SemanticConflictWorker", publish_done_a
 
 class _JudgeBatch:
     """0.17.1 (owner 拍板: 攒批进本版): collect judge inputs through a phase's
-    gates first (closure / version drift / skip / budget / deadline — the
-    pre-judge funnel is unchanged), then fire ONE batched judge_pairs call
-    and drain the verdicts. Max batch = the configured batch size; a phase
-    with more pairs than that walks the queue in chunked batches with the
-    deadline checked between chunks.
+    gates first (closure / version drift / budget / deadline — the pre-judge
+    funnel is unchanged), then fire ONE batched judge_pairs call and drain
+    the verdicts. Chunks are fixed-size SEMANTIC_MDEBERTA_BATCH slices; the
+    deadline is enforced per pair at collection time (pass 1), not between
+    chunks.
 
     The queue never crosses jobs — each job builds its own instance (R2-3
     no-cross-job-state rule)."""
@@ -272,11 +271,11 @@ class _JudgeBatch:
             return out
         pairs = [(item.get("judge_text_a", item["text_a"]),
                   item.get("judge_text_b", item["text_b"])) for item in out]
-        # 0.17.1（评审 P2）：分块跟随 backend 实际批档（设备 auto 8/16），
-        # 子进程内部自会再按 batch_size 切，此处只做调用切片。
+        # 分块恒用常量批档（judge_fn 是闭包，backend.batch_size 探测恒落空
+        # 的死分支已删）；设备分档 auto 在 config 解析时定型，子进程内部自
+        # 会再按 batch_size 切，此处只做调用切片。
         from ..constants import SEMANTIC_MDEBERTA_BATCH
-        backend_obj = getattr(judge_fn, "__self__", None)
-        chunk = max(1, int(getattr(backend_obj, "batch_size", 0) or SEMANTIC_MDEBERTA_BATCH))
+        chunk = max(1, int(SEMANTIC_MDEBERTA_BATCH))
         verdicts: list[Any] = []
         for start in range(0, len(pairs), chunk):
             verdicts.extend(judge_fn(pairs[start : start + chunk]))
@@ -450,10 +449,13 @@ class EvidencePipeline:
         processed = 0
         skipped: list[int] = []  # unprocessable this pass (no backend) — rotate past, never freeze
         judge_pool: list[dict[str, Any]] = []  # A-5 批量判定池（本轮收齐 pass2 一次判）
+        pool_ids: list[int] = []  # 已入池条目必须进 take_next 排除表——条目 pass2
+        # 前不 complete 且 processed 不增，不排除则 while 每轮重取同一头部
+        # 条目无限循环（0.17.1 review P0）。
         skipped_ids: list[int] = []  # pass2 判定失败留队（不 complete）
         backend_holder: dict[str, Any] = {"backend": None}
         while processed < limit:
-            entry = self.db.conflict_backlog.take_next(exclude_ids=skipped)
+            entry = self.db.conflict_backlog.take_next(exclude_ids=skipped + pool_ids)
             if entry is None:
                 break
             left_id = int(entry["left_memory_id"])
@@ -516,6 +518,7 @@ class EvidencePipeline:
                 entry["right"] = right
                 entry["decision"] = decision
                 judge_pool.append(entry)
+                pool_ids.append(int(entry["id"]))
                 continue
             # Stored extraction replays through the deterministic gate (never
             # re-spends Qwen — owner design #8).
@@ -533,15 +536,20 @@ class EvidencePipeline:
         if judge_pool and backend_holder["backend"] is not None:
             from ..semantic_judge import PairVerdict as _PV, locate_row, row_window
             # 0.17.1 §2.2（评审 P1-1 修订版）：drain 判定输入上下文化——
-            # 版本复核已通过的 fresh content 走 rowseg 定位窗口；content
-            # 已变形（locate 失败）退化裸行。与 A-cross 同口径。
+            # 版本复核已通过的 fresh content 走 locate_row 定位窗口。注意：
+            # backlog 存的是 rowseg 折叠文本（表格行/跨行句），不是裸
+            # content 的逐字子串，locate 对这两类结构性失配 → 退化裸行
+            # （无 subject）；逐字单行文本才真正上下文化。与 A-cross（直用
+            # 存储 span）不同口径，根治需 backlog 落 span 列（待拍板）。
             def _judge_text(mem: "dict[str, Any]", bare: str) -> str:
                 content = str(mem.get("content") or "")
                 span = locate_row(content, bare)
                 if span is None:
                     return bare
                 return row_window(content, span[0], span[1],
-                                  subject=str(mem.get("subject") or ""))
+                                  subject=str(mem.get("subject") or ""),
+                                  before=SEMANTIC_JUDGE_CONTEXT_BEFORE,
+                                  after=SEMANTIC_JUDGE_CONTEXT_AFTER)
             pairs = [(_judge_text(e["left"], e["left_text"]),
                       _judge_text(e["right"], e["right_text"])) for e in judge_pool]
             verdicts = backend_holder["backend"].judge_pairs(pairs)
@@ -857,7 +865,7 @@ class EvidencePipeline:
         terminal = ctx.get("terminal")
         if terminal is None:
             self.conflicts_internal_judge_phase(ctx)
-            self.conflicts_dispatch_phase(ctx, skip_peers=set())
+            self.conflicts_dispatch_phase(ctx)
             result = self.conflicts_finalize_receipt(ctx)
         else:
             result = terminal
@@ -1158,8 +1166,8 @@ class EvidencePipeline:
         sentence KNN then runs ONLY inside the clean list (rowid-IN
         restriction — window slots are not burned on unrelated or
         already-excluded memories). 宽不罚——窄才漏. Returns the effective
-        clean list (ctx["allowed_memory_ids"] stays the shared contract for
-        the wrapper-orchestrated channel C)."""
+        clean list (ctx["allowed_memory_ids"] stays the shared contract —
+        the A-cross dispatch loop restricts the cross KNN to this list)."""
         memory_id = int(ctx["memory_id"])
         workspace = ctx["workspace"]
         from .gates import memory_pair_excluded as _pair_excluded
@@ -1260,9 +1268,9 @@ class EvidencePipeline:
         content_hash = row_sha
         # C2: publish_done_at anchors this job's own detection budget AFTER
         # the index phase (embedding is index work, not conflict budget).
-        # Q1 相分裂: the list lives in ctx so the later phases and the
-        # wrapper-orchestrated channel C share one anchor (append is
-        # in-place — the local alias stays a live view of ctx state).
+        # Q1 相分裂: the list lives in ctx so the later phases share one
+        # anchor (append is in-place — the local alias stays a live view of
+        # ctx state).
         publish_done_at: list[float] = ctx["publish_done_at"]
         # 0.17.0 C2: the index duty lives in the job. Read the published row
         # vectors; when they are missing, recover in-job with
@@ -1381,7 +1389,7 @@ class EvidencePipeline:
         # are their own receipt keys.
         from .gates import candidate_cos_gate, row_prefilter
         # 0.17.1（评审 P2）：claim-coverage 跳过删后 current_claims 无消费方，
-        # 白开一次表查询——整行删除（claims 数据层保留但检测线不再读）。
+        # 白开一次表查询——整行删除（claims 数据层已连表 DROP，检测线零读取）。
         # KEYED BY ROW INDEX, never object identity: the streaming path
         # yields the raw segments while seg_views are _SegView copies — the
         # same row under two Python objects. row_index is the stable key
@@ -1580,8 +1588,8 @@ class EvidencePipeline:
         gone — notices are recorded per-pair inside the loop (write-on-
         discovery), so an early stop only saved Qwen time, which the
         examined-pairs cap now bounds deterministically.
-        Q1 (owner D1): SEMANTIC_MAX_EXAMINED_PAIRS is the job-global Qwen
-        pool living in ctx["budget"] (internal + channel C + A-cross); the
+        Q1 (owner D1): SEMANTIC_MAX_EXAMINED_PAIRS is the job-global judge
+        pool living in ctx["budget"] (internal + A-cross); the
         per-phase caps live in _JobQwenBudget."""
         memory_id = int(ctx["memory_id"])
         from ..semantic_conflict import vector_cosine
@@ -1653,7 +1661,7 @@ class EvidencePipeline:
         """Q1 相分裂 phase 2 (owner plan §3.1): internal (same-memory) keeper
         review — E10① lands before the cross loop; protection-capped at
         SEMANTIC_INTERNAL_QWEN_MAX_PAIRS and drawing the job-global pool
-        (D1/D7: internal keeps its priority ahead of channel C).
+        (D1: internal keeps its priority ahead of the A-cross dispatch).
 
         0.17.1 (owner 拍板 2026-09-28): the judge never dismisses at write
         time. conflict ≥ min_prob → pending (annotated); EVERYTHING else —
@@ -1686,9 +1694,11 @@ class EvidencePipeline:
                 if budget_ok:
                     content_text = str(ctx.get("content") or "")
                     ja = row_window(content_text, int(unit_a.start_offset or 0),
-                                    int(unit_a.end_offset or 0), subject=str(record.get("subject") or ""))
+                                    int(unit_a.end_offset or 0), subject=str(record.get("subject") or ""),
+                                    before=SEMANTIC_JUDGE_CONTEXT_BEFORE, after=SEMANTIC_JUDGE_CONTEXT_AFTER)
                     jb = row_window(content_text, int(unit_b.start_offset or 0),
-                                    int(unit_b.end_offset or 0), subject=str(record.get("subject") or ""))
+                                    int(unit_b.end_offset or 0), subject=str(record.get("subject") or ""),
+                                    before=SEMANTIC_JUDGE_CONTEXT_BEFORE, after=SEMANTIC_JUDGE_CONTEXT_AFTER)
                     verdict = self._judge_pair(backend, ja, jb)
                     outcome = _judge_outcome(verdict, min_prob)
                     if outcome in ("notice", "possible"):
@@ -1722,28 +1732,23 @@ class EvidencePipeline:
                 ctx["internal_found"] += 1
         ctx["phase_ms"].append((time.monotonic() - phase_started) * 1000)
 
-    def conflicts_dispatch_phase(
-        self, ctx: dict[str, Any], skip_peers: "set[int] | None",
-    ) -> None:
-        """Q1 相分裂 phase 3 (owner plan §3.1): the A-cross ordered-pair loop.
-        Qwen dispatch is gated by the job-global pool's RESIDUAL
-        (max(0, total − internal − channel_c)); exhaustion turns the old
-        break into a continue — deterministic direct verdicts still land and
-        undispatched pairs fall to the backlog sweep (D2). ``skip_peers`` is
-        the B∪C surfaced-peer union (review R1-3 — the dedup direction flip:
-        C now runs ahead of A-cross)."""
+    def conflicts_dispatch_phase(self, ctx: dict[str, Any]) -> None:
+        """Q1 相分裂 phase 2 (owner plan §3.1): the A-cross ordered-pair loop.
+        Judge dispatch is gated by the job-global pool's RESIDUAL
+        (max(0, total − internal)); exhaustion turns the old break into a
+        continue — deterministic direct verdicts still land and undispatched
+        pairs fall to the backlog sweep (D2)."""
         phase_started = time.monotonic()
         ordered = ctx["ordered"]
         backend = self._ensure_semantic_backend()
-        # R1-5: the dispatch probes run on their OWN read snapshot — channels
-        # B/C landed notices between the deterministic collection and this
-        # phase, so the collection snapshot (job_conn) no longer describes
-        # the world the closed-pair probes must see. The explicit skip set
-        # (R1-3) replaces whatever the probes could have inferred about B/C.
+        # R1-5: the dispatch probes run on their OWN read snapshot — notices
+        # landed between the deterministic collection and this phase mean the
+        # collection snapshot (job_conn) no longer describes the world the
+        # closed-pair probes must see.
         with self.db.connection() as dispatch_conn:
             dispatch_conn.execute("BEGIN")
             try:
-                self.conflicts_dispatch_loop(ctx, dispatch_conn, backend, skip_peers)
+                self.conflicts_dispatch_loop(ctx, dispatch_conn, backend)
             finally:
                 try:
                     dispatch_conn.rollback()
@@ -1762,14 +1767,14 @@ class EvidencePipeline:
 
     def conflicts_dispatch_loop(
         self, ctx: dict[str, Any], dispatch_conn: "sqlite3.Connection",
-        backend: "SemanticBackend | None", skip_peers: "set[int] | None",
+        backend: "SemanticBackend | None",
     ) -> None:
         """The ordered-pair loop body (kept as its own method so the dispatch
         phase's read transaction wraps every probe).
 
         0.17.1 (owner 拍板: 攒批进本版): TWO-PASS shape. Pass 1 walks the
         ordered pairs through every pre-judge gate UNCHANGED (active check,
-        skip union, closed-pair, version drift, deterministic direct, budget,
+        closed-pair, version drift, deterministic direct, budget,
         deadline) and COLLECTS judge inputs. Pass 2 fires one batched
         judge_pairs call and drains verdicts into notices. The
         applying-slot suppression moves to the drain (a notice-time concern),
@@ -1796,13 +1801,6 @@ class EvidencePipeline:
             peer = peer_rows.get(int(peer_id))
             if not peer or peer.get("status") != "active":
                 reached_pair.add(peer_id)  # settled (inactive) — not backlog
-                continue
-            if skip_peers and peer_id in skip_peers:
-                # Q1 R1-3 dedup direction flip: channel B/C already surfaced
-                # this peer on this write — A-cross stands down (cross-channel
-                # single report; strongest-evidence-first primitives like the
-                # closed-pair check are unchanged).
-                reached_pair.add(peer_id)  # settled (surfaced by B/C) — not backlog
                 continue
             record_row: dict[str, Any] = record or {}
             peer_row: dict[str, Any] = peer or {}
@@ -2069,14 +2067,17 @@ class EvidencePipeline:
             ctx["incomplete_reason"] = ctx["incomplete_reason"] or "notice_write_failed"
 
     def conflicts_job_level_notice_cap(self, ctx: dict[str, Any]) -> int:
-        """0.17.1 owner A-4: the write-job notice cap is JOB-LEVEL TOP-5 —
-        conflict(normal) and possible(info) notices created by this job
-        compete in one pool ranked by suspicion (P(conflict)+P(possible),
-        conflict-class ties win); the rest are DEMOTED (severity → info,
-        no_deliver flag) instead of deleted — the signal survives in the
-        conflicts table, the agent feed stays ≤5. Returns how many were
-        demoted. (The pre-0.17.1 per-channel CLAIMS cap kept its number; its
-        scope was write-total — the same 5, now enforced here in one place.)
+        """0.17.1 owner A-4: the write-job notice cap is JOB-LEVEL TOP-5 over
+        the JUDGED pool only — conflict(normal) and possible(info) notices
+        carrying a model_signal compete in one pool ranked by suspicion
+        (P(conflict)+P(possible), conflict-class ties win); the rest are
+        DEMOTED (severity → info, no_deliver flag) instead of deleted — the
+        signal survives in the conflicts table. Deterministic direct notices
+        carry no model_signal: they never enter this pool and are never
+        demoted, so a write mixing direct + judged notices can exceed 5 in
+        the agent feed. Returns how many were demoted. (The pre-0.17.1
+        per-channel CLAIMS cap kept its number; its scope was write-total —
+        the same 5, now enforced here in one place.)
         Called by the wrapper AFTER all channels landed their notices."""
         from ..constants import CLAIMS_MAX_NOTICES_PER_WRITE
 
@@ -2099,9 +2100,12 @@ class EvidencePipeline:
         ranked = sorted(judged, key=_suspicion, reverse=True)
         demoted = 0
         for row in ranked[CLAIMS_MAX_NOTICES_PER_WRITE:]:
+            # 只计真降级：尾部已是 info 的行（possible 判定或前次 job 已降）
+            # 不动也不计数——否则回执 model_notices_capped 随未消化积压
+            # 逐 job 重复膨胀。
             if str(row.get("notice_severity")) != "info":
                 self.db.demote_semantic_notice_to_info(int(row["id"]))
-            demoted += 1
+                demoted += 1
         if demoted:
             ctx["model_notices_capped"] = ctx.get("model_notices_capped", 0) + demoted
         return demoted
@@ -2113,11 +2117,6 @@ class EvidencePipeline:
         if ctx["surfaced"]:
             result: dict[str, Any] = {
                 "status": "completed", "outcome": "notices_created", "notices_created": ctx["surfaced"],
-                # 0.17.0: peers the evidence channel surfaced THIS run — the
-                # wrapper pops this internal key; channels B/C ride BEFORE the
-                # dispatch phase now and feed its skip set directly (Q1).
-                # Underscore = internal convention (r2s-08).
-                "_surfaced_peers": sorted(ctx["surfaced_peer_ids"]),
             }
             if ctx["internal_found"]:
                 result["internal_conflicts"] = ctx["internal_found"]
@@ -2155,10 +2154,6 @@ class EvidencePipeline:
             gate_rows["repeatability_skipped"] = ctx["repeatability_skipped"]
         if gate_rows:
             result["candidate_gates"] = gate_rows
-        # INTERNAL key (popped by the job wrapper): the G5 clean neighbour
-        # list, shared by channel C (claims×sentences) — never in receipts.
-        if ctx["allowed_memory_ids"] is not None:
-            result["_allowed_memory_ids"] = ctx["allowed_memory_ids"]
         if ctx["internal_qwen_confirmed"]:
             filter_summary["internal_qwen_confirmed"] = ctx["internal_qwen_confirmed"]
         if ctx["internal_qwen_vetoed"]:

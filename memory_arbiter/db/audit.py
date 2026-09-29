@@ -116,8 +116,8 @@ class AuditStore:
                     else None
                 ),
                 "semantic_model": (
-                    str(settings.semantic_conflict_model_path)
-                    if settings.semantic_conflict_model_path is not None
+                    str(settings.semantic_conflict_mdeberta_ckpt)
+                    if settings.semantic_conflict_mdeberta_ckpt is not None
                     else None
                 ),
             }
