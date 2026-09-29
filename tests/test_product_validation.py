@@ -124,7 +124,7 @@ def test_numeric_resource_limits_reject_extremes(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     assert tools.memory("find", {"query": "x", "limit": 101})["ok"] is False
     assert tools.memory_review("expired", {"query": "x", "offset": 10_001})["ok"] is False
-    assert tools.memory_repair("rebuild_claims", {"memory_ids": [1, -2]})["ok"] is False
+    assert tools.memory_repair("rebuild_claims", {"memory_ids": [1, -2]})["ok"] is False  # unknown task → rejected
 
 
 def test_status_unknown_field_is_warned_and_removed(tmp_path: Path) -> None:

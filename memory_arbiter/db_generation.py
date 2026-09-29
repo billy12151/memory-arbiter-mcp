@@ -62,12 +62,9 @@ SCHEMA_MIGRATIONS = {
 # (pair-v10); prompt/detection semantics changed, so the detector version
 # re-arms one full scan round per the standing release contract.
 CONFLICT_DETECTOR_VERSION = "mdeberta-v4m-v2"  # v2: backlog drain 判定输入上下文化（方案补充⑤）
-# 0.17.0 (review BUG-10): memory_claims is a LIVE table now (P2-5 claims
-# channel, additive.py builds it in every current library) — it must not
-# appear in the legacy-tombstone set or mema upgrade / doctor CLI would
-# misjudge every 0.17.0 library as legacy. Owner ruling on the name clash
-# (plan appendix C-11): first implementer owns the name; the vnext wishlist
-# re-plans when it lands, so only the vec sketches stay tombstoned.
+# 0.17.1（owner 2026-09-29 拍板）：memory_claims/memory_claim_vec 已全退——
+# additive.py 启动幂等 DROP（0.17.0 时代的 LIVE 表注释随之作废）。若有
+# legacy tombstone 命中同名，按 0.17.0 附录 C-11 裁定语义作废。
 LEGACY_DERIVED_TABLES = {
     "memories_vec", "memory_sections_vec",
 }

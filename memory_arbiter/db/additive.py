@@ -29,7 +29,6 @@ import json
 import sqlite3
 
 from ..models import utc_now_iso
-from .claims import claims_ddl
 from .conflict_backlog import conflict_backlog_ddl
 
 # migration_state guard key: the candidate-row migration runs exactly once.
@@ -256,7 +255,6 @@ def ensure_additive_structures(conn: sqlite3.Connection) -> list[str]:
     for name, ddl in (
         ("memory_row", memory_row_ddl()),
         ("conflict_backlog", conflict_backlog_ddl()),
-        ("memory_claims", claims_ddl()),
     ):
         existed = bool(conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
@@ -264,6 +262,21 @@ def ensure_additive_structures(conn: sqlite3.Connection) -> list[str]:
         conn.executescript(ddl)
         if not existed:
             applied.append(name)
+    # 0.17.1（owner 2026-09-29 拍板）：claims 数据层全退——表连带 DROP。
+    # 幂等：不存在的库无操作；存量库连数据一并清除（检测线已零读取，
+    # 数据无消费方）。向量影子表（memory_claim_vec_%）由 vec shadow 命名
+    # 规则覆盖，此处同清。
+    dropped = []
+    for table in ("memory_claim_vec", "memory_claims"):
+        existed = bool(conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone())
+        if existed:
+            conn.execute(f"DROP TABLE {table}")
+            dropped.append(table)
+    if dropped:
+        applied.append(f"claims_tables_dropped({','.join(dropped)})")
+
     # 0.17.1 workspace dismiss 持久化：决策记录独立于 scan_queue 工作台——
     # 启动 purge / 检测器换代整表 DELETE 释放行身份后，dismiss 仍然存活。
     dismissals_existed = bool(conn.execute(

@@ -110,11 +110,9 @@ class MemoryDB:
         self.backup_replay = BackupReplayStore(self)
         self.evidence = EvidenceStore(self)
         self.scan_queue = ScanQueueStore(self)
-        # 0.17.0 Part 2: write-time conflict backlog + structured claims.
-        from .claims import ClaimsStore
+        # 0.17.0 Part 2: write-time conflict backlog.（0.17.1 claims 全退）
         from .conflict_backlog import ConflictBacklogStore
         self.conflict_backlog = ConflictBacklogStore(self)
-        self.claims = ClaimsStore(self)
         self.internal_conflicts = InternalConflictStore(self)
         # Hold one lock across the generation gate and any first-start schema
         # creation. Current databases skip DDL entirely at normal startup.

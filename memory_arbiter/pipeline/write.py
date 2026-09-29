@@ -326,155 +326,6 @@ class WritePipeline:
         except Exception:
             return None
 
-    def _persist_claims(
-        self, memory_id: int, record: Any, claims: list[Any],
-    ) -> tuple[int, list[dict[str, Any]]]:
-        return WritePipeline._persist_claims_for_version(
-            self._tools, memory_id, int(getattr(record, "version", 1) or 1), record, claims,
-        )
-
-    @staticmethod
-    def _persist_claims_for_version(
-        tools: "Any", memory_id: int, memory_version: int, record: Any, claims: list[Any],
-        *, source: str = "agent", replace: bool = False,
-    ) -> tuple[int, list[dict[str, Any]]]:
-        """Shared by write (version 1), edit (post-bump version), and the
-        agent-supplied backfill (source='backfill', replace=True 语义见下)."""
-        """Normalize + ground + persist claims with attr vectors (P2-5.2).
-
-        Rejections are per-item and reported back (claims_rejected) — the
-        write itself is already durable and never fails here."""
-        from ..semantic_conflict import normalize_attribute, normalize_value
-        from ..db.claims import CLAIM_SOURCES, CLAIMS_MAX_PER_MEMORY
-
-        rejected: list[dict[str, Any]] = []
-        prepared: list[dict[str, Any]] = []
-        # record 有三种形态：write 的 MemoryRecord、update 的 post-edit dict
-        # （operations.py）、backfill 的 _Rec shim——鸭子取 content（缺陷修复
-        # 2026-09-25：dict 走 record.content 属性访问抛 AttributeError，使
-        # update+claims 自 P2-5.2 上线起确定性崩溃，外部实测三形态复现）。
-        record_content = (
-            record.get("content")
-            if isinstance(record, dict)
-            else getattr(record, "content", None)
-        )
-        content = str(record_content or "")
-        seen_norm: set[tuple[str, str]] = set()
-        for index, item in enumerate(claims if isinstance(claims, list) else []):
-            if not isinstance(item, dict):
-                continue  # schema 层已硬拒，这里只处理幸存者
-            attr = str(item.get("attr") or "").strip()
-            value = str(item.get("value") or "").strip()
-            if not attr or not value:
-                # 空 attr/value 原来静默蒸发（对抗 review P3）——进回执可见
-                rejected.append({
-                    "index": index,
-                    "reason": "empty_attr" if not attr else "empty_value",
-                })
-                continue
-            if value in attr:
-                # 防渗规则（schema _v_claims 硬拒同款，对抗 review P3）：
-                # backfill 兜底原缺此检查，可落 remember/update 必拒的 claims
-                rejected.append({"index": index, "reason": "attr_contains_value"})
-                continue
-            if value not in content:
-                rejected.append({"index": index, "reason": "value_not_in_content"})
-                continue
-            # agent 供给通道同样受契约长度约束（schema 校验器只覆盖 remember/update，
-            # backfill apply 在此兜住：attr 1-64、value 1-64 且 ≤12 词）
-            if len(attr) > 64 or len(value) > 64 or len(value.split()) > 12:
-                rejected.append({"index": index, "reason": "unbounded"})
-                continue
-            attr_norm = normalize_attribute(attr)
-            value_norm = normalize_value(value)
-            if not attr_norm or not value_norm:
-                rejected.append({"index": index, "reason": "unnormalizable"})
-                continue
-            key = (attr_norm, value_norm)
-            if key in seen_norm:
-                rejected.append({"index": index, "reason": "duplicate_norm"})
-                continue
-            seen_norm.add(key)
-            row_source = str(item.get("source") or source or "agent")
-            if row_source not in CLAIM_SOURCES:
-                # source 兜底 agent（CHECK 约束会炸非法值；backfill apply 是
-                # 唯一绕过 remember/update schema 校验的入口）。
-                row_source = "agent"
-            prepared.append({
-                "index": index,
-                "attr": attr, "attr_norm": attr_norm,
-                "value": value, "value_norm": value_norm,
-                "source": row_source,
-            })
-        # 0.17.0 review R2：超出单记忆上限的 claims 原被 prepared[:20] 静默
-        # 截断、不进回执（backfill apply 是唯一绕过 schema ≤20 硬门的入口）
-        # ——溢出逐条回报，通道契约「逐条可回报」。
-        if len(prepared) > CLAIMS_MAX_PER_MEMORY:
-            rejected.extend(
-                {"index": claim["index"], "reason": "exceeds_max_per_memory"}
-                for claim in prepared[CLAIMS_MAX_PER_MEMORY:]
-            )
-            prepared = prepared[:CLAIMS_MAX_PER_MEMORY]
-        if not prepared:
-            return 0, rejected
-        written = 0
-        try:
-            embedder, _warnings = tools._ensure_embedder()
-            if embedder is None:
-                # 无 embedder：claims 行照落（精确键通道可用），向量留空由
-                # 后续 backfill/写路径补——不阻塞契约。
-                result = tools.db.claims.insert(
-                    memory_id=memory_id, memory_version=memory_version,
-                    claims=prepared,
-                )
-                return int(result.get("written") or 0), rejected
-            # Adversarial review P2-7: ALL attr embeddings happen BEFORE the
-            # write transaction — model inference under BEGIN IMMEDIATE held
-            # the library write lock for up to 20 embeds.
-            attr_vectors: "list[list[float] | None]" = []
-            for claim in prepared:
-                er = embedder.embed_text(prefix=EMBED_PREFIX_STS, body=claim["attr"])
-                attr_vectors.append([float(x) for x in er.embedding] if er and er.embedding else None)
-            with tools.db.write_transaction() as conn:
-                from ..models import utc_now_iso
-                now = utc_now_iso()
-                if replace:
-                    # backfill 重跑：先清当前版本旧行+其向量，再落新抽取
-                    conn.execute(
-                        "DELETE FROM memory_claim_vec WHERE id IN "
-                        "(SELECT id FROM memory_claims WHERE memory_id=? AND memory_version=?)",
-                        (memory_id, memory_version),
-                    )
-                    conn.execute(
-                        "DELETE FROM memory_claims WHERE memory_id=? AND memory_version=?",
-                        (memory_id, memory_version),
-                    )
-                for claim, vec in zip(prepared, attr_vectors):
-                    cur = conn.execute(
-                        """INSERT OR IGNORE INTO memory_claims(
-                             memory_id, memory_version, attr, attr_norm,
-                             value, value_norm, source, created_at)
-                           VALUES(?,?,?,?,?,?,?,?)""",
-                        (
-                            memory_id, memory_version,
-                            claim["attr"], claim["attr_norm"],
-                            claim["value"], claim["value_norm"],
-                            claim["source"], now,
-                        ),
-                    )
-                    if cur.rowcount:
-                        written += 1
-                        claim_id = int(cur.lastrowid or 0)
-                        if vec is not None:
-                            import json as _json
-                            conn.execute(
-                                "INSERT OR REPLACE INTO memory_claim_vec(id, embedding) VALUES (?, ?)",
-                                (claim_id, _json.dumps(vec)),
-                            )
-            return written, rejected
-        except Exception:
-            return 0, rejected
-
     def memory_write(self, **payload: Any) -> dict[str, Any]:
         payload = dict(payload)
         validation = validate_product_payload("memory", "remember", payload)
@@ -547,10 +398,6 @@ class WritePipeline:
                                 "subject": dup.get("subject"),
                                 "ingest_time": dup.get("ingest_time"),
                             },
-                            # 0.17.0 (adversarial review P2-9): replayed claims
-                            # are NOT written — say so instead of vanishing.
-                            **({"claims_ignored_on_replay": True}
-                               if payload.get("claims") else {}),
                         },
                         extra_warnings=validation.warnings,
                         extra_notices=[{
@@ -572,14 +419,6 @@ class WritePipeline:
             insert_done = True
             if any("workspace canonical vector publish failed" in warning for warning in write_warnings):
                 workspace["vector_publish_pending"] = True
-            # 0.17.0 P2-5.2: claims 落库（同事务纪律的 post-commit 近似：insert
-            # 已完成，此处短事务写 claims+向量；失败不影响写入本身）。
-            claims_written = 0
-            claims_rejected: list[dict[str, Any]] = []
-            if memory_id is not None and payload.get("claims") is not None:
-                claims_written, claims_rejected = self._persist_claims(
-                    int(memory_id), record, payload["claims"],
-                )
             data: dict[str, Any] = {
                 "id": memory_id,
                 "backup_only": memory_id is None,
@@ -587,11 +426,6 @@ class WritePipeline:
                 "workspace_canonical": workspace["canonical"],
                 "workspace_matched_by": workspace["matched_by"],
             }
-            if payload.get("claims") is not None:
-                # additive 响应键：写入数 + 逐条拒收（agent 可自我纠正）
-                data["claims_written"] = claims_written
-                if claims_rejected:
-                    data["claims_rejected"] = claims_rejected
             self._apply_workspace_response(data, workspace)
             redirect_notice = workspace.pop("redirect_notice", None)
             if redirect_notice is not None:

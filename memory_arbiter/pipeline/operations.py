@@ -2722,7 +2722,6 @@ class OperationsPipeline:
         tags_only: bool = False,
         add_tags: list[str] | None = None,
         remove_tags: list[str] | None = None,
-        claims: list[dict[str, Any]] | None = None,
         **_: Any,
     ) -> dict[str, Any]:
         """In-place edit a memory's content or tags.
@@ -2934,48 +2933,8 @@ class OperationsPipeline:
             "history_id": history_id,
             "record": updated,
         }
-        # 0.17.0 P2-5.2 (adversarial review P1-3): content edits re-supply
-        # claims for the NEW version — the old rows are version-orphaned by
-        # design; without this hook every edited memory's claims channel
-        # went permanently silent. tags_only keeps the current claims.
-        claims_written = 0
-        claims_rejected: list[dict[str, Any]] = []
-        if claims is not None and not tags_only and updated is not None:
-            from .write import WritePipeline
-            claims_written, claims_rejected = WritePipeline._persist_claims_for_version(
-                self._tools, memory_id_int,
-                int(updated.get("version") or 1), updated, claims,
-            )
-            data["claims_written"] = claims_written
-            if claims_rejected:
-                data["claims_rejected"] = claims_rejected
-        elif claims is None and not tags_only and updated is not None and current is not None:
-            # 0.17.0 review R2（owner 拍板方案 C）：内容编辑不传 claims 时，
-            # 旧版本 claims 自动继承到新版本——通道不再被编辑静默打死。继承
-            # 走同一落库函数重过 grounding：值已不在新正文的剔除进回执；
-            # 逐条 source 沿用原行。
-            inherited = self.db.claims.claims_for_version(
-                memory_id_int, int(current.get("version") or 1),
-            )
-            if inherited:
-                from .write import WritePipeline
-                claims_written, claims_rejected = (
-                    WritePipeline._persist_claims_for_version(
-                        self._tools, memory_id_int,
-                        int(updated.get("version") or 1), updated,
-                        [
-                            {
-                                "attr": str(row["attr"]),
-                                "value": str(row["value"]),
-                                "source": str(row["source"] or "agent"),
-                            }
-                            for row in inherited
-                        ],
-                    )
-                )
-                data["claims_inherited"] = claims_written
-                if claims_rejected:
-                    data["claims_inherited_dropped"] = claims_rejected
+        # 0.17.1：claims 数据层全退（owner 拍板连表删）——编辑落库/继承钩子
+        # 一并退役，update 的 claims 参数出 schema（未知键硬拒）。
         data["evidence_index"], data["semantic_conflict_check"] = (
             self._post_commit(memory_id_int, updated, recheck_conflicts=True)
         )

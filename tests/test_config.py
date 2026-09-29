@@ -615,7 +615,7 @@ def test_product_non_dict_data_returns_error(tmp_path: Path) -> None:
     assert_clean("memory.remember data=list", tools.memory(action="remember", data=["x"]))
     assert_clean("memory.find data=int", tools.memory(action="find", data=123))
     assert_clean("govern.retire data=str", tools.memory_govern(action="retire", data="bad"))
-    assert_clean("repair.rebuild_claims data=str", tools.memory_repair(task="rebuild_claims", data="bad"))
+    assert_clean("repair.claims_backfill data=str", tools.memory_repair(task="claims_backfill", data="bad"))
     assert_clean("review.conflicts data=int", tools.memory_review(view="conflicts", data=123))
 
     # data=None (explicit) is the default and must still work.

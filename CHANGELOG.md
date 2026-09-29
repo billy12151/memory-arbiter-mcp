@@ -6,7 +6,7 @@ Versions follow semantic versioning.
 ## [0.17.1 追加] — 未发版（claim 对比通道退役 + 判定输入上下文化，owner 2026-09-28 拍板）
 
 ### Removed
-- **claim 对比通道整体退役**：通道 B（claims×claims：exact/vector 车道）、通道 C（claims×sentences）、单边桥、scan 慢道 claims 腿。理由：claim 属性无实体绑定（"数据库=MySQL" 与另一系统的 "数据库=Oracle" 无法区分），真实场景误报面大；通道 C harness 实测真召回 1/10。claims 数据层保留（写入/存储/继承/`memory_claims` 表照旧）；`claims.required` 写入门与 `memory_repair(task='claims_backfill')` 随通道一并退役（claims 不再参与任何检测，字段本身仍可写可继承）。
+- **claim 对比通道整体退役**：通道 B（claims×claims：exact/vector 车道）、通道 C（claims×sentences）、单边桥、scan 慢道 claims 腿。理由：claim 属性无实体绑定（"数据库=MySQL" 与另一系统的 "数据库=Oracle" 无法区分），真实场景误报面大；通道 C harness 实测真召回 1/10。claims **整体退役**（owner 2026-09-29 拍板连表删）：`memory_claims`/`memory_claim_vec` 两表 DDL 删除、存量库启动幂等 DROP；`claims.required` 写入门、`memory_repair(task='claims_backfill')`、写入/编辑/继承/回执全链退役，claims 参数出 schema（未知键软着陆警告）。
 - 覆盖句跳过（claim 覆盖的句子不再被排除出通道 A）随退役删除——否则 claim 覆盖行成检测死区。
 - `--qwen-model`（runner）/`semantic_conflict.model_path` 等 Qwen 判定入口全部移除。
 

@@ -147,7 +147,7 @@ def _write_scene(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> tuple[Any, A
     )["data"]
     content = "\n".join(_OWN_ROWS)
     new = tools.memory_write(
-        content=content, subject="budget-own", tags=[], claims=[dict(_OWN_CLAIM)],
+        content=content, subject="budget-own", tags=[],
     )["data"]
     assert tools.wait_semantic_worker_drained(timeout=5)
     _Recorder.reset(content)

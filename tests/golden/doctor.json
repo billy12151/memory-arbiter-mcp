@@ -196,19 +196,6 @@
      "detail": "row vector coverage unknown (table unavailable)",
      "evidence": {},
      "fix_hint": null
-    },
-    {
-     "check_id": "claims.coverage",
-     "dimension": "claims",
-     "severity": "info",
-     "status": "pass",
-     "title": "claims.coverage",
-     "detail": "0/0 active memories carry current claims (grey period; claims_backfill raises it)",
-     "evidence": {
-      "claims_with": 0,
-      "active_memories": 0
-     },
-     "fix_hint": null
     }
    ],
    "summary": {
@@ -415,19 +402,6 @@
      "title": "rows.coverage",
      "detail": "row vector coverage unknown (table unavailable)",
      "evidence": {},
-     "fix_hint": null
-    },
-    {
-     "check_id": "claims.coverage",
-     "dimension": "claims",
-     "severity": "info",
-     "status": "pass",
-     "title": "claims.coverage",
-     "detail": "0/0 active memories carry current claims (grey period; claims_backfill raises it)",
-     "evidence": {
-      "claims_with": 0,
-      "active_memories": 0
-     },
      "fix_hint": null
     },
     {
@@ -725,19 +699,6 @@
      "detail": "row vector coverage unknown (table unavailable)",
      "evidence": {},
      "fix_hint": null
-    },
-    {
-     "check_id": "claims.coverage",
-     "dimension": "claims",
-     "severity": "info",
-     "status": "pass",
-     "title": "claims.coverage",
-     "detail": "0/3 active memories carry current claims (grey period; claims_backfill raises it)",
-     "evidence": {
-      "claims_with": 0,
-      "active_memories": 3
-     },
-     "fix_hint": null
     }
    ],
    "summary": {
@@ -944,19 +905,6 @@
      "title": "rows.coverage",
      "detail": "row vector coverage unknown (table unavailable)",
      "evidence": {},
-     "fix_hint": null
-    },
-    {
-     "check_id": "claims.coverage",
-     "dimension": "claims",
-     "severity": "info",
-     "status": "pass",
-     "title": "claims.coverage",
-     "detail": "0/3 active memories carry current claims (grey period; claims_backfill raises it)",
-     "evidence": {
-      "claims_with": 0,
-      "active_memories": 3
-     },
      "fix_hint": null
     },
     {
@@ -1254,19 +1202,6 @@
      "detail": "row vector coverage unknown (table unavailable)",
      "evidence": {},
      "fix_hint": null
-    },
-    {
-     "check_id": "claims.coverage",
-     "dimension": "claims",
-     "severity": "info",
-     "status": "pass",
-     "title": "claims.coverage",
-     "detail": "0/2 active memories carry current claims (grey period; claims_backfill raises it)",
-     "evidence": {
-      "claims_with": 0,
-      "active_memories": 2
-     },
-     "fix_hint": null
     }
    ],
    "summary": {
@@ -1473,19 +1408,6 @@
      "title": "rows.coverage",
      "detail": "row vector coverage unknown (table unavailable)",
      "evidence": {},
-     "fix_hint": null
-    },
-    {
-     "check_id": "claims.coverage",
-     "dimension": "claims",
-     "severity": "info",
-     "status": "pass",
-     "title": "claims.coverage",
-     "detail": "0/2 active memories carry current claims (grey period; claims_backfill raises it)",
-     "evidence": {
-      "claims_with": 0,
-      "active_memories": 2
-     },
      "fix_hint": null
     },
     {
@@ -1790,19 +1712,6 @@
      "detail": "row vector coverage unknown (table unavailable)",
      "evidence": {},
      "fix_hint": null
-    },
-    {
-     "check_id": "claims.coverage",
-     "dimension": "claims",
-     "severity": "info",
-     "status": "pass",
-     "title": "claims.coverage",
-     "detail": "0/3 active memories carry current claims (grey period; claims_backfill raises it)",
-     "evidence": {
-      "claims_with": 0,
-      "active_memories": 3
-     },
-     "fix_hint": null
     }
    ],
    "summary": {
@@ -2016,19 +1925,6 @@
      "title": "rows.coverage",
      "detail": "row vector coverage unknown (table unavailable)",
      "evidence": {},
-     "fix_hint": null
-    },
-    {
-     "check_id": "claims.coverage",
-     "dimension": "claims",
-     "severity": "info",
-     "status": "pass",
-     "title": "claims.coverage",
-     "detail": "0/3 active memories carry current claims (grey period; claims_backfill raises it)",
-     "evidence": {
-      "claims_with": 0,
-      "active_memories": 3
-     },
      "fix_hint": null
     },
     {
@@ -2341,19 +2237,6 @@
      "detail": "row vector coverage unknown (table unavailable)",
      "evidence": {},
      "fix_hint": null
-    },
-    {
-     "check_id": "claims.coverage",
-     "dimension": "claims",
-     "severity": "info",
-     "status": "pass",
-     "title": "claims.coverage",
-     "detail": "0/3 active memories carry current claims (grey period; claims_backfill raises it)",
-     "evidence": {
-      "claims_with": 0,
-      "active_memories": 3
-     },
-     "fix_hint": null
     }
    ],
    "summary": {
@@ -2575,19 +2458,6 @@
      "title": "rows.coverage",
      "detail": "row vector coverage unknown (table unavailable)",
      "evidence": {},
-     "fix_hint": null
-    },
-    {
-     "check_id": "claims.coverage",
-     "dimension": "claims",
-     "severity": "info",
-     "status": "pass",
-     "title": "claims.coverage",
-     "detail": "0/3 active memories carry current claims (grey period; claims_backfill raises it)",
-     "evidence": {
-      "claims_with": 0,
-      "active_memories": 3
-     },
      "fix_hint": null
     },
     {
@@ -2900,19 +2770,6 @@
      "detail": "row vector coverage unknown (table unavailable)",
      "evidence": {},
      "fix_hint": null
-    },
-    {
-     "check_id": "claims.coverage",
-     "dimension": "claims",
-     "severity": "info",
-     "status": "pass",
-     "title": "claims.coverage",
-     "detail": "0/3 active memories carry current claims (grey period; claims_backfill raises it)",
-     "evidence": {
-      "claims_with": 0,
-      "active_memories": 3
-     },
-     "fix_hint": null
     }
    ],
    "summary": {
@@ -3134,19 +2991,6 @@
      "title": "rows.coverage",
      "detail": "row vector coverage unknown (table unavailable)",
      "evidence": {},
-     "fix_hint": null
-    },
-    {
-     "check_id": "claims.coverage",
-     "dimension": "claims",
-     "severity": "info",
-     "status": "pass",
-     "title": "claims.coverage",
-     "detail": "0/3 active memories carry current claims (grey period; claims_backfill raises it)",
-     "evidence": {
-      "claims_with": 0,
-      "active_memories": 3
-     },
      "fix_hint": null
     },
     {
@@ -3460,19 +3304,6 @@
      "detail": "row vector coverage unknown (table unavailable)",
      "evidence": {},
      "fix_hint": null
-    },
-    {
-     "check_id": "claims.coverage",
-     "dimension": "claims",
-     "severity": "info",
-     "status": "pass",
-     "title": "claims.coverage",
-     "detail": "0/3 active memories carry current claims (grey period; claims_backfill raises it)",
-     "evidence": {
-      "claims_with": 0,
-      "active_memories": 3
-     },
-     "fix_hint": null
     }
    ],
    "summary": {
@@ -3695,19 +3526,6 @@
      "title": "rows.coverage",
      "detail": "row vector coverage unknown (table unavailable)",
      "evidence": {},
-     "fix_hint": null
-    },
-    {
-     "check_id": "claims.coverage",
-     "dimension": "claims",
-     "severity": "info",
-     "status": "pass",
-     "title": "claims.coverage",
-     "detail": "0/3 active memories carry current claims (grey period; claims_backfill raises it)",
-     "evidence": {
-      "claims_with": 0,
-      "active_memories": 3
-     },
      "fix_hint": null
     },
     {
@@ -4031,19 +3849,6 @@
      "detail": "row vector coverage unknown (table unavailable)",
      "evidence": {},
      "fix_hint": null
-    },
-    {
-     "check_id": "claims.coverage",
-     "dimension": "claims",
-     "severity": "info",
-     "status": "pass",
-     "title": "claims.coverage",
-     "detail": "0/3 active memories carry current claims (grey period; claims_backfill raises it)",
-     "evidence": {
-      "claims_with": 0,
-      "active_memories": 3
-     },
-     "fix_hint": null
     }
    ],
    "summary": {
@@ -4276,19 +4081,6 @@
      "title": "rows.coverage",
      "detail": "row vector coverage unknown (table unavailable)",
      "evidence": {},
-     "fix_hint": null
-    },
-    {
-     "check_id": "claims.coverage",
-     "dimension": "claims",
-     "severity": "info",
-     "status": "pass",
-     "title": "claims.coverage",
-     "detail": "0/3 active memories carry current claims (grey period; claims_backfill raises it)",
-     "evidence": {
-      "claims_with": 0,
-      "active_memories": 3
-     },
      "fix_hint": null
     },
     {
@@ -4601,19 +4393,6 @@
      "detail": "row vector coverage unknown (table unavailable)",
      "evidence": {},
      "fix_hint": null
-    },
-    {
-     "check_id": "claims.coverage",
-     "dimension": "claims",
-     "severity": "info",
-     "status": "pass",
-     "title": "claims.coverage",
-     "detail": "0/2 active memories carry current claims (grey period; claims_backfill raises it)",
-     "evidence": {
-      "claims_with": 0,
-      "active_memories": 2
-     },
-     "fix_hint": null
     }
    ],
    "summary": {
@@ -4835,19 +4614,6 @@
      "title": "rows.coverage",
      "detail": "row vector coverage unknown (table unavailable)",
      "evidence": {},
-     "fix_hint": null
-    },
-    {
-     "check_id": "claims.coverage",
-     "dimension": "claims",
-     "severity": "info",
-     "status": "pass",
-     "title": "claims.coverage",
-     "detail": "0/2 active memories carry current claims (grey period; claims_backfill raises it)",
-     "evidence": {
-      "claims_with": 0,
-      "active_memories": 2
-     },
      "fix_hint": null
     },
     {
@@ -5140,19 +4906,6 @@
      "detail": "row vector coverage unknown (table unavailable)",
      "evidence": {},
      "fix_hint": null
-    },
-    {
-     "check_id": "claims.coverage",
-     "dimension": "claims",
-     "severity": "info",
-     "status": "pass",
-     "title": "claims.coverage",
-     "detail": "0/3 active memories carry current claims (grey period; claims_backfill raises it)",
-     "evidence": {
-      "claims_with": 0,
-      "active_memories": 3
-     },
-     "fix_hint": null
     }
    ],
    "summary": {
@@ -5386,19 +5139,6 @@
      "detail": "row vector coverage unknown (table unavailable)",
      "evidence": {},
      "fix_hint": null
-    },
-    {
-     "check_id": "claims.coverage",
-     "dimension": "claims",
-     "severity": "info",
-     "status": "pass",
-     "title": "claims.coverage",
-     "detail": "0/1 active memories carry current claims (grey period; claims_backfill raises it)",
-     "evidence": {
-      "claims_with": 0,
-      "active_memories": 1
-     },
-     "fix_hint": null
     }
    ],
    "summary": {
@@ -5605,19 +5345,6 @@
      "title": "rows.coverage",
      "detail": "row vector coverage unknown (table unavailable)",
      "evidence": {},
-     "fix_hint": null
-    },
-    {
-     "check_id": "claims.coverage",
-     "dimension": "claims",
-     "severity": "info",
-     "status": "pass",
-     "title": "claims.coverage",
-     "detail": "0/3 active memories carry current claims (grey period; claims_backfill raises it)",
-     "evidence": {
-      "claims_with": 0,
-      "active_memories": 3
-     },
      "fix_hint": null
     }
    ],
@@ -5832,19 +5559,6 @@
      "detail": "row vector coverage unknown (table unavailable)",
      "evidence": {},
      "fix_hint": null
-    },
-    {
-     "check_id": "claims.coverage",
-     "dimension": "claims",
-     "severity": "info",
-     "status": "pass",
-     "title": "claims.coverage",
-     "detail": "0/3 active memories carry current claims (grey period; claims_backfill raises it)",
-     "evidence": {
-      "claims_with": 0,
-      "active_memories": 3
-     },
-     "fix_hint": null
     }
    ],
    "summary": {
@@ -6058,19 +5772,6 @@
      "detail": "row vector coverage unknown (table unavailable)",
      "evidence": {},
      "fix_hint": null
-    },
-    {
-     "check_id": "claims.coverage",
-     "dimension": "claims",
-     "severity": "info",
-     "status": "pass",
-     "title": "claims.coverage",
-     "detail": "0/3 active memories carry current claims (grey period; claims_backfill raises it)",
-     "evidence": {
-      "claims_with": 0,
-      "active_memories": 3
-     },
-     "fix_hint": null
     }
    ],
    "summary": {
@@ -6278,19 +5979,6 @@
      "detail": "row vector coverage unknown (table unavailable)",
      "evidence": {},
      "fix_hint": null
-    },
-    {
-     "check_id": "claims.coverage",
-     "dimension": "claims",
-     "severity": "info",
-     "status": "pass",
-     "title": "claims.coverage",
-     "detail": "0/3 active memories carry current claims (grey period; claims_backfill raises it)",
-     "evidence": {
-      "claims_with": 0,
-      "active_memories": 3
-     },
-     "fix_hint": null
     }
    ],
    "summary": {
@@ -6497,19 +6185,6 @@
      "title": "rows.coverage",
      "detail": "row vector coverage unknown (table unavailable)",
      "evidence": {},
-     "fix_hint": null
-    },
-    {
-     "check_id": "claims.coverage",
-     "dimension": "claims",
-     "severity": "info",
-     "status": "pass",
-     "title": "claims.coverage",
-     "detail": "0/3 active memories carry current claims (grey period; claims_backfill raises it)",
-     "evidence": {
-      "claims_with": 0,
-      "active_memories": 3
-     },
      "fix_hint": null
     }
    ],
@@ -6731,19 +6406,6 @@
      "detail": "row vector coverage unknown (table unavailable)",
      "evidence": {},
      "fix_hint": null
-    },
-    {
-     "check_id": "claims.coverage",
-     "dimension": "claims",
-     "severity": "info",
-     "status": "pass",
-     "title": "claims.coverage",
-     "detail": "0/3 active memories carry current claims (grey period; claims_backfill raises it)",
-     "evidence": {
-      "claims_with": 0,
-      "active_memories": 3
-     },
-     "fix_hint": null
     }
    ],
    "summary": {
@@ -6951,19 +6613,6 @@
      "detail": "row vector coverage unknown (table unavailable)",
      "evidence": {},
      "fix_hint": null
-    },
-    {
-     "check_id": "claims.coverage",
-     "dimension": "claims",
-     "severity": "info",
-     "status": "pass",
-     "title": "claims.coverage",
-     "detail": "0/3 active memories carry current claims (grey period; claims_backfill raises it)",
-     "evidence": {
-      "claims_with": 0,
-      "active_memories": 3
-     },
-     "fix_hint": null
     }
    ],
    "summary": {
@@ -7170,19 +6819,6 @@
      "title": "rows.coverage",
      "detail": "row vector coverage unknown (table unavailable)",
      "evidence": {},
-     "fix_hint": null
-    },
-    {
-     "check_id": "claims.coverage",
-     "dimension": "claims",
-     "severity": "info",
-     "status": "pass",
-     "title": "claims.coverage",
-     "detail": "0/3 active memories carry current claims (grey period; claims_backfill raises it)",
-     "evidence": {
-      "claims_with": 0,
-      "active_memories": 3
-     },
      "fix_hint": null
     }
    ],
@@ -7404,19 +7040,6 @@
      "detail": "row vector coverage unknown (table unavailable)",
      "evidence": {},
      "fix_hint": null
-    },
-    {
-     "check_id": "claims.coverage",
-     "dimension": "claims",
-     "severity": "info",
-     "status": "pass",
-     "title": "claims.coverage",
-     "detail": "0/3 active memories carry current claims (grey period; claims_backfill raises it)",
-     "evidence": {
-      "claims_with": 0,
-      "active_memories": 3
-     },
-     "fix_hint": null
     }
    ],
    "summary": {
@@ -7623,19 +7246,6 @@
      "title": "rows.coverage",
      "detail": "row vector coverage unknown (table unavailable)",
      "evidence": {},
-     "fix_hint": null
-    },
-    {
-     "check_id": "claims.coverage",
-     "dimension": "claims",
-     "severity": "info",
-     "status": "pass",
-     "title": "claims.coverage",
-     "detail": "0/2 active memories carry current claims (grey period; claims_backfill raises it)",
-     "evidence": {
-      "claims_with": 0,
-      "active_memories": 2
-     },
      "fix_hint": null
     },
     {
@@ -7935,19 +7545,6 @@
      "fix_hint": null
     },
     {
-     "check_id": "claims.coverage",
-     "dimension": "claims",
-     "severity": "info",
-     "status": "pass",
-     "title": "claims.coverage",
-     "detail": "0/2 active memories carry current claims (grey period; claims_backfill raises it)",
-     "evidence": {
-      "claims_with": 0,
-      "active_memories": 2
-     },
-     "fix_hint": null
-    },
-    {
      "check_id": "database.quick_check",
      "dimension": "database",
      "severity": "info",
@@ -8241,19 +7838,6 @@
      "title": "rows.coverage",
      "detail": "row vector coverage unknown (table unavailable)",
      "evidence": {},
-     "fix_hint": null
-    },
-    {
-     "check_id": "claims.coverage",
-     "dimension": "claims",
-     "severity": "info",
-     "status": "pass",
-     "title": "claims.coverage",
-     "detail": "0/2 active memories carry current claims (grey period; claims_backfill raises it)",
-     "evidence": {
-      "claims_with": 0,
-      "active_memories": 2
-     },
      "fix_hint": null
     },
     {
@@ -8553,19 +8137,6 @@
      "fix_hint": null
     },
     {
-     "check_id": "claims.coverage",
-     "dimension": "claims",
-     "severity": "info",
-     "status": "pass",
-     "title": "claims.coverage",
-     "detail": "0/2 active memories carry current claims (grey period; claims_backfill raises it)",
-     "evidence": {
-      "claims_with": 0,
-      "active_memories": 2
-     },
-     "fix_hint": null
-    },
-    {
      "check_id": "database.quick_check",
      "dimension": "database",
      "severity": "info",
@@ -8859,19 +8430,6 @@
      "title": "rows.coverage",
      "detail": "row vector coverage unknown (table unavailable)",
      "evidence": {},
-     "fix_hint": null
-    },
-    {
-     "check_id": "claims.coverage",
-     "dimension": "claims",
-     "severity": "info",
-     "status": "pass",
-     "title": "claims.coverage",
-     "detail": "0/2 active memories carry current claims (grey period; claims_backfill raises it)",
-     "evidence": {
-      "claims_with": 0,
-      "active_memories": 2
-     },
      "fix_hint": null
     },
     {
@@ -9196,19 +8754,6 @@
      "fix_hint": null
     },
     {
-     "check_id": "claims.coverage",
-     "dimension": "claims",
-     "severity": "info",
-     "status": "pass",
-     "title": "claims.coverage",
-     "detail": "0/2 active memories carry current claims (grey period; claims_backfill raises it)",
-     "evidence": {
-      "claims_with": 0,
-      "active_memories": 2
-     },
-     "fix_hint": null
-    },
-    {
      "check_id": "database.quick_check",
      "dimension": "database",
      "severity": "info",
@@ -9530,19 +9075,6 @@
      "fix_hint": null
     },
     {
-     "check_id": "claims.coverage",
-     "dimension": "claims",
-     "severity": "info",
-     "status": "pass",
-     "title": "claims.coverage",
-     "detail": "0/2 active memories carry current claims (grey period; claims_backfill raises it)",
-     "evidence": {
-      "claims_with": 0,
-      "active_memories": 2
-     },
-     "fix_hint": null
-    },
-    {
      "check_id": "database.quick_check",
      "dimension": "database",
      "severity": "info",
@@ -9856,19 +9388,6 @@
      "title": "rows.coverage",
      "detail": "row vector coverage unknown (table unavailable)",
      "evidence": {},
-     "fix_hint": null
-    },
-    {
-     "check_id": "claims.coverage",
-     "dimension": "claims",
-     "severity": "info",
-     "status": "pass",
-     "title": "claims.coverage",
-     "detail": "0/2 active memories carry current claims (grey period; claims_backfill raises it)",
-     "evidence": {
-      "claims_with": 0,
-      "active_memories": 2
-     },
      "fix_hint": null
     },
     {
@@ -10193,19 +9712,6 @@
      "fix_hint": null
     },
     {
-     "check_id": "claims.coverage",
-     "dimension": "claims",
-     "severity": "info",
-     "status": "pass",
-     "title": "claims.coverage",
-     "detail": "0/2 active memories carry current claims (grey period; claims_backfill raises it)",
-     "evidence": {
-      "claims_with": 0,
-      "active_memories": 2
-     },
-     "fix_hint": null
-    },
-    {
      "check_id": "database.quick_check",
      "dimension": "database",
      "severity": "info",
@@ -10524,19 +10030,6 @@
      "title": "rows.coverage",
      "detail": "row vector coverage unknown (table unavailable)",
      "evidence": {},
-     "fix_hint": null
-    },
-    {
-     "check_id": "claims.coverage",
-     "dimension": "claims",
-     "severity": "info",
-     "status": "pass",
-     "title": "claims.coverage",
-     "detail": "0/2 active memories carry current claims (grey period; claims_backfill raises it)",
-     "evidence": {
-      "claims_with": 0,
-      "active_memories": 2
-     },
      "fix_hint": null
     },
     {
@@ -10861,19 +10354,6 @@
      "fix_hint": null
     },
     {
-     "check_id": "claims.coverage",
-     "dimension": "claims",
-     "severity": "info",
-     "status": "pass",
-     "title": "claims.coverage",
-     "detail": "0/2 active memories carry current claims (grey period; claims_backfill raises it)",
-     "evidence": {
-      "claims_with": 0,
-      "active_memories": 2
-     },
-     "fix_hint": null
-    },
-    {
      "check_id": "database.quick_check",
      "dimension": "database",
      "severity": "info",
@@ -11195,19 +10675,6 @@
      "fix_hint": null
     },
     {
-     "check_id": "claims.coverage",
-     "dimension": "claims",
-     "severity": "info",
-     "status": "pass",
-     "title": "claims.coverage",
-     "detail": "0/2 active memories carry current claims (grey period; claims_backfill raises it)",
-     "evidence": {
-      "claims_with": 0,
-      "active_memories": 2
-     },
-     "fix_hint": null
-    },
-    {
      "check_id": "database.quick_check",
      "dimension": "database",
      "severity": "info",
@@ -11521,19 +10988,6 @@
      "title": "rows.coverage",
      "detail": "row vector coverage unknown (table unavailable)",
      "evidence": {},
-     "fix_hint": null
-    },
-    {
-     "check_id": "claims.coverage",
-     "dimension": "claims",
-     "severity": "info",
-     "status": "pass",
-     "title": "claims.coverage",
-     "detail": "0/2 active memories carry current claims (grey period; claims_backfill raises it)",
-     "evidence": {
-      "claims_with": 0,
-      "active_memories": 2
-     },
      "fix_hint": null
     },
     {
@@ -11858,19 +11312,6 @@
      "fix_hint": null
     },
     {
-     "check_id": "claims.coverage",
-     "dimension": "claims",
-     "severity": "info",
-     "status": "pass",
-     "title": "claims.coverage",
-     "detail": "0/2 active memories carry current claims (grey period; claims_backfill raises it)",
-     "evidence": {
-      "claims_with": 0,
-      "active_memories": 2
-     },
-     "fix_hint": null
-    },
-    {
      "check_id": "database.quick_check",
      "dimension": "database",
      "severity": "info",
@@ -12192,19 +11633,6 @@
      "fix_hint": null
     },
     {
-     "check_id": "claims.coverage",
-     "dimension": "claims",
-     "severity": "info",
-     "status": "pass",
-     "title": "claims.coverage",
-     "detail": "0/2 active memories carry current claims (grey period; claims_backfill raises it)",
-     "evidence": {
-      "claims_with": 0,
-      "active_memories": 2
-     },
-     "fix_hint": null
-    },
-    {
      "check_id": "database.quick_check",
      "dimension": "database",
      "severity": "info",
@@ -12523,19 +11951,6 @@
      "title": "rows.coverage",
      "detail": "row vector coverage unknown (table unavailable)",
      "evidence": {},
-     "fix_hint": null
-    },
-    {
-     "check_id": "claims.coverage",
-     "dimension": "claims",
-     "severity": "info",
-     "status": "pass",
-     "title": "claims.coverage",
-     "detail": "0/2 active memories carry current claims (grey period; claims_backfill raises it)",
-     "evidence": {
-      "claims_with": 0,
-      "active_memories": 2
-     },
      "fix_hint": null
     },
     {

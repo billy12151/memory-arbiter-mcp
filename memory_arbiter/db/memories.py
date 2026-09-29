@@ -483,27 +483,6 @@ class MemoriesStore:
                 "WHERE memory_id=?",
                 (int(memory_id),),
             )
-            # 0.17.0 (adversarial review P1-3): claims are version-pinned the
-            # same way — a status flip must not orphan them (strict-mode
-            # pending→active would otherwise silence the claims channel).
-            # R2 review P1: the blanket +1 re-pin collided with itself —
-            # UNIQUE(memory_id, memory_version, attr_norm, value_norm) checks
-            # per row immediately, and cross-version same-value rows are the
-            # designed steady state (edits keep the old rows as audit), so any
-            # adjacent-version shared value blew up mid-statement and wedged
-            # every snapshot-semantics write (supersede/activation/confidence)
-            # permanently. Shift through negative space — negate, then
-            # translate into place: no intermediate state can collide.
-            conn.execute(
-                "UPDATE memory_claims SET memory_version=-memory_version "
-                "WHERE memory_id=?",
-                (int(memory_id),),
-            )
-            conn.execute(
-                "UPDATE memory_claims SET memory_version=1-memory_version "
-                "WHERE memory_id=?",
-                (int(memory_id),),
-            )
         if status_changed and self.state.sqlite_vec_available:
             try:
                 # (0.17.0 C5: the memory_evidence_vec parent_status flip
@@ -526,13 +505,6 @@ class MemoriesStore:
                     # drift). Re-activation paths re-publish on activation.
                     conn.execute(
                         "DELETE FROM subject_tags_vec WHERE id = ?", (int(memory_id),)
-                    )
-                    # Claims attr vectors follow the active set the same way;
-                    # the version-pinned memory_claims rows stay for audit.
-                    conn.execute(
-                        "DELETE FROM memory_claim_vec WHERE id IN "
-                        "(SELECT id FROM memory_claims WHERE memory_id=?)",
-                        (int(memory_id),),
                     )
                     # 0.17.0 (adversarial review P2-8): the summary vec feeds
                     # the write-time duplicate-hint recall (P2-7) — a retired
