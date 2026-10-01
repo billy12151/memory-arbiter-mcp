@@ -14,6 +14,10 @@ Versions follow semantic versioning.
 - **新治理守卫：机械变体对禁止 separate（owner 2026-10-01 拍板）**：`separate_workspace_alias` 对机械同键对（`agent-lane` ↔ `AgentLane`）直接拒绝——同一身份永远一个桶，劈散会伤冲突检测与召回；真是两个项目先改名。confirmed 方向不受影响。
 - **migrate/rename repoint 对齐守卫（R2 对抗轮 P1）**：repoint 通道原样搬运 rejected 行，能把跨身份拒绝搬成"孪生对拒绝"（治理门会拒的状态）并借上述免疫修复静默劈桶。repoint 时对 `机械键(alias)==机械键(new)` 的 rejected 行丢弃+返回警告，非孪生拒绝照常跟随迁移。
 
+### Removed (workspace 归一死代码，2026-10-01)
+
+- `workspace_candidate` 响应死分支与 `candidate` 初始化键（suggester 退役后全仓无赋值点，`write.py` 展示分支恒不可达）。
+
 ### Fixed (0.17.0+0.17.1 独立 review 批，2026-09-29)
 
 - **P1 `memory_summary_knn` 参数/占位符错位——写时重复提示的语义召回通道自 0.17.0 P2-7 起整体静默失效。** SQL 收敛为 COALESCE 单 workspace 占位符后，params 列表仍沿用退役 subject_tags_knn 形状的 3 元素（多一个 workspace 参数）→ 每次调用 sqlite3.Error 被 except 臂吞掉返回 []，所有写入静默降级到 `active_subject_tag_rows` 扫描兜底。修复参数列表；重指向的 scoped-recall 测试（原 fault-injection 钉在已退役的 subject_tags_knn 上，假绿）现钉住活路径。

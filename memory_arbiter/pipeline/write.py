@@ -520,7 +520,6 @@ class WritePipeline:
             "warnings": [],
             "decision": None,
             "decision_reason": None,
-            "candidate": None,
             "vector_publish_pending": False,
             "strict_block": False,
             "canonical_embedding": None,
@@ -730,14 +729,6 @@ class WritePipeline:
         if workspace["decision"] is not None:
             data["workspace_decision"] = workspace["decision"]
             data["workspace_decision_reason"] = workspace["decision_reason"]
-        suggestion = workspace.get("candidate")
-        if suggestion is not None and suggestion.candidate:
-            data["workspace_candidate"] = {
-                "candidate": suggestion.candidate,
-                "relation": suggestion.relation,
-                "confidence": suggestion.confidence,
-                "evidence": suggestion.evidence,
-            }
         if workspace["decision"] == "ASK" and not workspace["strict_block"]:
             similar = workspace["similar"]
             options: list[dict[str, Any]] = [
