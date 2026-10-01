@@ -5,6 +5,10 @@ Versions follow semantic versioning.
 
 ## [0.17.1 追加] — 未发版（claim 对比通道退役 + 判定输入上下文化，owner 2026-09-28 拍板）
 
+### Fixed (did_you_mean 确定性化，2026-10-01)
+
+- `validate_product_payload` 的 `did_you_mean` 建议改用 `sorted(allowed)` 迭代（注册表值是 set，difflib 迭代顺序受哈希种子影响）。corpus 全部 7 个 did_you_mean 期望值在 sorted 序下零变化（golden 多种子 0/1/2/random 实证全绿）。随之摘除 `test_hash_randomization_disabled` 环境门与 CI 无关——本地裸跑 `uv run pytest` 不再因缺 `PYTHONHASHSEED=0` 被门拦下。
+
 ### Fixed (workspace 归一：suggester 退役清扫收尾 + rejected 机械通道免疫，2026-10-01)
 
 方案与两轮 review 记录：`ZCodeProject/docs/mema-ws-normalization-cleanup-plan-2026-10-01.md`（v4）。

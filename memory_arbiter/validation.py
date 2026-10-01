@@ -268,7 +268,9 @@ def _v_unknown_fields(
                 "remember field is not valid for update",
                 did_you_mean=update_aliases[key],
             )
-        suggestion = difflib.get_close_matches(key, allowed, n=1, cutoff=0.78)
+        # sorted(): the registry value is a set and difflib iterates it, so
+        # without a fixed order the suggestion is hash-seed-bound.
+        suggestion = difflib.get_close_matches(key, sorted(allowed), n=1, cutoff=0.78)
         if suggestion and suggestion[0] in _SENSITIVE_FIELDS:
             return _error(key, "unknown field resembles a protected field", did_you_mean=suggestion[0])
         result.warnings.append(f"unknown field ignored: {key}")
