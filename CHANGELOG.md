@@ -5,6 +5,15 @@ Versions follow semantic versioning.
 
 ## [0.17.1 追加] — 未发版（claim 对比通道退役 + 判定输入上下文化，owner 2026-09-28 拍板）
 
+### Fixed (workspace 归一：suggester 退役清扫收尾 + rejected 机械通道免疫，2026-10-01)
+
+方案与两轮 review 记录：`ZCodeProject/docs/mema-ws-normalization-cleanup-plan-2026-10-01.md`（v4）。
+
+- **`mechanical_variant` 漏出规则层 AUTO 集合**：0.17.1 suggester 退役后，机械变体写入（`agent-lane` 写入已注册 `AgentLane`）落入 ASK 兜底——数据已并桶但响应 `ASK`+`keep_separate` 选项与事实矛盾。AUTO 集合补 `mechanical_variant`（workspace_rules）；写时桶向量 backfill 集合同步补齐（缺失向量自愈通道与 exact 等价）。
+- **rejected 免疫在机械通道全失效（两层）**：`separate_workspace_alias` 的 keep-separate 决定对机械变体通道不生效——层1：1b 机械折叠不消费抑制名单，被拒原名再写照样进被拒桶（响应标 KEEP 实际落桶）；层2：幽灵变体（连字符/下划线互换）连 alias 查询都不命中，抑制名单为空。修复：1b 消费名单 + alias 精确 miss 后机械键第二跳（仅 rejected 行参与，confirmed 幽灵变体维持折叠）+ 名单查询精确键∪幽灵键并集聚合（真实库 `agent-chancellor` 双 rejected 行形状全量尊重）。修复后被拒同名写入落新桶（strict 下 PENDING 待确认）。
+- **新治理守卫：机械变体对禁止 separate（owner 2026-10-01 拍板）**：`separate_workspace_alias` 对机械同键对（`agent-lane` ↔ `AgentLane`）直接拒绝——同一身份永远一个桶，劈散会伤冲突检测与召回；真是两个项目先改名。confirmed 方向不受影响。
+- **migrate/rename repoint 对齐守卫（R2 对抗轮 P1）**：repoint 通道原样搬运 rejected 行，能把跨身份拒绝搬成"孪生对拒绝"（治理门会拒的状态）并借上述免疫修复静默劈桶。repoint 时对 `机械键(alias)==机械键(new)` 的 rejected 行丢弃+返回警告，非孪生拒绝照常跟随迁移。
+
 ### Fixed (0.17.0+0.17.1 独立 review 批，2026-09-29)
 
 - **P1 `memory_summary_knn` 参数/占位符错位——写时重复提示的语义召回通道自 0.17.0 P2-7 起整体静默失效。** SQL 收敛为 COALESCE 单 workspace 占位符后，params 列表仍沿用退役 subject_tags_knn 形状的 3 元素（多一个 workspace 参数）→ 每次调用 sqlite3.Error 被 except 臂吞掉返回 []，所有写入静默降级到 `active_subject_tag_rows` 扫描兜底。修复参数列表；重指向的 scoped-recall 测试（原 fault-injection 钉在已退役的 subject_tags_knn 上，假绿）现钉住活路径。

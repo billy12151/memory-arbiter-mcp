@@ -389,6 +389,7 @@ class WorkspaceStore:
                 #    redirect short-circuits vector/model matching; negative
                 #    pairs suppress those candidates on later writes.
                 alias_key = _normalize_alias_key(raw)
+                ghost_alias_keys: list[str] = []
                 try:
                     arow = conn.execute(
                         "SELECT canonical, status FROM workspace_aliases "
@@ -399,6 +400,35 @@ class WorkspaceStore:
                     ).fetchone()
                 except sqlite3.Error:
                     arow = None
+                if arow is None:
+                    # Ghost-spelling second hop: a rejection recorded under one
+                    # spelling ("agent-lane") must also cover separator/case
+                    # variants ("agent_lane") — the mechanical fold would
+                    # otherwise silently bypass it (the alias lookup key only
+                    # case-folds + collapses whitespace). Only rejected rows
+                    # participate: a confirmed alias is an exact identity pair
+                    # and must not silently redirect an unrelated registered
+                    # bucket that happens to share the mechanical key.
+                    mkey = _mechanical_ws_key(raw)
+                    if mkey:
+                        try:
+                            ghost_rows = conn.execute(
+                                "SELECT alias_workspace, canonical, status "
+                                "FROM workspace_aliases"
+                            ).fetchall()
+                        except sqlite3.Error:
+                            ghost_rows = []
+                        ghost_rejected = [
+                            row for row in ghost_rows
+                            if str(row["status"]) == "rejected"
+                            and _mechanical_ws_key(str(row["alias_workspace"])) == mkey
+                        ]
+                        if ghost_rejected:
+                            arow = ghost_rejected[0]
+                            ghost_alias_keys = [
+                                str(row["alias_workspace"])
+                                for row in ghost_rejected
+                            ]
                 if arow is not None:
                     if str(arow["status"]) == "confirmed":
                         result.update({
@@ -416,10 +446,17 @@ class WorkspaceStore:
                         # Rejections accumulate per (raw, canonical).  Confirmed
                         # aliases have singular precedence above; absent one, skip
                         # every explicitly rejected target during candidate ranking.
+                        # Exact key ∪ ghost mechanical keys: the second hop can
+                        # hit a rejection stored under a sibling spelling, and
+                        # every same-key spelling's rejections must aggregate
+                        # (agent-chancellor carries two rejected rows).
+                        list_keys = [alias_key, *ghost_alias_keys]
+                        placeholders = ",".join("?" * len(list_keys))
                         rejected_rows = conn.execute(
-                            "SELECT canonical FROM workspace_aliases "
-                            "WHERE alias_workspace=? AND status='rejected'",
-                            (alias_key,),
+                            f"SELECT canonical FROM workspace_aliases "
+                            f"WHERE status='rejected' "
+                            f"AND alias_workspace IN ({placeholders})",
+                            list_keys,
                         ).fetchall()
                         suppressed = [str(row["canonical"]) for row in rejected_rows]
                         # Exact-match suppression alone is bypassable through a
@@ -491,12 +528,19 @@ class WorkspaceStore:
                 #     renames it.
                 variant_key = _mechanical_ws_key(raw)
                 if variant_key:
+                    # The mechanical fold must respect rejected targets: a
+                    # keep-separate decision on this identity pair suppresses
+                    # the fold (suppressed spellings were expanded mechanically
+                    # in the rejected branch above, so name exclusion here is
+                    # sufficient).
+                    suppressed_names = set(result.get("rejected_canonicals") or [])
                     variant = next(
                         (
                             row for row in conn.execute(
                                 "SELECT id, name FROM workspace_canonicals"
                             ).fetchall()
                             if _mechanical_ws_key(str(row["name"])) == variant_key
+                            and str(row["name"]) not in suppressed_names
                         ),
                         None,
                     )
@@ -771,6 +815,21 @@ class WorkspaceStore:
         # separator-only aliases behaving exactly as before.
         key_mech = _mechanical_ws_key(key)
         canonical_mech = _mechanical_ws_key(canonical)
+        # Mechanical twins are ONE workspace identity (the write path folds
+        # them unconditionally), so a keep-separate decision between them is
+        # unenforceable and would split one workspace's memories across two
+        # buckets — degrading conflict detection and recall. Refuse it; a
+        # genuine two-project pair with coincidentally similar names must be
+        # disambiguated by renaming one side instead (owner 2026-10-01).
+        if status == "rejected" and canonical_mech and canonical_mech == key_mech:
+            return False, [
+                f"workspace {key!r} and {canonical!r} are spelling variants of "
+                "the same mechanical identity (case/separator-insensitive); "
+                "keeping them separate would split one workspace's memories "
+                "across two buckets and degrade conflict detection and recall. "
+                "If they really are two different projects, rename one of them "
+                "first."
+            ]
         rejected_match = [
             (str(row["alias_workspace"]), str(row["canonical"]))
             for row in conn.execute(
@@ -885,14 +944,46 @@ class WorkspaceStore:
         new: str,
         *,
         exclude_aliases: tuple[str, ...] = (),
-    ) -> None:
+    ) -> list[str]:
+        """Repoint alias decisions from ``old`` to ``new``; returns warnings.
+
+        A rejected decision whose alias is a mechanical twin of ``new`` would
+        become an unenforceable, memory-splitting row: the write path folds
+        twins unconditionally and the resolver now honors rejections *against*
+        that fold. Drop it with a warning instead of repointing — mirroring
+        the governance guard that refuses creating such rows (0.17.1).
+        """
         now = utc_now_iso()
+        warnings: list[str] = []
         exclusions = ""
         params: list[Any] = [new, now, old]
         if exclude_aliases:
             placeholders = ",".join("?" for _ in exclude_aliases)
             exclusions = f" AND alias_workspace NOT IN ({placeholders})"
             params.extend(exclude_aliases)
+        new_mech = _mechanical_ws_key(new)
+        if new_mech:
+            doomed: list[tuple[str, str]] = []
+            for row in conn.execute(
+                "SELECT alias_workspace, canonical FROM workspace_aliases "
+                "WHERE canonical=? AND status='rejected'" + exclusions,
+                [old, *exclude_aliases],
+            ):
+                alias_ws = str(row["alias_workspace"])
+                if _mechanical_ws_key(alias_ws) == new_mech:
+                    doomed.append((alias_ws, str(row["canonical"])))
+            for alias_ws, rejected_canonical in doomed:
+                conn.execute(
+                    "DELETE FROM workspace_aliases "
+                    "WHERE alias_workspace=? AND canonical=? AND status='rejected'",
+                    (alias_ws, rejected_canonical),
+                )
+                warnings.append(
+                    f"rejected workspace decision ({alias_ws!r} kept separate from "
+                    f"{rejected_canonical!r}) dropped while repointing {old!r} to {new!r}: "
+                    "the alias is a spelling variant of the destination, and a twin-pair "
+                    "rejection would split one workspace's memories across two buckets."
+                )
         conn.execute(
             "INSERT OR IGNORE INTO workspace_aliases("
             "alias_workspace,canonical,status,updated_at) "
@@ -904,6 +995,7 @@ class WorkspaceStore:
             "DELETE FROM workspace_aliases WHERE canonical=?" + exclusions,
             (old, *exclude_aliases),
         )
+        return warnings
 
     @staticmethod
     def _mechanical_canonical_on_conn(
@@ -1173,13 +1265,13 @@ class WorkspaceStore:
                 fwd_key = _normalize_alias_key(old)
                 new_key = _normalize_alias_key(new)
                 if fwd_key == new_key:
-                    self._repoint_workspace_targets_on_conn(conn, old, new)
+                    repoint_warnings = self._repoint_workspace_targets_on_conn(conn, old, new)
                     conn.execute(
                         "DELETE FROM workspace_aliases WHERE alias_workspace=? AND canonical=?",
                         (new_key, new),
                     )
-                    return updated, []
-                self._repoint_workspace_targets_on_conn(
+                    return updated, repoint_warnings
+                repoint_warnings = self._repoint_workspace_targets_on_conn(
                     conn, old, new, exclude_aliases=(fwd_key, new_key),
                 )
                 conn.execute(
@@ -1193,7 +1285,7 @@ class WorkspaceStore:
                     (fwd_key, old),
                 )
                 self._install_workspace_redirect_on_conn(conn, old, new)
-            return updated, []
+            return updated, repoint_warnings
         except OSError as exc:
             # The advisory flock itself is unavailable (e.g. <db>.startup.lock
             # is a directory, or the database directory is read-only) — report
@@ -1297,9 +1389,9 @@ class WorkspaceStore:
             except sqlite3.Error:
                 pass  # vec table may be absent; canonical delete still proceeds
             conn.execute("DELETE FROM workspace_canonicals WHERE name = ?", (from_ws,))
-        WorkspaceStore._repoint_workspace_targets_on_conn(
+        warnings.extend(WorkspaceStore._repoint_workspace_targets_on_conn(
             conn, from_ws, to_ws, exclude_aliases=(alias_key, to_key),
-        )
+        ))
         conn.execute(
             "DELETE FROM workspace_aliases "
             "WHERE alias_workspace=? AND canonical IN (?,?)",

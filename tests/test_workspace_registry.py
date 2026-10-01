@@ -247,10 +247,8 @@ def test_merge_repoints_everything_and_installs_redirect(tmp_path: Path) -> None
 def test_rejected_pair_is_respected_not_merged(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     register(tools, "AgentLane", "agent-lane")
-    ok, warnings = tools.db.record_workspace_decision(
-        "agent-lane", "AgentLane", status="rejected",
-    )
-    assert ok, warnings
+    # G 守卫（0.17.1）后 twin rejected 行只能以存量形态存在：直插等价行。
+    insert_alias(tools, "agent-lane", "AgentLane", "rejected")
     result = tools.db.workspaces.normalize_workspace_canonicals(dry_run=False)
     assert result["ok"]
     assert result["merged"] == []
@@ -266,12 +264,10 @@ def test_rejected_pair_is_respected_not_merged(tmp_path: Path) -> None:
 
 def test_reverse_rejected_pair_is_respected_not_merged(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
-    # Rejection recorded BEFORE either spelling was registered: the ghost
+    # Rejection recorded BEFORE either spelling was registered (legacy row —
+    # G 守卫后此类行不再能经治理产生，直插等价形态): the ghost
     # spelling stays verbatim under the WINNER's alias key...
-    ok, warnings = tools.db.record_workspace_decision(
-        "AgentLane", "agent-lane", status="rejected",
-    )
-    assert ok, warnings
+    insert_alias(tools, "agentlane", "agent-lane", "rejected")
     # ...then legacy double-registration happens later.
     register(tools, "AgentLane", "agent-lane")
     result = tools.db.workspaces.normalize_workspace_canonicals(dry_run=False)
@@ -515,14 +511,11 @@ def test_rename_onto_own_mechanical_twin_stays_a_spelling_rename(tmp_path: Path)
 
 def test_cross_spelling_rejected_row_skips_whole_group(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
-    # The rejection lives under a THIRD spelling of the pair (the resolve
-    # refusal flow's typical product): neither the loser's nor the winner's
-    # alias key carries the row, so exact-key lookups would miss it and merge
-    # on top of an explicit user rejection.
-    ok, warnings = tools.db.record_workspace_decision(
-        "agent_lane", "AgentLane", status="rejected",
-    )
-    assert ok, warnings
+    # The rejection lives under a THIRD spelling of the pair (legacy row —
+    # G 守卫后经治理不再产生，直插等价形态): neither the loser's nor the
+    # winner's alias key carries the row, so exact-key lookups would miss it
+    # and merge on top of an explicit user rejection.
+    insert_alias(tools, "agent_lane", "AgentLane", "rejected")
     register(tools, "AgentLane", "agent-lane")
     result = tools.db.workspaces.normalize_workspace_canonicals(dry_run=False)
     assert result["ok"]
@@ -2023,3 +2016,245 @@ def test_confirm_expiry_failure_warns_not_fails(tmp_path, monkeypatch):
     assert any("清场失败" in w for w in r["warnings"]), r["warnings"]
     assert _sidecar(tools).exists(), "快照不得被清场失败回滚"
     assert _workspace_row_status(tools, row_hash) == "pending"
+
+
+# ── 0.17.1 追加（2026-10-01）：mechanical_variant AUTO 补判 + rejected 机械通道免疫 ──
+#
+# 方案：ZCodeProject/docs/mema-ws-normalization-cleanup-plan-2026-10-01.md（v4）。
+# G 守卫（变体对拒分）之后，新的 twin rejected 行无法再经治理产生；本节的
+# rejected 行一律直插表内，模拟的是存量行（legacy）——免疫逻辑消费的正是它们。
+
+
+def _insert_legacy_rejected_row(tools, alias: str, canonical: str) -> None:
+    with tools.db.write_transaction() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO workspace_aliases(alias_workspace,canonical,status,updated_at) "
+            "VALUES(?,?,'rejected',datetime('now'))",
+            (_normalize_alias_key(alias), canonical),
+        )
+
+
+def test_rule_decision_mechanical_variant_is_auto():
+    resolved = {"matched_by": "mechanical_variant", "canonical": "AgentLane",
+                "similar": [], "rejected_canonicals": []}
+    d = wr.rule_decision("agent-lane", resolved, {"title": "t", "first_para": "内容"})
+    assert d["decision"] == "AUTO"
+    assert d["reason"] == "mechanical_variant"
+    assert d["canonical"] == "AgentLane"
+
+
+def test_rejected_legacy_row_blocks_mechanical_fold(tmp_path):
+    """被拒原名（legacy rejected 行）不再被 1b 机械折叠进被拒桶（C 层1）。"""
+    t = rules_make_tools(tmp_path, "none")
+    db = t.db
+    with db.write_transaction() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO workspace_canonicals(name,created_at) "
+            "VALUES('AgentLane',datetime('now'))"
+        )
+    _insert_legacy_rejected_row(t, "agent-lane", "AgentLane")
+    r = db.resolve_workspace_canonical("agent-lane", None, register_new=False)
+    assert r["matched_by"] == "new"
+    assert r["canonical"] == "agent-lane"
+    assert "AgentLane" in r["rejected_canonicals"]
+
+
+def test_rejected_ghost_variant_second_hop_blocks_fold(tmp_path):
+    """幽灵变体（agent-lane 被拒后写 agent_lane）经机械键第二跳吃到免疫（C 层2）。"""
+    t = rules_make_tools(tmp_path, "none")
+    db = t.db
+    with db.write_transaction() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO workspace_canonicals(name,created_at) "
+            "VALUES('AgentLane',datetime('now'))"
+        )
+    _insert_legacy_rejected_row(t, "agent-lane", "AgentLane")
+    r = db.resolve_workspace_canonical("agent_lane", None, register_new=False)
+    assert r["matched_by"] == "new"
+    assert r["canonical"] == "agent_lane"
+    assert "AgentLane" in r["rejected_canonicals"]
+
+
+def test_rejected_twin_does_not_block_exact_canonical(tmp_path):
+    """桶本名 exact 命中不受 rejected 影响，规则层 AUTO（合法写入）。"""
+    t = rules_make_tools(tmp_path, "none")
+    db = t.db
+    with db.write_transaction() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO workspace_canonicals(name,created_at) "
+            "VALUES('AgentLane',datetime('now'))"
+        )
+    _insert_legacy_rejected_row(t, "agent-lane", "AgentLane")
+    r = db.resolve_workspace_canonical("AgentLane", None, register_new=False)
+    assert r["matched_by"] == "exact"
+    d = wr.rule_decision("AgentLane", r, {"title": "t", "first_para": "x"})
+    assert d["decision"] == "AUTO"
+
+
+def test_confirmed_ghost_variant_still_folds(tmp_path):
+    """confirmed 幽灵变体不参与第二跳，仍走 1b 折叠（第二跳只消费 rejected）。"""
+    t = rules_make_tools(tmp_path, "none")
+    db = t.db
+    ok, errors = db.workspaces.record_workspace_decision(
+        "agent-lane", "AgentLane", status="confirmed",
+    )
+    assert ok, errors
+    r = db.resolve_workspace_canonical("agent_lane", None, register_new=False)
+    assert r["matched_by"] == "mechanical_variant"
+    assert r["canonical"] == "AgentLane"
+
+
+def test_multiple_rejected_twin_rows_all_aggregated(tmp_path):
+    """同机械键多行 rejected 全量聚合（真实库 agent-chancellor 双行形状，R2-P0c）。"""
+    t = rules_make_tools(tmp_path, "none")
+    db = t.db
+    with db.write_transaction() as conn:
+        for name in ("AgentLane", "MemoryBank"):
+            conn.execute(
+                "INSERT OR IGNORE INTO workspace_canonicals(name,created_at) "
+                "VALUES(?,datetime('now'))",
+                (name,),
+            )
+    _insert_legacy_rejected_row(t, "agent-chancellor", "AgentLane")
+    _insert_legacy_rejected_row(t, "agent-chancellor", "MemoryBank")
+    r = db.resolve_workspace_canonical("agent_chancellor", None, register_new=False)
+    assert "AgentLane" in r["rejected_canonicals"]
+    assert "MemoryBank" in r["rejected_canonicals"]
+    assert r["matched_by"] == "new"
+    assert r["canonical"] == "agent_chancellor"
+
+
+def test_ghost_hop_does_not_redirect_unrelated_registered_twin(tmp_path):
+    """跨身份 rejected（foo-bar→ProjectX）不误伤已注册的孪生拼写 foo_bar（exact 优先）。"""
+    t = rules_make_tools(tmp_path, "none")
+    db = t.db
+    with db.write_transaction() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO workspace_canonicals(name,created_at) "
+            "VALUES('foo_bar',datetime('now'))"
+        )
+    ok, errors = db.workspaces.record_workspace_decision(
+        "foo-bar", "ProjectX", status="rejected",
+    )
+    assert ok, errors
+    r = db.resolve_workspace_canonical("foo_bar", None, register_new=False)
+    assert r["matched_by"] == "exact"
+    assert r["canonical"] == "foo_bar"
+
+
+def test_separate_refuses_mechanical_twin_pair(tmp_path):
+    """G 守卫：同一机械身份的变体对 separate 直接拒绝（owner 2026-10-01 拍板）。"""
+    t = rules_make_tools(tmp_path, "none")
+    db = t.db
+    with db.write_transaction() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO workspace_canonicals(name,created_at) "
+            "VALUES('AgentLane',datetime('now'))"
+        )
+    result = t.memory_govern("separate_workspace_alias", {
+        "alias": "agent-lane", "canonical": "AgentLane",
+        "reason": "try to split", "authorized": True,
+    })
+    assert result["ok"] is False, result["data"]
+    assert "spelling variants" in result["data"]["error"]
+    # 幽灵拼写同样被拒
+    ok2, errors2 = db.workspaces.record_workspace_decision(
+        "agent_lane", "AgentLane", status="rejected",
+    )
+    assert not ok2 and errors2
+    with db.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM workspace_aliases").fetchone()[0] == 0
+    # confirmed 方向不受守卫影响（ twin 确认=折叠语义，合法）
+    ok3, errors3 = db.workspaces.record_workspace_decision(
+        "agent-lane", "AgentLane", status="confirmed",
+    )
+    assert ok3, errors3
+
+
+def test_strict_rejected_name_goes_pending(tmp_path):
+    """strict 下被拒原名落 new → strict_block → PENDING + confirm 流程（新桶须确认）。"""
+    t = rules_make_tools(tmp_path, "strict")
+    db = t.db
+    with db.write_transaction() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO workspace_canonicals(name,created_at) "
+            "VALUES('AgentLane',datetime('now'))"
+        )
+    _insert_legacy_rejected_row(t, "agent-lane", "AgentLane")
+    r = t.memory_write(
+        content="x", subject="s", workspace="agent-lane",
+        source_type="agent_generated",
+    )
+    assert r["ok"], r
+    data = r["data"]
+    assert data["workspace_canonical"] == "agent-lane"
+    assert data.get("action_required") == "confirm_new_workspace"
+    assert db.get_memory(data["id"])["status"] == MemoryStatus.PENDING.value
+
+
+def test_strict_mechanical_variant_reuses_active(tmp_path):
+    """strict 下机械变体（确定性身份）直接 ACTIVE 复用，不 ASK 不 PENDING。"""
+    t = rules_make_tools(tmp_path, "strict")
+    db = t.db
+    with db.write_transaction() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO workspace_canonicals(name,created_at) "
+            "VALUES('AgentLane',datetime('now'))"
+        )
+    r = t.memory_write(
+        content="x", subject="s", workspace="agent-lane",
+        source_type="agent_generated",
+    )
+    assert r["ok"], r
+    data = r["data"]
+    assert data["workspace_decision"] == "AUTO"
+    assert data["workspace_canonical"] == "AgentLane"
+    assert db.get_memory(data["id"])["status"] == MemoryStatus.ACTIVE.value
+
+
+def test_migrate_drops_twin_contradicting_rejection_with_warning(tmp_path):
+    """R2-P1：migrate repoint 不得制造孪生 rejected 行——会咬合劈桶的行丢弃+警告。"""
+    t = rules_make_tools(tmp_path, "none")
+    db = t.db
+    register(t, "OldProj", "agent-lane")
+    # 跨身份合法 rejected（agent_lane ↛ OldProj，G 允许创建）
+    _insert_legacy_rejected_row(t, "agent_lane", "OldProj")
+    updated, warnings = db.workspaces.migrate_workspace("OldProj", "agent-lane")
+    assert updated >= 0
+    assert any("dropped while repointing" in w and "spelling variant" in w for w in warnings), warnings
+    # 行已丢弃（不再存在会咬合的孪生 rejected），折叠语义恢复
+    r = db.resolve_workspace_canonical("agent_lane", None, register_new=False)
+    assert r["matched_by"] == "mechanical_variant"
+    assert r["canonical"] == "agent-lane"
+    # 非孪生 rejected 行照常跟随迁移
+    _insert_legacy_rejected_row(t, "unrelated", "agent-lane")
+    _u2, w2 = db.workspaces.migrate_workspace("agent-lane", "MemoryBank")
+    assert not any("dropped while repointing" in w for w in w2), w2
+    with db.connection() as conn:
+        rows = [
+            (str(row["alias_workspace"]), str(row["canonical"]), str(row["status"]))
+            for row in conn.execute(
+                "SELECT alias_workspace,canonical,status FROM workspace_aliases"
+            )
+        ]
+    assert ("unrelated", "MemoryBank", "rejected") in rows
+
+
+def test_multiple_rejected_rows_across_spellings_all_aggregated(tmp_path):
+    """同机械键**不同拼写** alias 的多行 rejected 全量聚合（R2-P2 变异实测钉性缺口）。"""
+    t = rules_make_tools(tmp_path, "none")
+    db = t.db
+    with db.write_transaction() as conn:
+        for name in ("AgentLane", "MemoryBank"):
+            conn.execute(
+                "INSERT OR IGNORE INTO workspace_canonicals(name,created_at) "
+                "VALUES(?,datetime('now'))",
+                (name,),
+            )
+    _insert_legacy_rejected_row(t, "agent-chancellor", "AgentLane")
+    _insert_legacy_rejected_row(t, "agent_chancellor", "MemoryBank")
+    # 原名带空格形态：精确键双 miss，只可能经第二跳聚合
+    r = db.resolve_workspace_canonical("agent chancellor", None, register_new=False)
+    assert "AgentLane" in r["rejected_canonicals"]
+    assert "MemoryBank" in r["rejected_canonicals"]
+    assert r["matched_by"] == "new"

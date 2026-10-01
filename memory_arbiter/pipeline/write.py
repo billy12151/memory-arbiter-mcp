@@ -546,9 +546,10 @@ class WritePipeline:
         # Confirmed aliases short-circuit before embedding their canonical text.
         # Backfill a missing canonical vector once, outside the memory write
         # transaction; insert_memory publishes this prepared vector post-commit.
-        # Exact matches take the same repair path so the "retry a write using
-        # this workspace" guidance actually republishes a missing vector.
-        if result["matched_by"] in {"confirmed_alias", "exact"}:
+        # Exact matches and mechanical variants (same deterministic identity
+        # class) take the same repair path so the "retry a write using this
+        # workspace" guidance actually republishes a missing vector.
+        if result["matched_by"] in {"confirmed_alias", "exact", "mechanical_variant"}:
             result["canonical_embedding"] = (
                 self.db.workspaces.prepare_missing_workspace_canonical_embedding(
                     result["canonical"], embedder,

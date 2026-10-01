@@ -248,7 +248,11 @@ def rule_decision(
     ]).casefold()
 
     # AUTO: the mechanical layer already found high-confidence identity.
-    if matched_by in {"confirmed_alias", "exact"}:
+    # mechanical_variant is the same deterministic identity class as exact
+    # (spec §11: reuse without vector/model); with the 0.17.1 suggester
+    # retired there is no model layer to ask, and an ASK here would contradict
+    # data the resolver has already folded.
+    if matched_by in {"confirmed_alias", "exact", "mechanical_variant"}:
         return {"decision": "AUTO", "reason": matched_by, "canonical": resolved.get("canonical")}
 
     # KEEP: reference/borrowed material must not be merged into what it cites.
