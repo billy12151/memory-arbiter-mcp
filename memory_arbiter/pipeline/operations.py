@@ -610,6 +610,14 @@ class OperationsPipeline:
     ) -> dict[str, Any]:
         """Rename a canonical workspace and maintain internal forwarding."""
         updated, warnings = self.db.rename_workspace_canonical(old, new)
+        if not warnings:
+            # P2 #7: bucket-level reason lands in governance_audit (additive
+            # trail; normalize_audit consumers never see these rows).
+            self.db.audit.record_governance_action(
+                "rename_workspace",
+                reason,
+                {"old_canonical": old, "new_canonical": new, "memories_updated": updated},
+            )
         return self.db.state.response(
             {
                 "renamed": not warnings,
@@ -638,6 +646,14 @@ class OperationsPipeline:
             warning for warning in warnings
             if "workspace canonical vector publish failed" not in warning
         ]
+        if not operation_warnings:
+            # P2 #7: same governance trail as rename (migration committed;
+            # vector-publication degradation is not a migration failure).
+            self.db.audit.record_governance_action(
+                "migrate_workspace",
+                reason,
+                {"from": from_ws, "to": to_ws, "memories_updated": updated},
+            )
         data: dict[str, Any] = {
             "migrated": not operation_warnings,
             "from": from_ws,
@@ -917,10 +933,15 @@ class OperationsPipeline:
             # moved_ids + failed_ids covers the request). The vector-publish
             # warning is dropped — after rollback the canonical row it names
             # was never committed, so the retry guidance would be misleading.
+            # The voided_conflict_tickets sentinel is dropped too (P2 #10):
+            # the voids rolled back with the transaction, and the sentinel is
+            # a structured counter the success path consumes into response
+            # data — never a raw warning.
             reason_text = f"aborted: {exc}"
             abort_warnings = [
                 warning for warning in warnings
                 if "workspace canonical vector publish failed" not in warning
+                and not warning.startswith("voided_conflict_tickets:")
             ]
             return self.db.state.response(
                 {
@@ -992,12 +1013,38 @@ class OperationsPipeline:
                 bucket_was_new = conn.execute(
                     "SELECT 1 FROM workspace_canonicals WHERE name = ?", (target,),
                 ).fetchone() is None
+                # P2 #10: one batched prefetch per request on this transaction's
+                # snapshot (no TOCTOU drift) replaces the per-id re-read and the
+                # per-id EXISTS probes — rows, the destination sha-collision
+                # set, and the pending queue rows by member id. Same-request
+                # sha siblings stay gated sequentially: an ACTIVE row that
+                # lands in the target makes a same-sha later id refuse exactly
+                # as the interleaved per-id flow did.
+                request_ids = [int(value) for value in movable]
+                prefetched: dict[int, Any] = {}
+                if request_ids:
+                    prefetch_ph = ",".join("?" * len(request_ids))
+                    prefetched = {
+                        int(row["id"]): row
+                        for row in conn.execute(
+                            f"SELECT id, workspace, workspace_canonical, status, content_sha "
+                            f"FROM memories WHERE id IN ({prefetch_ph})",
+                            request_ids,
+                        ).fetchall()
+                    }
+                colliding_ids = (
+                    self.db.workspaces._content_sha_collision_ids_on_conn(
+                        conn, target, request_ids,
+                    )
+                )
+                queue_rows_by_id = (
+                    self.db.workspaces._pending_queue_rows_by_memory_id_on_conn(
+                        conn, request_ids,
+                    )
+                )
+                target_active_shas: set[str] = set()
                 for memory_id in list(movable):
-                    row = conn.execute(
-                        "SELECT workspace, workspace_canonical, status FROM memories "
-                        "WHERE id = ?",
-                        (memory_id,),
-                    ).fetchone()
+                    row = prefetched.get(int(memory_id))
                     if row is None:
                         failures.append({
                             "memory_id": memory_id,
@@ -1031,10 +1078,28 @@ class OperationsPipeline:
                             "workspace": bucket,
                             "workspace_canonical": canonical,
                         })
+                    row_status = str(row["status"] or "")
+                    row_sha = str(row["content_sha"] or "")
+                    sha_hit = (
+                        int(memory_id) in colliding_ids
+                        or (
+                            row_status == MemoryStatus.ACTIVE.value
+                            and bool(row_sha)
+                            and row_sha in target_active_shas
+                        )
+                    )
+                    current_bucket_value = (
+                        str(row["workspace_canonical"])
+                        if row["workspace_canonical"] not in (None, "")
+                        else str(row["workspace"] or "")
+                    )
                     ok_move, move_warnings = self.db.workspaces.move_memory_workspace_on_conn(
                         conn, memory_id, target,
                         precomputed_embedding=target_embedding,
                         allow_default=default_fallback,
+                        current_bucket=current_bucket_value,
+                        sha_collision=sha_hit,
+                        queue_rows=queue_rows_by_id.get(int(memory_id)) or [],
                     )
                     if not ok_move:
                         reason = "; ".join(move_warnings) or "not_found_or_forbidden"
@@ -1059,14 +1124,22 @@ class OperationsPipeline:
                     for warning in move_warnings:
                         if warning not in warnings:
                             warnings.append(warning)
-                    status = str(row["status"] or "")
-                    if status not in (MemoryStatus.ACTIVE.value, MemoryStatus.PENDING.value):
-                        non_active.append({"memory_id": memory_id, "status": status})
+                    if row_status not in (MemoryStatus.ACTIVE.value, MemoryStatus.PENDING.value):
+                        non_active.append({"memory_id": memory_id, "status": row_status})
+                    if row_status == MemoryStatus.ACTIVE.value and row_sha:
+                        # P2 #10: sequential dedup-gate parity — this ACTIVE row
+                        # now lives in the target bucket, so a same-sha sibling
+                        # later in the same request must refuse.
+                        target_active_shas.add(row_sha)
                     moved.append(memory_id)
         except OSError as exc:
+            # Same rollback-time filtering as aborted(): the publish-failure
+            # guidance and the voided-ticket sentinel both describe work that
+            # the rollback undid (P2 #10).
             abort_warnings = [
                 warning for warning in warnings
                 if "workspace canonical vector publish failed" not in warning
+                and not warning.startswith("voided_conflict_tickets:")
             ]
             return self.db.state.response(
                 {
@@ -1256,7 +1329,7 @@ class OperationsPipeline:
                         canonical = str(raw_ws).strip()
                     else:
                         resolved_canonical = self.db.resolve_workspace_canonical(
-                            canonical, None, register_new=False,
+                            canonical, None,
                         )
                         canonical = str(
                             resolved_canonical.get("canonical") or canonical
@@ -1356,6 +1429,17 @@ class OperationsPipeline:
                 )
                 if not activated:
                     raise ValueError("failed to activate pending memory")
+                # P2 #7: the confirmation's reason joins the governance trail
+                # atomically with the activation (same transaction, so an
+                # aborted confirm leaves no phantom audit row).
+                self.db.audit.record_governance_action_on_conn(
+                    conn, "confirm_pending_workspace", reason,
+                    {
+                        "memory_id": int(memory_id),
+                        "raw_workspace": raw_ws,
+                        "canonical": canonical,
+                    },
+                )
                 updated = self.db.get_memory_on_conn(conn, int(memory_id))
         except ValueError as exc:
             data = {
@@ -2672,6 +2756,9 @@ class OperationsPipeline:
         )
         if not scoped:
             summary = self.db.audit_summary()
+            # P2 #7: the audit view tail carries the newest governance rows
+            # (rename/migrate/confirm_pending reasons).
+            summary["governance_audit"] = self.db.audit.recent_governance_actions(limit=20)
             return self.db.state.response(summary)
         workspace_scope = (
             caller.scope_canonicals() if caller.isolation == "strict" else caller.canonical
@@ -2743,6 +2830,11 @@ class OperationsPipeline:
             "workspaces": workspaces,
             "total_memories": total_count,
             "total_open_conflicts": len(conflicts),
+            # P2 #7: scoped callers see only governance rows touching their
+            # own scope (strict ACL — no cross-bucket rename history leak).
+            "governance_audit": self.db.audit.recent_governance_actions(
+                limit=20, scope=set(scope_names_value),
+            ),
             **caller.response_fields(),
         }
         return self.db.state.response(summary, extra_warnings=list(caller.warnings))
@@ -2812,12 +2904,30 @@ class OperationsPipeline:
             )
 
         # ---- tags-only fast path (v0.7.6) ----
-        if tags_only and (new_content is not None or old_text is not None or new_text is not None or patches is not None):
+        # P2 #8: the refusal set is the content parameters ∪ the field
+        # replaces (new_subject/new_tags) — a silent ignore here would eat
+        # the caller's edit intent; tag changes go through add_tags/remove_tags.
+        if tags_only and (
+            new_content is not None
+            or old_text is not None
+            or new_text is not None
+            or patches is not None
+            or new_subject is not None
+            or new_tags is not None
+        ):
             # A silent ignore here would eat the caller's edit intent: the
             # tags-only path never touches content, so a combined call must
             # be rejected loudly instead of half-executed.
             return self.db.state.response(
-                {"error": "tags_only=true cannot be combined with content edits (new_content / old_text+new_text / patches); make two calls", "edited": False},
+                {
+                    "error": (
+                        "tags_only=true cannot be combined with content edits "
+                        "(new_content / old_text+new_text / patches) or field replaces "
+                        "(new_subject / new_tags); use add_tags/remove_tags for tag "
+                        "changes, or make two calls"
+                    ),
+                    "edited": False,
+                },
                 ok=False,
             )
         if tags_only:

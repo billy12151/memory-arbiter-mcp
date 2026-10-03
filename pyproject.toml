@@ -46,6 +46,9 @@ version = { attr = "memory_arbiter.__version__" }
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+# P2 #11: 兑现「default run 排除」的宣称——bare pytest 即排除 slow；发布纪律
+# 显式 `pytest -m slow` 不变（命令行 -m 覆盖 addopts 的过滤）。
+addopts = "-m \"not slow\""
 # slow = real-Qwen tests (load the resident GGUF; ~minutes). Excluded from the
 # default run and CI; run explicitly before a release: pytest -m slow
 markers = [

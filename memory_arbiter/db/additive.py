@@ -206,6 +206,27 @@ def workspace_dismissals_ddl() -> str:
     """
 
 
+def governance_audit_ddl() -> str:
+    """0.17.1 P2 #7: bucket-level governance audit trail.
+
+    Deliberately NOT normalize_audit: these rows have no memory_id and no
+    status, so the rollback_auto_move / doctor consumers of normalize_audit
+    never see them (schema-incompatible by design — the R1 review's fix for
+    the original normalize_audit-append proposal).
+    """
+    return """
+    CREATE TABLE IF NOT EXISTS governance_audit (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      created_at TEXT NOT NULL,
+      action TEXT NOT NULL,
+      reason TEXT,
+      detail_json TEXT NOT NULL DEFAULT '{}'
+    );
+    CREATE INDEX IF NOT EXISTS idx_governance_audit_created
+      ON governance_audit(created_at, id);
+    """
+
+
 def has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
     return any(
         str(row[1]) == column for row in conn.execute(f"PRAGMA table_info({table})")
@@ -277,6 +298,16 @@ def ensure_additive_structures(conn: sqlite3.Connection) -> list[str]:
     conn.executescript(workspace_dismissals_ddl())
     if not dismissals_existed:
         applied.append("workspace_dismissals")
+
+    # 0.17.1 P2 #7: governance_audit — bucket-level action trail (rename/
+    # migrate/confirm_pending reasons). No memory_id/status columns, so the
+    # normalize_audit consumers (rollback_auto_move, doctor) are untouched.
+    governance_existed = bool(conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='governance_audit'"
+    ).fetchone())
+    conn.executescript(governance_audit_ddl())
+    if not governance_existed:
+        applied.append("governance_audit")
     migrated = _migrate_legacy_candidates(conn)
     if migrated:
         applied.append(f"candidate_rows_migrated({migrated})")

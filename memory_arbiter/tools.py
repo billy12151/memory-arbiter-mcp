@@ -1171,7 +1171,7 @@ class MemoryTools:
             embedder, ensure_warnings = self._ensure_active_embedder()
             warnings.extend(ensure_warnings)
             try:
-                resolved = self.db.resolve_workspace_canonical(workspace, embedder, register_new=False)
+                resolved = self.db.resolve_workspace_canonical(workspace, embedder)
                 canonical = str(resolved.get("canonical") or workspace)
             except Exception:
                 canonical = workspace

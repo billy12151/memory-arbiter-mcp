@@ -668,10 +668,12 @@ def test_audit_summary_empty_when_no_memories(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     summary = tools.memory_audit_summary()
     assert summary["ok"] is True
+    # 0.17.1 P2 #7: the audit view tail carries the (empty) governance rows.
     assert summary["data"] == {
         "workspaces": {},
         "total_memories": 0,
         "total_open_conflicts": 0,
+        "governance_audit": [],
     }
 
 

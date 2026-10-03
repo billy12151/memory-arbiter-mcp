@@ -418,6 +418,9 @@ class WritePipeline:
             # From here the row (or its JSONL backup) is durable; nothing below
             # may turn this call into a failure response.
             insert_done = True
+            # Insert-side publish failure (insert_memory →
+            # publish_workspace_canonical_vector): the retry guidance must
+            # surface as pending_retry in the response.
             if any("workspace canonical vector publish failed" in warning for warning in write_warnings):
                 workspace["vector_publish_pending"] = True
             data: dict[str, Any] = {
@@ -530,13 +533,12 @@ class WritePipeline:
         result["warnings"].extend(warnings)
         # Resolution is read-only. Registration of only the final policy result
         # happens atomically in insert_memory.
-        resolved = self.db.resolve_workspace_canonical(raw, embedder, register_new=False)
+        resolved = self.db.resolve_workspace_canonical(raw, embedder)
         result.update({
             "canonical": resolved["canonical"],
             "is_new": bool(resolved["is_new"]),
             "matched_by": resolved["matched_by"],
             "similar": resolved.get("similar") or [],
-            "vector_publish_pending": bool(resolved.get("vector_publish_pending")),
         })
         candidate_embedding = resolved.get("candidate_embedding")
         if result["canonical"] == raw and candidate_embedding:

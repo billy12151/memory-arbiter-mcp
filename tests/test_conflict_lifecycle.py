@@ -1395,7 +1395,7 @@ def test_startup_does_not_repair_interrupted_table_migration(tmp_path: Path) -> 
         conn.execute("ALTER TABLE workspace_aliases RENAME TO workspace_aliases_legacy")
     reopened = MemoryDB(_settings(path, tmp_path))
     assert reopened.db_available is True
-    assert reopened.resolve_workspace_canonical("raw", None, register_new=False)["canonical"] == "raw"
+    assert reopened.resolve_workspace_canonical("raw", None)["canonical"] == "raw"
     with reopened.connection() as conn:
         assert conn.execute(
             "SELECT 1 FROM sqlite_master WHERE name='workspace_aliases_legacy'"

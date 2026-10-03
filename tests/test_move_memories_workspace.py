@@ -521,7 +521,7 @@ def test_alias_fold_beats_mechanical_twin(tmp_path: Path) -> None:
     )
     assert ok_decide, decide_warnings
     # the write path follows the alias first; the move fold must agree
-    resolved = tools.db.resolve_workspace_canonical("agent-lane", None, register_new=False)
+    resolved = tools.db.resolve_workspace_canonical("agent-lane", None)
     assert resolved["canonical"] == "Elsewhere"
 
     memory_id = write(tools, "default")
@@ -544,11 +544,15 @@ def test_vanish_then_abort_reconciles_without_duplicates(tmp_path: Path, monkeyp
             conn.execute("DELETE FROM memories WHERE id = ?", (doomed_id,))
         return original_prepare(canonical, embedder)
 
-    def flaky_move(conn, memory_id, workspace, *, precomputed_embedding=None, allow_default=False):
+    def flaky_move(
+        conn, memory_id, workspace, *, precomputed_embedding=None, allow_default=False,
+        current_bucket=None, sha_collision=None, queue_rows=None,
+    ):
         if int(memory_id) == other_id:
             raise sqlite3.OperationalError("disk I/O error")
         return original_move(
             conn, memory_id, workspace, precomputed_embedding=precomputed_embedding,
+            current_bucket=current_bucket, sha_collision=sha_collision, queue_rows=queue_rows,
         )
 
     monkeypatch.setattr(store, "prepare_missing_workspace_canonical_embedding", delete_then_prepare)
@@ -643,11 +647,15 @@ def test_abort_path_no_double_counting(tmp_path: Path, monkeypatch) -> None:
         assert ok_set, set_warnings
         return original_prepare(canonical, embedder)
 
-    def flaky_move(conn, memory_id, workspace, *, precomputed_embedding=None, allow_default=False):
+    def flaky_move(
+        conn, memory_id, workspace, *, precomputed_embedding=None, allow_default=False,
+        current_bucket=None, sha_collision=None, queue_rows=None,
+    ):
         if int(memory_id) == id_c:
             raise sqlite3.OperationalError("disk I/O error")
         return original_move(
             conn, memory_id, workspace, precomputed_embedding=precomputed_embedding,
+            current_bucket=current_bucket, sha_collision=sha_collision, queue_rows=queue_rows,
         )
 
     monkeypatch.setattr(store, "prepare_missing_workspace_canonical_embedding", diverge_b_then_prepare)
@@ -683,7 +691,10 @@ def test_abort_path_drops_vec_publish_warning(tmp_path: Path, monkeypatch) -> No
     store = tools.db.workspaces
     calls: list[int] = []
 
-    def fake_move(conn, memory_id, workspace, *, precomputed_embedding=None, allow_default=False):
+    def fake_move(
+        conn, memory_id, workspace, *, precomputed_embedding=None, allow_default=False,
+        current_bucket=None, sha_collision=None, queue_rows=None,
+    ):
         calls.append(int(memory_id))
         if int(memory_id) == id_a:
             return True, [
@@ -750,7 +761,7 @@ def test_alias_fold_prefers_newest_confirmed_row(tmp_path: Path) -> None:
             "(?, 'zzz-canonical', 'confirmed', '2027-01-01T00:00:00Z')",
             (alias_key, alias_key),
         )
-    resolved = tools.db.resolve_workspace_canonical("drift-alias", None, register_new=False)
+    resolved = tools.db.resolve_workspace_canonical("drift-alias", None)
     assert resolved["canonical"] == "zzz-canonical"
     assert tools.db.workspaces.confirmed_alias_canonical("drift-alias") == "zzz-canonical"
 

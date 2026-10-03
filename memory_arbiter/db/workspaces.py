@@ -336,7 +336,6 @@ class WorkspaceStore:
         embedder: Any = None,
         *,
         match_distance: float | None = None,
-        register_new: bool = True,
     ) -> dict[str, Any]:
         """Resolve a raw workspace string to its canonical name (alias merge).
 
@@ -346,9 +345,10 @@ class WorkspaceStore:
           2. If an embedder + sqlite-vec are available, embed the raw string and
              KNN against workspace_canonicals_vec; if the nearest canonical is
              within ``match_distance`` reuse it (handles 金营项目 / 金科营销项目).
-          3. Otherwise it is a NEW canonical. When ``register_new`` is True, the
-             raw string is registered as a new canonical (+ its vector); when
-             False (read/query path) nothing is written.
+          3. Otherwise it is a NEW canonical — the resolution itself writes
+             nothing (P2 #9: the register_new parameter retired with its dead
+             branches; the write path registers the final canonical atomically
+             in insert_memory).
 
         Returns a dict:
           {canonical, is_new, matched_by: exact|vector|new|fallback,
@@ -400,85 +400,85 @@ class WorkspaceStore:
                     ).fetchone()
                 except sqlite3.Error:
                     arow = None
-                if arow is None:
-                    # Ghost-spelling second hop: a rejection recorded under one
-                    # spelling ("agent-lane") must also cover separator/case
-                    # variants ("agent_lane") — the mechanical fold would
-                    # otherwise silently bypass it (the alias lookup key only
-                    # case-folds + collapses whitespace). Only rejected rows
-                    # participate: a confirmed alias is an exact identity pair
-                    # and must not silently redirect an unrelated registered
-                    # bucket that happens to share the mechanical key.
-                    mkey = _mechanical_ws_key(raw)
-                    if mkey:
-                        try:
-                            ghost_rows = conn.execute(
-                                "SELECT alias_workspace, canonical, status "
-                                "FROM workspace_aliases"
-                            ).fetchall()
-                        except sqlite3.Error:
-                            ghost_rows = []
-                        ghost_rejected = [
-                            row for row in ghost_rows
-                            if str(row["status"]) == "rejected"
-                            and _mechanical_ws_key(str(row["alias_workspace"])) == mkey
-                        ]
-                        if ghost_rejected:
-                            arow = ghost_rejected[0]
-                            ghost_alias_keys = [
-                                str(row["alias_workspace"])
-                                for row in ghost_rejected
-                            ]
-                if arow is not None:
-                    if str(arow["status"]) == "confirmed":
-                        result.update({
-                            "canonical": arow["canonical"],
-                            "is_new": False,
-                            "matched_by": "confirmed_alias",
-                            "distance": 0.0,
-                        })
-                        if register_new:
-                            self._publish_missing_workspace_canonical_vector(
-                                str(arow["canonical"]), embedder, result,
-                            )
-                        return result
-                    if str(arow["status"]) == "rejected":
-                        # Rejections accumulate per (raw, canonical).  Confirmed
-                        # aliases have singular precedence above; absent one, skip
-                        # every explicitly rejected target during candidate ranking.
-                        # Exact key ∪ ghost mechanical keys: the second hop can
-                        # hit a rejection stored under a sibling spelling, and
-                        # every same-key spelling's rejections must aggregate
-                        # (agent-chancellor carries two rejected rows).
-                        list_keys = [alias_key, *ghost_alias_keys]
-                        placeholders = ",".join("?" * len(list_keys))
-                        rejected_rows = conn.execute(
-                            f"SELECT canonical FROM workspace_aliases "
-                            f"WHERE status='rejected' "
-                            f"AND alias_workspace IN ({placeholders})",
-                            list_keys,
+                if arow is not None and str(arow["status"]) == "confirmed":
+                    # Confirmed identity pair: the hot path returns before any
+                    # ghost-spelling scan (P2 #5 keeps the confirmed short
+                    # circuit free of extra reads; confirmed rows can never
+                    # join a suppression list).
+                    result.update({
+                        "canonical": arow["canonical"],
+                        "is_new": False,
+                        "matched_by": "confirmed_alias",
+                        "distance": 0.0,
+                    })
+                    return result
+                # Ghost-spelling siblings: a rejection recorded under one
+                # spelling ("agent-lane") must also cover separator/case
+                # variants ("agent_lane") — the mechanical fold would
+                # otherwise silently bypass it (the alias lookup key only
+                # case-folds + collapses whitespace). P2 #5: the sibling set
+                # is computed for the direct REJECTED hit too, so every
+                # same-mechanical-key spelling's rejections aggregate on
+                # both paths. Only rejected rows participate (SQL pushes
+                # status='rejected' down; a confirmed alias is an exact
+                # identity pair and must not silently redirect an unrelated
+                # registered bucket that happens to share the mechanical key).
+                mkey = _mechanical_ws_key(raw)
+                if mkey:
+                    try:
+                        ghost_rows = conn.execute(
+                            "SELECT alias_workspace FROM workspace_aliases "
+                            "WHERE status='rejected'"
                         ).fetchall()
-                        suppressed = [str(row["canonical"]) for row in rejected_rows]
-                        # Exact-match suppression alone is bypassable through a
-                        # ghost spelling variant (rejected targets are never
-                        # registered, so "projectb" would not suppress a
-                        # registered "ProjectB"). Expand mechanically so every
-                        # registered spelling of a rejected target is suppressed
-                        # for all downstream consumers (vector path, rule
-                        # decision, qwen candidate check).
-                        rejected_keys = {
-                            _mechanical_ws_key(name) for name in suppressed
-                        }
-                        rejected_keys.discard("")
-                        if rejected_keys:
-                            for reg in conn.execute("SELECT name FROM workspace_canonicals"):
-                                name = str(reg["name"])
-                                if (
-                                    _mechanical_ws_key(name) in rejected_keys
-                                    and name not in suppressed
-                                ):
-                                    suppressed.append(name)
-                        result["rejected_canonicals"] = suppressed
+                    except sqlite3.Error:
+                        ghost_rows = []
+                    ghost_rejected = [
+                        row for row in ghost_rows
+                        if _mechanical_ws_key(str(row["alias_workspace"])) == mkey
+                    ]
+                    if ghost_rejected:
+                        ghost_alias_keys = [
+                            str(row["alias_workspace"])
+                            for row in ghost_rejected
+                        ]
+                        if arow is None:
+                            arow = ghost_rejected[0]
+                if arow is not None:
+                    # arow is rejected here (confirmed returned above).
+                    # Rejections accumulate per (raw, canonical). Exact
+                    # key ∪ ghost mechanical keys — unconditionally — so a
+                    # direct hit under one spelling also eats its siblings'
+                    # rejections (agent-chancellor carries two rejected rows
+                    # under two spellings).
+                    list_keys = list(dict.fromkeys([alias_key, *ghost_alias_keys]))
+                    placeholders = ",".join("?" * len(list_keys))
+                    rejected_rows = conn.execute(
+                        f"SELECT canonical FROM workspace_aliases "
+                        f"WHERE status='rejected' "
+                        f"AND alias_workspace IN ({placeholders})",
+                        list_keys,
+                    ).fetchall()
+                    suppressed = [str(row["canonical"]) for row in rejected_rows]
+                    # Exact-match suppression alone is bypassable through a
+                    # ghost spelling variant (rejected targets are never
+                    # registered, so "projectb" would not suppress a
+                    # registered "ProjectB"). Expand mechanically so every
+                    # registered spelling of a rejected target is suppressed
+                    # for all downstream consumers (vector path, rule
+                    # decision, qwen candidate check).
+                    rejected_keys = {
+                        _mechanical_ws_key(name) for name in suppressed
+                    }
+                    rejected_keys.discard("")
+                    if rejected_keys:
+                        for reg in conn.execute("SELECT name FROM workspace_canonicals"):
+                            name = str(reg["name"])
+                            if (
+                                _mechanical_ws_key(name) in rejected_keys
+                                and name not in suppressed
+                            ):
+                                suppressed.append(name)
+                    result["rejected_canonicals"] = suppressed
 
                 # 1. Exact canonical hit. A default term can never reach here
                 #    (early return above), so the publish-repair below is
@@ -489,34 +489,6 @@ class WorkspaceStore:
                 ).fetchone()
                 if exact:
                     result.update({"canonical": exact["name"], "is_new": False, "matched_by": "exact", "distance": 0.0})
-                    # A prior new-canonical write may have registered the canonical
-                    # while vector publication was unavailable. A later write to the
-                    # exact same workspace is the executable retry path once vec and
-                    # the embedder are healthy again.
-                    if (
-                        register_new
-                        and not is_default_workspace_term(raw)
-                        and self.state.sqlite_writable
-                        and self.state.sqlite_vec_available
-                        and embedder is not None
-                    ):
-                        try:
-                            er = embedder.embed_text(prefix=EMBED_PREFIX_STS, body=raw)
-                            exact_embedding = list(er.embedding) if er and er.embedding else None
-                        except Exception:
-                            exact_embedding = None
-                        if exact_embedding:
-                            try:
-                                conn.execute(
-                                    "INSERT OR REPLACE INTO workspace_canonicals_vec(id, embedding) VALUES (?, ?)",
-                                    (int(exact["id"]), json.dumps(exact_embedding)),
-                                )
-                                conn.commit()
-                            except sqlite3.Error as exc:
-                                result["vector_publish_pending"] = True
-                                result["warnings"].append(
-                                    f"workspace canonical vector publish failed for {raw!r}; retry a write using this workspace after sqlite-vec and embedding configuration recover: {exc}"
-                                )
                     return result
 
                 # 1b. Mechanical variant of an existing canonical: same string
@@ -606,40 +578,11 @@ class WorkspaceStore:
                     except sqlite3.Error:
                         pass  # vec query failed — fall through to new-canonical path
 
-                # 3. New canonical.
+                # 3. New canonical. Resolution is read-only (P2 #9: the dead
+                #    register_new branches are gone); registration of the final
+                #    policy result happens atomically in insert_memory, and the
+                #    write path publishes the prepared vector post-commit.
                 result.update({"canonical": raw, "is_new": True, "matched_by": "new"})
-                if register_new and self.state.sqlite_writable:
-                    try:
-                        now = utc_now_iso()
-                        cur = conn.execute(
-                            "INSERT OR IGNORE INTO workspace_canonicals(name, created_at) VALUES (?, ?)",
-                            (raw, now),
-                        )
-                        row = conn.execute(
-                            "SELECT id FROM workspace_canonicals WHERE name = ?", (raw,)
-                        ).fetchone()
-                        # never publish a vector for a default term — a
-                        # vectorless default row can't enter the KNN candidates
-                        # even if a legacy DB registered one.
-                        if (
-                            row
-                            and embedding
-                            and self.state.sqlite_vec_available
-                            and not is_default_workspace_term(raw)
-                        ):
-                            try:
-                                conn.execute(
-                                    "INSERT OR REPLACE INTO workspace_canonicals_vec(id, embedding) VALUES (?, ?)",
-                                    (int(row["id"]), json.dumps(embedding)),
-                                )
-                            except sqlite3.Error as exc:
-                                result["vector_publish_pending"] = True
-                                result["warnings"].append(
-                                    f"workspace canonical vector publish failed for {raw!r}; retry a write using this workspace after sqlite-vec and embedding configuration recover: {exc}"
-                                )
-                        conn.commit()
-                    except sqlite3.Error as exc:
-                        result["warnings"].append(f"workspace canonical registration failed for {raw!r}: {exc}")
                 return result
         except sqlite3.Error:
             return result
@@ -1052,6 +995,15 @@ class WorkspaceStore:
             return None
 
     @staticmethod
+    def _sha_collision_warning_text(to_ws: str, ids: "list[int]") -> str:
+        listed = ", ".join(f"#{int(value)}" for value in ids)
+        return (
+            f"content duplicate collision: moving {listed} into {to_ws!r} would create "
+            "byte-identical ACTIVE memories in one workspace (dedup gate); "
+            "govern the duplicates first (merge/retire) and retry"
+        )
+
+    @staticmethod
     def _content_sha_collision_warning_on_conn(
         conn: sqlite3.Connection, to_ws: str, *,
         from_ws: str | None = None, only_id: int | None = None,
@@ -1079,12 +1031,67 @@ class WorkspaceStore:
         ).fetchall()
         if not rows:
             return None
-        listed = ", ".join(f"#{int(r['id'])}" for r in rows)
-        return (
-            f"content duplicate collision: moving {listed} into {to_ws!r} would create "
-            "byte-identical ACTIVE memories in one workspace (dedup gate); "
-            "govern the duplicates first (merge/retire) and retry"
+        return WorkspaceStore._sha_collision_warning_text(
+            to_ws, [int(r["id"]) for r in rows],
         )
+
+    @staticmethod
+    def _content_sha_collision_ids_on_conn(
+        conn: sqlite3.Connection, to_ws: str, memory_ids: "list[int]",
+    ) -> "set[int]":
+        """P2 #10 batched dedup gate: which of ``memory_ids`` hold ACTIVE
+        content whose sha already exists as ACTIVE in ``to_ws`` (pre-existing
+        rows only). Same-request siblings are gated by the bulk caller as
+        they land, preserving the sequential per-id semantics bit-for-bit."""
+        ids = sorted({int(value) for value in memory_ids})
+        if not ids:
+            return set()
+        placeholders = ",".join("?" * len(ids))
+        target = "COALESCE(NULLIF(t.workspace_canonical, ''), t.workspace)"
+        rows = conn.execute(
+            f"SELECT m.id FROM memories m "
+            f"WHERE m.id IN ({placeholders}) "
+            f"AND m.status='active' AND m.content_sha IS NOT NULL "
+            f"AND EXISTS (SELECT 1 FROM memories t WHERE {target} = ? "
+            "AND t.status='active' AND t.content_sha = m.content_sha AND t.id != m.id)",
+            (*ids, to_ws),
+        ).fetchall()
+        return {int(row["id"]) for row in rows}
+
+    @staticmethod
+    def _pending_queue_rows_by_memory_id_on_conn(
+        conn: sqlite3.Connection, memory_ids: "list[int]",
+    ) -> "dict[int, list[dict[str, Any]]]":
+        """P2 #10 batched pending scan_queue lookup: every pending
+        conflict/workspace queue row keyed by its member memory ids — the
+        json_each-join single-SQL form of the per-id EXISTS probe (the same
+        shape as operations._merge_conflict_membership_on_conn)."""
+        wanted = sorted({int(value) for value in memory_ids})
+        if not wanted:
+            return {}
+        try:
+            rows = conn.execute(
+                "SELECT q.id, q.candidate_key_hash, "
+                "CAST(json_extract(m.value,'$.memory_id') AS INTEGER) AS memory_id "
+                "FROM scan_queue AS q "
+                "JOIN json_each(q.member_versions) AS m "
+                "JOIN json_each(?) AS wanted "
+                "ON CAST(json_extract(m.value,'$.memory_id') AS INTEGER)=CAST(wanted.value AS INTEGER) "
+                "WHERE q.kind IN ('conflict','workspace') AND q.status = 'pending'",
+                (json.dumps(wanted, ensure_ascii=False, sort_keys=True, separators=(",", ":")),),
+            ).fetchall()
+        except sqlite3.Error:
+            return {}
+        grouped: "dict[int, list[dict[str, Any]]]" = {}
+        for row in rows:
+            bucket = grouped.setdefault(int(row["memory_id"]), [])
+            if any(int(existing["id"]) == int(row["id"]) for existing in bucket):
+                continue  # a queue row may pin the same memory at two versions
+            bucket.append({
+                "id": int(row["id"]),
+                "candidate_key_hash": str(row["candidate_key_hash"] or ""),
+            })
+        return grouped
 
     @staticmethod
     def _conflict_slot_collision_warning_on_conn(
@@ -1876,6 +1883,9 @@ class WorkspaceStore:
         *,
         precomputed_embedding: list[float] | None = None,
         allow_default: bool = False,
+        current_bucket: str | None = None,
+        sha_collision: bool | None = None,
+        queue_rows: "list[Any] | None" = None,
     ) -> tuple[bool, list[str]]:
         """Reassign one memory's workspace bucket and canonical together.
 
@@ -1887,26 +1897,37 @@ class WorkspaceStore:
         the guard here is defensive for direct callers. ``allow_default``
         opens the 0.16.3 explicitly-declared fallback (agent cannot find a
         suitable bucket → park in the global pool with audit + notice).
+
+        P2 #10 bulk-call prefetch hooks (all optional, keyword-only):
+        ``current_bucket`` (the row's COALESCE bucket), ``sha_collision``
+        (the dedup-gate verdict against the destination), and ``queue_rows``
+        (this memory's pending scan_queue rows) let a multi-id caller run
+        each probe ONCE per request on the transaction snapshot. Every
+        default None keeps the per-id self-read, so single-id callers
+        (queue_protocol._execute_auto_move) are untouched.
         """
         workspace = _coerce_ws(workspace)
         if not workspace or (is_default_workspace_term(workspace) and not allow_default):
             return False, ["move destination must be a non-default workspace string."]
-        current = conn.execute(
-            "SELECT COALESCE(NULLIF(workspace_canonical,''),workspace) AS bucket "
-            "FROM memories WHERE id = ?",
-            (int(memory_id),),
-        ).fetchone()
-        bucket_changed = bool(current and str(current["bucket"] or "") != workspace)
+        if current_bucket is None:
+            row = conn.execute(
+                "SELECT COALESCE(NULLIF(workspace_canonical,''),workspace) AS bucket "
+                "FROM memories WHERE id = ?",
+                (int(memory_id),),
+            ).fetchone()
+            current_bucket = str(row["bucket"] or "") if row is not None else ""
+        bucket_changed = bool(current_bucket and current_bucket != workspace)
         move_warnings: list[str] = []
         # 0.16.6 dedup gate runs BEFORE any ticket voiding: a bulk-move caller
         # commits sibling successes in the same transaction, so a collision
         # refusal after the void block would destroy pending judgment tickets
         # for a row that never moved (review round-1 P2-1).
-        sha_collision = self._content_sha_collision_warning_on_conn(
-            conn, workspace, only_id=int(memory_id),
-        )
-        if sha_collision is not None:
-            return False, [sha_collision]
+        if sha_collision is None:
+            sha_collision = self._content_sha_collision_warning_on_conn(
+                conn, workspace, only_id=int(memory_id),
+            ) is not None
+        if sha_collision:
+            return False, [self._sha_collision_warning_text(workspace, [int(memory_id)])]
         if bucket_changed:
             # 0.16.0 §6⑤/§6⑯: move 视同编辑 — void old-bucket tickets
             # (releasing slot/candidate identities, suppressing nothing) and
@@ -1923,15 +1944,19 @@ class WorkspaceStore:
             # candidate identity is REWRITTEN, not kept: the UNIQUE hash spans
             # all statuses, and a kept hash would burn the pair@version
             # identity forever (a move-back could never re-enqueue it —
-            # adversarial review #4).
+            # adversarial review #4). The UPDATE guards on status='pending'
+            # so a row an earlier same-request move already voided (possible
+            # only with prefetched queue_rows) is left exactly as the
+            # sequential per-id flow would have skipped it.
             try:
-                queue_rows = conn.execute(
-                    """SELECT id, candidate_key_hash FROM scan_queue
-                       WHERE kind IN ('conflict','workspace') AND status = 'pending'
+                if queue_rows is None:
+                    queue_rows = conn.execute(
+                        """SELECT id, candidate_key_hash FROM scan_queue
+                           WHERE kind IN ('conflict','workspace') AND status = 'pending'
                          AND EXISTS(SELECT 1 FROM json_each(scan_queue.member_versions) AS m
                                     WHERE CAST(json_extract(m.value,'$.memory_id') AS INTEGER)=?)""",
-                    (int(memory_id),),
-                ).fetchall()
+                        (int(memory_id),),
+                    ).fetchall()
                 from .additive import voided_identity_hash
 
                 now_ts = utc_now_iso()
@@ -1939,7 +1964,8 @@ class WorkspaceStore:
                     conn.execute(
                         """UPDATE scan_queue SET status='voided',
                            candidate_key_hash=?, decided_reason='member moved to '||?,
-                           decided_at=?, updated_at=? WHERE id=?""",
+                           decided_at=?, updated_at=?
+                           WHERE id=? AND status='pending'""",
                         (voided_identity_hash(str(queue_row["candidate_key_hash"]), int(queue_row["id"])),
                          workspace, now_ts, now_ts, int(queue_row["id"])),
                     )

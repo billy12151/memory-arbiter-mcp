@@ -253,7 +253,7 @@ def test_resolve_expands_rejected_with_registered_mechanical_twins(
     assert (ok, errors) == (True, [])
     assert alias_rows(db) == [("myws", "projectb", "rejected")]
     register_canonical(db, "ProjectB")
-    resolved = db.resolve_workspace_canonical("myws", None, register_new=False)
+    resolved = db.resolve_workspace_canonical("myws", None)
     # Verbatim rejected row plus the registered spelling of the same
     # mechanical key.
     assert set(resolved["rejected_canonicals"]) == {"projectb", "ProjectB"}
@@ -271,7 +271,7 @@ def test_reject_after_twin_registration_stores_registered_spelling(
     ok, errors = apply_decision(db, "myws", "projectb", status="rejected")
     assert (ok, errors) == (True, [])
     assert alias_rows(db) == [("myws", "ProjectB", "rejected")]
-    resolved = db.resolve_workspace_canonical("myws", None, register_new=False)
+    resolved = db.resolve_workspace_canonical("myws", None)
     assert set(resolved["rejected_canonicals"]) == {"ProjectB"}
 
 

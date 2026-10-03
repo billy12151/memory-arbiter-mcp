@@ -667,7 +667,9 @@ def test_alias_no_embedder_exact_match(tmp_path):
     db = tools.db
     r1 = db.resolve_workspace_canonical("金科营销项目", embedder=None)
     assert r1["canonical"] == "金科营销项目" and r1["is_new"] is True
-    # exact repeat is not new
+    # P2 #9: resolve itself is read-only — a write registers the canonical
+    # atomically (insert_memory), so the next resolve is an exact hit.
+    tools.memory_write(content="正文", subject="s", workspace="金科营销项目")
     r2 = db.resolve_workspace_canonical("金科营销项目", embedder=None)
     assert r2["is_new"] is False and r2["matched_by"] == "exact"
     # a different string is a distinct new canonical (no vector merge)
@@ -1802,7 +1804,7 @@ from memory_arbiter.constants import (
     DEFAULT_TERMS,
     DEFAULT_WORKSPACE_NAME,
     is_default_workspace_term,
-)
+    )
 from memory_arbiter.db import MemoryDB
 from memory_arbiter.tools import MemoryTools
 
@@ -1892,7 +1894,7 @@ def test_knn_never_merges_into_default_even_with_published_vector(tmp_path):
     # proving the embedder/distances work and default is excluded by name.
     _register_canonical_with_vector(tools, "claw", [0.0, 1.0])
     merged = tools.db.resolve_workspace_canonical(
-        "clawproj", FixedEmbedder([0.0, 1.0]), register_new=False,
+        "clawproj", FixedEmbedder([0.0, 1.0]),
     )
     assert merged["matched_by"] == "vector"
     assert merged["canonical"] == "claw"
@@ -1900,7 +1902,7 @@ def test_knn_never_merges_into_default_even_with_published_vector(tmp_path):
     # A name embedding to distance ~0 FROM DEFAULT must stay NEW: the only
     # ≤cutoff neighbour is the excluded default row (claw sits at 1.0).
     resolved = tools.db.resolve_workspace_canonical(
-        "defaultproj", FixedEmbedder([1.0, 0.0]), register_new=False,
+        "defaultproj", FixedEmbedder([1.0, 0.0]),
     )
     assert resolved["matched_by"] == "new"
     assert resolved["canonical"] == "defaultproj"
@@ -1916,7 +1918,7 @@ def test_knn_excludes_every_default_synonym_canonical(tmp_path, term):
     # vector) can never attract merges: the candidate SQL excludes all terms.
     _register_canonical_with_vector(tools, term, [1.0, 0.0])
     resolved = tools.db.resolve_workspace_canonical(
-        f"{term}project", FixedEmbedder([1.0, 0.0]), register_new=False,
+        f"{term}project", FixedEmbedder([1.0, 0.0]),
     )
     assert resolved["matched_by"] == "new"
     assert term not in [s["name"] for s in resolved["similar"]]
@@ -1925,7 +1927,7 @@ def test_knn_excludes_every_default_synonym_canonical(tmp_path, term):
 @pytest.mark.parametrize("term", NON_EMPTY_DEFAULT_TERMS + ["Default", "DEFAULT", " None ", "未知 "])
 def test_default_synonyms_resolve_to_single_pool(tmp_path, term):
     tools = default_insulation_make_tools(tmp_path)
-    resolved = tools.db.resolve_workspace_canonical(term, None, register_new=True)
+    resolved = tools.db.resolve_workspace_canonical(term, None)
     assert resolved["canonical"] == DEFAULT_WORKSPACE_NAME
     assert resolved["matched_by"] == "fallback"
     assert resolved["is_new"] is False

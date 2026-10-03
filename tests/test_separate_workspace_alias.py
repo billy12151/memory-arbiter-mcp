@@ -50,7 +50,7 @@ def test_separate_overrides_installed_redirect(tmp_path: Path) -> None:
             conn, "旧项目", "新项目", status="confirmed",
         )
     assert ok and not errors
-    resolved = tools.db.resolve_workspace_canonical("旧项目", None, register_new=False)
+    resolved = tools.db.resolve_workspace_canonical("旧项目", None)
     assert resolved["canonical"] == "新项目"
 
     result = tools.memory_govern("separate_workspace_alias", {
@@ -62,7 +62,7 @@ def test_separate_overrides_installed_redirect(tmp_path: Path) -> None:
     assert result["data"]["separated"] is True
     assert _alias_rows(tools) == [("旧项目", "新项目", "rejected")]
     # The redirect no longer resolves.
-    resolved_after = tools.db.resolve_workspace_canonical("旧项目", None, register_new=False)
+    resolved_after = tools.db.resolve_workspace_canonical("旧项目", None)
     assert resolved_after["canonical"] != "新项目"
 
 

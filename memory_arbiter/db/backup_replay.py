@@ -251,9 +251,7 @@ class BackupReplayStore:
             trusted_agent_id=(entry.get("record") or {}).get("agent_id"),
         )
         captured_workspace = str(entry.get("workspace_canonical") or record.workspace)
-        resolved = self._db.resolve_workspace_canonical(
-            captured_workspace, None, register_new=False,
-        )
+        resolved = self._db.resolve_workspace_canonical(captured_workspace, None)
         canonical = str(resolved.get("canonical") or captured_workspace)
         replay_key = str(entry["replay_key"])
         payload_hash = str(entry["payload_hash"])

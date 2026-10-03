@@ -338,10 +338,9 @@ class MemoryDB:
         embedder: Any = None,
         *,
         match_distance: float | None = None,
-        register_new: bool = True,
     ) -> dict[str, Any]:
         return self.workspaces.resolve_workspace_canonical(
-            ws_raw, embedder, match_distance=match_distance, register_new=register_new,
+            ws_raw, embedder, match_distance=match_distance,
         )
 
     def record_workspace_decision(
