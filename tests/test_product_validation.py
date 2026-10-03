@@ -273,7 +273,7 @@ def test_notice_authorized_is_not_registered_and_notice_remains_unauthorized(tmp
 def test_product_field_registry_covers_all_declared_surface_operations() -> None:
     expected = {
         "memory": {"help", "status", "remember", "find", "batch_find", "read", "batch_read", "update", "judge"},
-        "memory_review": {"overview", "doctor", "audit", "conflicts", "conflict_detail", "history", "expired", "entities", "help"},
+        "memory_review": {"overview", "doctor", "audit", "conflicts", "conflict_detail", "history", "expired", "entities", "workspaces", "help"},
         "memory_govern": {"retire", "merge_memories", "apply_conflict_action", "replan_conflict", "resolve_conflict", "confirm", "rename_workspace_canonical", "migrate_workspace", "move_memories_workspace", "rollback_auto_move", "separate_workspace_alias", "confirm_pending_workspace", "confirm_workspaces", "help"},
     }
     actual = {

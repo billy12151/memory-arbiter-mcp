@@ -2347,3 +2347,42 @@ def test_workspace_required_on_govern_actions_surface(tmp_path: Path) -> None:
         empty = tools.memory_govern(action, {**payload, "workspace": "  "})
         assert empty["ok"] is False, action
         assert empty["data"]["field"] == "workspace"
+
+
+def test_memory_review_workspaces_view(tmp_path: Path) -> None:
+    """C2：workspaces 列表——计数/别名/空桶标注/排序/limit 单 SQL 口径。"""
+    tools = alias_governance_make_tools(tmp_path, isolation="none")
+    write(tools, "Alpha")  # pending（none 下 generic 新名走 ASK→pending 或 active，断言口径放宽）
+    write(tools, "Beta")
+    result = tools.memory_review("workspaces", {"limit": 50})
+    assert result["ok"] is True
+    ws = {b["canonical"]: b for b in result["data"]["workspaces"]}
+    assert "Alpha" in ws and "Beta" in ws
+    alpha = ws["Alpha"]
+    for key in ("active_count", "pending_count", "alias_count", "last_write_at", "empty"):
+        assert key in alpha
+    limited = tools.memory_review("workspaces", {"limit": 1})
+    assert limited["ok"] is True
+    assert limited["data"]["count"] == 1
+
+
+def test_memory_review_workspaces_strict_admitted_only(tmp_path: Path) -> None:
+    """C2 strict ACL：workspaces 视图只见 admitted 集；无 canonical=denied 优先。"""
+    tools = alias_governance_make_tools(tmp_path, isolation="strict")
+    tools.settings.workspace = "Alpha"
+    write(tools, "Alpha")
+    write(tools, "Beta")
+    with tools.db.connection() as conn:
+        pending = conn.execute(
+            "SELECT id FROM memories WHERE workspace='Alpha' AND status='pending'"
+        ).fetchone()
+    if pending:
+        tools.memory_govern("confirm_pending_workspace", {
+            "workspace": "Alpha", "memory_id": pending[0],
+            "canonical": "Alpha", "authorized": True,
+        })
+    result = tools.memory_review("workspaces", {"workspace": "Alpha"})
+    assert result["ok"] is True
+    names = {b["canonical"] for b in result["data"]["workspaces"]}
+    assert "Alpha" in names
+    assert "Beta" not in names, "strict 调用者不得看见 scope 外桶"

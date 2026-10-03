@@ -747,6 +747,11 @@ class WritePipeline:
             data["workspace_decision"] = workspace["decision"]
             data["workspace_decision_reason"] = workspace["decision_reason"]
         if workspace["decision"] == "ASK" and not workspace["strict_block"]:
+            # C2 接线（owner 2026-10-03）：新桶裁决指引先查 workspaces 列表，
+            # 确认无既有桶再决定 keep_separate/merge。
+            data.setdefault("write_hints", {})["workspace_discovery"] = {
+                "call": {"tool": "memory_review", "view": "workspaces", "data": {"limit": 50}},
+            }
             similar = workspace["similar"]
             options: list[dict[str, Any]] = [
                 {"decision": "keep_separate", "action": None},

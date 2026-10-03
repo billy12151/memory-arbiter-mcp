@@ -68,10 +68,10 @@ def _memory_value_reference() -> dict[str, Any]:
 # mutate this shared instance.
 _PRODUCT_HELPS: dict[str, Any] = {
     "memory": {
-        "description": "Daily memory operations: remember, find, read, update, judge, status.",
+        "description": "Daily memory operations: remember, find, read, update, judge, status. workspace is required on remember — first call memory_review(view='workspaces') to list existing buckets, then pass an existing canonical name ('default' is the global pool); pass a new name only when deliberately creating a new bucket.",
         "actions": ["remember", "find", "batch_find", "read", "batch_read", "update", "judge", "status", "help"],
         "examples": {
-            "remember": {"action": "remember", "data": {"content": "Fact to remember", "subject": "Short subject", "tags": ["project"]}},
+            "remember": {"action": "remember", "data": {"workspace": "memory-arbiter-mcp", "content": "Fact to remember", "subject": "Short subject", "tags": ["project"]}},
             "find": {"action": "find", "data": {"query": "project decision", "limit": 5}},
             "batch_find": {"action": "batch_find", "data": {"queries": [{"id": "collections", "query": "催收 辱骂 侮辱"}, {"id": "debt-transfer", "query": "债务转移 债权人同意"}], "limit_per_query": 3}},
             "read": {"action": "read", "data": {"memory_id": 123}},
@@ -181,7 +181,7 @@ _PRODUCT_HELPS: dict[str, Any] = {
     },
     "memory_review": {
         "description": "Read-only inspection. Never changes memory state.",
-        "views": ["overview", "doctor", "conflicts", "conflict_detail", "history", "expired", "audit", "entities", "help"],
+        "views": ["overview", "doctor", "conflicts", "conflict_detail", "history", "expired", "audit", "entities", "workspaces", "help"],
         "examples": {
             "conflicts": {"view": "conflicts", "data": {"status": "open", "limit": 20}},
             "history": {"view": "history", "data": {"memory_id": 123}},
@@ -189,7 +189,7 @@ _PRODUCT_HELPS: dict[str, Any] = {
         },
     },
     "memory_govern": {
-        "description": "Explicit user-authorized governance. Every state-changing action requires authorized=true after the user confirms that specific action. Do not use for ordinary source-of-truth updates; use memory(action='update') instead.",
+        "description": "Explicit user-authorized governance. Every state-changing action requires authorized=true after the user confirms that specific action. Workspace-mutating actions (confirm_pending_workspace, rename_workspace_canonical, migrate_workspace, separate_workspace_alias, move_memories_workspace) also require workspace — call memory_review(view='workspaces') first to list existing buckets. Do not use for ordinary source-of-truth updates; use memory(action='update') instead.",
         "actions": ["retire", "merge_memories", "apply_conflict_action", "replan_conflict", "resolve_conflict", "confirm", "rename_workspace_canonical", "migrate_workspace", "move_memories_workspace", "rollback_auto_move", "separate_workspace_alias", "confirm_pending_workspace", "confirm_workspaces", "help"],
         "examples": {
             "retire": {"action": "retire", "data": {"memory_id": 123, "superseded_by": 456, "reason": "User explicitly requested retiring the old whole memory.", "authorized": True}},
@@ -897,6 +897,21 @@ class ProductSurfaces:
             return self._forward("memory_review", view, self._tools.memory_search_expired, **payload)
         if view == "entities":
             return self._forward("memory_review", view, self._tools.memory_list_entities, **payload)
+        if view == "workspaces":
+            # C2（owner 2026-10-03）：选桶发现接口。strict 调用者先过 denied 门
+            # （无 canonical=denied 优先于空集，对齐全库口径），再看 admitted 集；
+            # none/weak 全量。
+            caller = self._caller_workspace(payload.get("workspace"))
+            denied = self._strict_acl_unavailable(caller)
+            if denied is not None:
+                return denied
+            result = self._tools.memory_list_workspaces(**payload)
+            if caller.isolation == "strict" and caller.admitted:
+                admitted = set(caller.admitted)
+                data = result.get("data") or {}
+                kept = [b for b in (data.get("workspaces") or []) if b.get("canonical") in admitted]
+                result["data"] = {**data, "count": len(kept), "workspaces": kept}
+            return result
         return self._invalid_product_call("memory_review", f"unknown view: {view}", view)
 
     def _memory_govern(self, action: str = "help", data: dict[str, Any] | None = None, **_: Any) -> dict[str, Any]:

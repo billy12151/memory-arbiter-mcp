@@ -114,6 +114,7 @@ PRODUCT_FIELD_REGISTRY: dict[tuple[str, str], set[str]] = {
         "source_type", "include_conflict_signal",
     },
     ("memory_review", "entities"): {"limit", "include_unassigned", "workspace"},
+    ("memory_review", "workspaces"): {"limit", "workspace"},
     ("memory_review", "help"): {"topic", "view"},
     ("memory_govern", "retire"): {"id", "memory_id", "reason", "superseded_by", "authorized", "workspace"},
     ("memory_govern", "merge_memories"): {

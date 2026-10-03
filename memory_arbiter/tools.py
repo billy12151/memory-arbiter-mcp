@@ -1731,6 +1731,11 @@ class MemoryTools:
     ) -> dict[str, Any]:
         return self._operations.memory_list_entities(limit, include_unassigned, **_)
 
+    def memory_list_workspaces(
+        self, limit: int = 50, **_: Any,
+    ) -> dict[str, Any]:
+        return self._operations.memory_list_workspaces(limit, **_)
+
     def scan_pipeline_kick(self, **payload: Any) -> dict[str, Any]:
         return self._scan_pipeline.kick(
             max_memories=payload.get("max_memories") or 400,

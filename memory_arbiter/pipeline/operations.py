@@ -2746,6 +2746,56 @@ class OperationsPipeline:
             )
         return self.db.state.response(result, ok=result.get("outcome") == "applying", extra_warnings=list(caller.warnings))
 
+
+    def memory_list_workspaces(self, limit: int = 50, workspace: str | None = None, **_: Any) -> dict[str, Any]:
+        """C2（owner 2026-10-03 拍板）：已有桶列表——agent 选桶前的发现接口。
+
+        单 SQL 聚合（owner SQL 单查询纪律）：canonical×active/pending 计数×
+        最近写入 + 别名数并查。strict 调用者经 surfaces 层 admitted 集过滤
+        （denied 优先于空集，对齐全库口径）；排序最近写入倒序。
+        """
+        limit = max(1, min(int(limit or 50), 200))
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT c.name AS canonical,
+                       COALESCE(a.active_count, 0) AS active_count,
+                       COALESCE(p.pending_count, 0) AS pending_count,
+                       COALESCE(al.alias_count, 0) AS alias_count,
+                       COALESCE(a.last_write, p.last_write) AS last_write_at
+                FROM workspace_canonicals c
+                LEFT JOIN (
+                    SELECT COALESCE(NULLIF(workspace_canonical, ''), workspace) AS bucket,
+                           COUNT(*) AS active_count, MAX(created_at) AS last_write
+                    FROM memories WHERE status = 'active' GROUP BY 1
+                ) a ON a.bucket = c.name
+                LEFT JOIN (
+                    SELECT COALESCE(NULLIF(workspace_canonical, ''), workspace) AS bucket,
+                           COUNT(*) AS pending_count, MAX(created_at) AS last_write
+                    FROM memories WHERE status = 'pending' GROUP BY 1
+                ) p ON p.bucket = c.name
+                LEFT JOIN (
+                    SELECT canonical, COUNT(*) AS alias_count
+                    FROM workspace_aliases GROUP BY canonical
+                ) al ON al.canonical = c.name
+                ORDER BY last_write_at DESC, c.name ASC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        buckets = []
+        for row in rows:
+            active, pending = int(row["active_count"]), int(row["pending_count"])
+            buckets.append({
+                "canonical": str(row["canonical"]),
+                "active_count": active,
+                "pending_count": pending,
+                "alias_count": int(row["alias_count"]),
+                "last_write_at": row["last_write_at"],
+                "empty": (active + pending) == 0,
+            })
+        return self.db.state.response({"view": "workspaces", "count": len(buckets), "workspaces": buckets})
+
     def memory_audit_summary(self, **_: Any) -> dict[str, Any]:
         caller = self._caller_workspace(_.get("workspace"))
         denied = self._strict_acl_unavailable(caller)
