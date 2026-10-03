@@ -247,7 +247,7 @@ class MemoryTools:
                 "out (judge_timeout); the check is truncated (rows_capped: the "
                 "memory exceeds the 256-row conflict-channel cap, 0.17.0; "
                 "evidence_units_capped: the legacy 64-unit cap on the unit "
-                "fallback path; pairs_examined_capped: the 10-pair examined "
+                "fallback path; pairs_examined_capped: the 500-pair examined "
                 "cap; notice_budget_exhausted: the fair job deadline hit). "
                 "Pairs beyond a truncation land in the conflict backlog "
                 "(0.17.0, bounded and visible) or are covered by scheduled "
@@ -1547,17 +1547,14 @@ class MemoryTools:
         terminal: "dict[str, Any] | None" = ctx.get("terminal")
         if terminal is not None and terminal.get("status") == "skipped":
             return terminal
-        # 0.17.1 (owner 拍板)：claim 对比通道（B/C/桥）退役——claim 属性无实体
-        # 绑定（"数据库 MySQL" vs "数据库 Oracle" 可能是不同系统），跨系统误报
-        # 面大且 C 实测召回 1/10。claims 已全退（检测通道 B/C + 配置门 +
-        # 数据层 DDL 连表删），冲突检测回归 A-cross 句子对 + internal 相 +
-        # 确定性直出。
+        # 0.17.1 重标合一 (owner 拍板 2026-10-03，方案 §2.2)：确定性相 →
+        # 合一判定相（internal keepers 与 A-cross 一批发出，单一总池
+        # internal-first 排序，internal 帽撤销）。0.17.1：claims 通道 B/C
+        # 退役，冲突检测回归 A-cross 句子对 + internal + 确定性直出。
         if terminal is None:
-            ev.conflicts_internal_judge_phase(ctx)
-        if terminal is None:
-            # R1-2: a deterministic-phase truncation terminal skips internal
-            # judge and the dispatch phase entirely (the pre-split semantics).
-            ev.conflicts_dispatch_phase(ctx)
+            # R1-2: a deterministic-phase truncation terminal skips the
+            # judge phase entirely (the pre-split semantics).
+            ev.conflicts_judge_phase(ctx)
             result = ev.conflicts_finalize_receipt(ctx)
         else:
             result = terminal
@@ -1566,7 +1563,7 @@ class MemoryTools:
         # demoted to info (visible in the judgment page, out of the feed).
         if terminal is None:
             ev.conflicts_job_level_notice_cap(ctx)
-        # r2s-08: the receipt tail (qwen_budget/pairs_examined/elapsed_ms) is
+        # r2s-08: the receipt tail (judge_budget/pairs_examined/elapsed_ms) is
         # stamped in ONE place — the truncation-terminal branch previously
         # re-assembled it by hand and forgot elapsed_ms.
         result = ev.conflicts_receipt_tail(ctx, result)

@@ -54,7 +54,7 @@ stdio 是默认传输。要让多个本地客户端共享一个社区版进程�
 | `semantic_conflict.backend`、`semantic_conflict.max_concurrency` | 删除——死旋钮（单一本地后端、串行 worker） |
 | `semantic_conflict.preload`、`semantic_conflict.resident` | 常量冻结为 true——配置了模型即启动加载并常驻 |
 | `semantic_conflict.n_ctx` / `n_threads` / `n_batch` | 常量冻结（0.15.8 起 2048 / 4 / 128） |
-| `semantic_conflict.job_timeout_ms` / `inference_timeout_ms` / `load_timeout_ms` / `min_pair_budget_ms` | 常量冻结（5000 / 30000 / 120000 / 1000 ms） |
+| `semantic_conflict.job_timeout_ms` / `inference_timeout_ms` / `load_timeout_ms` / `min_pair_budget_ms` | 常量冻结（10000 / 30000 / 120000 / 1000 ms） |
 | `semantic_conflict.queue_max_size`、`semantic_conflict.max_evidence_units` | 常量冻结（100 / 24） |
 | `semantic_conflict.scan_enhance`、`semantic_conflict.scan_max_pairs`、`semantic_conflict.scan_budget_ms` | 常量冻结（true / 8 / 60000） |
 | `semantic_conflict.workspace_qwen_budget_ms` | 常量冻结（750 ms）——`notice_sync_wait_ms` 已于 0.15.8 移出本表，恢复为活配置键（默认 3000，范围 0–5000，0 = 写入响应不等待，批量导入用） |
@@ -115,7 +115,7 @@ stdio 是默认传输。要让多个本地客户端共享一个社区版进程�
 
 写入成功后，服务器最多等待 `semantic_conflict.notice_sync_wait_ms`（0.15.8 起为活配置键，默认 `3000`，范围 `0–5000`）以完成有界的 notice 任务。等待超时后写入照常成功返回，同一个已接受任务继续异步执行——不会被取消或重算。队列满/入队被拒是另一回事：那时根本没有可等待任务。`checked_no_notice` 只表示该有界写入时任务内的每个候选都走完了漏斗，**不是**全库无冲突的声明。定时扫描仍是持久的召回兜底。
 
-job 预算（5000 ms，冻结）是队列公平预算，不是推理超时。只有后面已有其他 semantic job 等待时才启用，并且只在候选 pair 之间检查。已开始的判定批次只受推理超时（30000 ms，冻结）约束；即使 job 预算期间耗尽，也会等该批返回、再开始下一批前让出 worker。未判成的对（超时/不可用/错误）留冲突 backlog 留队、后续写入重试；有预扣或跳过时回执带 `judge_budget` 分解。没有积压时，job 预算不生效。
+job 预算（10000 ms，冻结）是队列公平预算，不是推理超时。只有后面已有其他 semantic job 等待时才启用，并且只在候选 pair 之间检查。已开始的判定批次只受推理超时（30000 ms，冻结）约束；即使 job 预算期间耗尽，也会等该批返回、再开始下一批前让出 worker。未判成的对（超时/不可用/错误）留冲突 backlog 留队、后续写入重试；有预扣或跳过时回执带 `judge_budget` 分解。没有积压时，job 预算不生效。
 
 ## 单一冲突表
 

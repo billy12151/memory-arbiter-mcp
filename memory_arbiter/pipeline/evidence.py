@@ -13,7 +13,6 @@ from ..constants import (
     EMBED_PREFIX_STS,
     SEMANTIC_JOB_TIMEOUT_MS,
     SEMANTIC_MAX_EXAMINED_PAIRS,
-    SEMANTIC_INTERNAL_QWEN_MAX_PAIRS,
     SEMANTIC_CROSS_KNN_WINDOW,
     SEMANTIC_MAX_ROWS,
     SEMANTIC_MIN_PAIR_BUDGET_MS,
@@ -186,11 +185,13 @@ class _JudgeBatch:
     def __len__(self) -> int:
         return len(self._items)
 
-    def drain(self, judge_fn: "Any") -> list[dict[str, Any]]:
+    def drain(self, judge_fn: "Any", *, stop_probe: "Any = None") -> list[dict[str, Any]]:
         """judge_fn(list[(a, b)]) -> list[PairVerdict]; returns the queued
         items with ``verdict`` attached, in queue order. A judge_fn result
         whose length disagrees with the request is failed wholesale (never
-        silently zipped short)."""
+        silently zipped short). ``stop_probe``（0.17.1 重标合一）：片间让路
+        探针，返回 True 即停发余片——余 item 补 error verdict（忙时公平性，
+        对齐 INTEGRATION 的 worker-yield 宣称）；已发片结果照常回填。"""
         out: list[dict[str, Any]] = list(self._items)
         self._items = []
         if not out:
@@ -203,13 +204,23 @@ class _JudgeBatch:
         from ..constants import SEMANTIC_MDEBERTA_BATCH
         chunk = max(1, int(SEMANTIC_MDEBERTA_BATCH))
         verdicts: list[Any] = []
+        stopped = False
         for start in range(0, len(pairs), chunk):
+            # 0.17.1 重标合一：片间让路探针（方案 §2.2.5）——忙时 63 片不再
+            # 一口气越墙，对齐 INTEGRATION「batch 返回后 worker 让路」宣称；
+            # 已发片结果照常回填，余片补 error verdict 由各源分账落地。
+            if stop_probe is not None and start > 0 and stop_probe():
+                stopped = True
+                break
             verdicts.extend(judge_fn(pairs[start : start + chunk]))
         if len(verdicts) != len(out):
             from ..semantic_judge import PairVerdict
-            bad = PairVerdict("no_conflict", {}, None, "mdeberta:unavailable",
-                              error=f"judge returned {len(verdicts)} verdicts for {len(out)} pairs")
-            verdicts = [bad] * len(out)
+            reason = (
+                "job budget expired mid-batch" if stopped
+                else f"judge returned {len(verdicts)} verdicts for {len(out)} pairs"
+            )
+            bad = PairVerdict("no_conflict", {}, None, "mdeberta:unavailable", error=reason)
+            verdicts.extend([bad] * (len(out) - len(verdicts)))
         for item, verdict in zip(out, verdicts):
             item["verdict"] = verdict
         return out
@@ -279,67 +290,52 @@ class _JudgePairView:
         }
 
 
-class _JobQwenBudget:
-    """0.17.0 Q1 (owner D1): SEMANTIC_MAX_EXAMINED_PAIRS upgraded from
-    "channel A's internal pair cap" to the write job's GLOBAL Qwen pair
-    budget — internal (protection cap) → A-cross (residual
-    max(0, total − internal); exhaustion turns the cross loop's
-    break into a continue — deterministic verdicts still land).
+class _JobJudgeBudget:
+    """0.17.1 重标合一（owner 拍板 2026-10-03，方案 §2.3）：internal 帽撤销，
+    单一 job 全局判定池——internal keepers 与 A-cross 按提交顺序消费同一个池，
+    internal-first 排序保证 land-first（E10①）。receipt 分账按来源保留。
 
-    The pool lives in this object, owned by the orchestrator (wrapper or
-    standalone process_conflicts) and passed explicitly into the phases —
-    never on the EvidencePipeline instance (review R2-3: no cross-job
-    mutable state on the shared object). 0.17.1: claims 通道 B/C 退役，
-    池只服务 internal + A-cross 两个消费方。"""
+    前身 _JobQwenBudget（0.17.0 Q1 owner D1）：internal 保护帽 ≤3 + A-cross
+    吃余量——帽的原始理由是 Qwen 一对 ~1.6s、internal keepers 曾吃光共享预算
+    （recall 0.372→0.163）；mDeBERTa 批前向 ~0.1s/16 对后前提不成立，帽退役，
+    land-first 语义由批量内排序继承。池仍 per-job 实例（R2-3：共享对象上
+    不挂跨 job 可变状态）。"""
 
-    def __init__(
-        self,
-        total: int = SEMANTIC_MAX_EXAMINED_PAIRS,
-        internal_cap: int = SEMANTIC_INTERNAL_QWEN_MAX_PAIRS,
-    ) -> None:
+    def __init__(self, total: int = SEMANTIC_MAX_EXAMINED_PAIRS) -> None:
         self.total = max(1, int(total))
-        self.internal_cap = max(0, int(internal_cap))
         self.internal_used = 0
         self.a_cross_used = 0
-        self.a_cross_dispatch_skipped = False
 
     @property
     def remaining(self) -> int:
         return max(0, self.total - self.internal_used - self.a_cross_used)
 
-    def spend_internal(self) -> bool:
-        """Internal Qwen dispatch: protection-capped AND pool-bounded."""
-        if self.internal_used >= self.internal_cap or self.remaining <= 0:
-            return False
-        self.internal_used += 1
-        return True
-
-    def spend_a_cross(self) -> bool:
-        """A-cross Qwen dispatch: residual pool only; exhaustion records the
-        dispatch skip (receipt key) and the caller continues, never breaks."""
+    def spend(self, source: str) -> bool:
+        """单一总池消费。池耗尽返回 False，收尾语义按来源分：internal 静默
+        消失（现状帽 break 的池化等价）、A-cross 记 pairs_examined_capped
+        进 backlog。"""
         if self.remaining <= 0:
-            self.a_cross_dispatch_skipped = True
             return False
-        self.a_cross_used += 1
+        if source == "internal":
+            self.internal_used += 1
+        else:
+            self.a_cross_used += 1
         return True
 
     def receipt_block(self) -> "dict[str, Any] | None":
-        """§3.3 conditional receipt block (0.17.1: internal + A-cross only) — absent entirely when nothing was
-        deducted and nothing was skipped (zero values never appear)."""
+        """§3.3 conditional receipt block — absent entirely when nothing was
+        deducted (zero values never appear)."""
         block: dict[str, Any] = {}
         if self.internal_used:
             block["internal"] = self.internal_used
         if self.a_cross_used:
             block["a_cross"] = self.a_cross_used
-        if self.a_cross_dispatch_skipped:
-            block["a_cross_dispatch_skipped"] = True
         return block or None
 
     @property
     def pairs_examined(self) -> int:
-        """Job-global pairs_examined (§3.3): internal + C + A-cross."""
+        """Job-global pairs_examined (§3.3): internal + A-cross."""
         return self.internal_used + self.a_cross_used
-
 
 
 class EvidencePipeline:
@@ -845,7 +841,7 @@ class EvidencePipeline:
             "internal_version": 1,
             "embedder": None,
             "publish_done_at": [],   # C2 anchor for the fairness deadline
-            "budget": _JobQwenBudget(),
+            "budget": _JobJudgeBudget(),
             "min_budget": SEMANTIC_MIN_PAIR_BUDGET_MS / 1000.0,
             "applying_slots": set(),
             "applying_pairs": set(),
@@ -853,7 +849,7 @@ class EvidencePipeline:
             "reasons_seen": [],
             "reached_pair": set(),
             "ordered": [],
-            "internal_qwen_pairs": [],
+            "internal_judge_pairs": [],
             "allowed_memory_ids": None,
             "units_examined": 0,
             "rows_mode": False,
@@ -1035,7 +1031,7 @@ class EvidencePipeline:
 
         # append-only through the alias — the list object lives in ctx and
         # feeds the internal Qwen phase (E10① keepers).
-        internal_qwen_pairs: list[tuple[Any, Any, Any]] = ctx["internal_qwen_pairs"]
+        internal_judge_pairs: list[tuple[Any, Any, Any]] = ctx["internal_judge_pairs"]
         # C3 A+ guard: subject rows never originate pairs (internal or cross).
         # Adversarial-review follow-up: an INDEPENDENT cap (not the cross
         # loop's) — O(n²) construction with row granularity needs its own
@@ -1061,7 +1057,7 @@ class EvidencePipeline:
                 )
                 if not admitted:
                     continue
-                internal_qwen_pairs.append((seg_a, seg_b, internal_decision))
+                internal_judge_pairs.append((seg_a, seg_b, internal_decision))
 
     def _collect_neighbour_screen(
         self, ctx: dict[str, Any], record: dict[str, Any], paired: "list[Any]",
@@ -1437,7 +1433,7 @@ class EvidencePipeline:
             # fail-open, never lost. (Adversarial self-review: without this,
             # a row cap or budget exhaustion mid-collection silently dropped
             # every internal keep pair of this run.)
-            for unit_a, unit_b, internal_decision in ctx["internal_qwen_pairs"]:
+            for unit_a, unit_b, internal_decision in ctx["internal_judge_pairs"]:
                 if self.db.internal_conflicts.create(
                     memory_id=int(memory_id), memory_version=int(ctx["internal_version"]),
                     unit_a=unit_a.unit_index, unit_b=unit_b.unit_index,
@@ -1497,7 +1493,7 @@ class EvidencePipeline:
         examined-pairs cap now bounds deterministically.
         Q1 (owner D1): SEMANTIC_MAX_EXAMINED_PAIRS is the job-global judge
         pool living in ctx["budget"] (internal + A-cross); the
-        per-phase caps live in _JobQwenBudget."""
+        per-phase caps live in _JobJudgeBudget."""
         memory_id = int(ctx["memory_id"])
         from ..semantic_conflict import vector_cosine
 
@@ -1542,65 +1538,76 @@ class EvidencePipeline:
             ),
         )
 
-    def _judge_pair(self, backend: Any, text_a: str, text_b: str) -> Any:
-        """0.17.1: one pair through the mDeBERTa judge → PairVerdict. The
-        single-flight admission can refuse under concurrency — that surfaces
-        as an error verdict, the fail-open path."""
-        if hasattr(backend, "judge_pair"):
-            try:
-                return backend.judge_pair(text_a, text_b)
-            except Exception as exc:
-                return PairVerdict("no_conflict", {}, None, "mdeberta:unavailable", error=str(exc))
-        # Test/legacy backends exposing classify_pair(env_a, env_b).
-        compat = _judge_pair_compat(backend, text_a, text_b)
-        return compat if compat is not None else PairVerdict(
-            "no_conflict", {}, None, "mdeberta:unavailable", error="backend cannot serve",
-        )
+    def conflicts_judge_phase(self, ctx: dict[str, Any]) -> None:
+        """0.17.1 重标合一（owner 拍板 2026-10-03，方案 §2.2）：internal 与
+        A-cross 两个判定消费方合并为单相位、一批发出。internal keepers 在
+        提交列表前部（E10① land-first 改为批量内排序保证）；单一总池
+        （internal 帽撤销——Qwen 一对 ~1.6s 的前提随 mDeBERTa 批前向
+        ~0.1s/16 对不成立）。
 
-
-    def conflicts_internal_judge_phase(self, ctx: dict[str, Any]) -> None:
-        """Q1 相分裂 phase 2 (owner plan §3.1): internal (same-memory) keeper
-        review — E10① lands before the cross loop; protection-capped at
-        SEMANTIC_INTERNAL_QWEN_MAX_PAIRS and drawing the job-global pool
-        (D1: internal keeps its priority ahead of the A-cross dispatch).
-
-        0.17.1 (owner 拍板 2026-09-28): the judge never dismisses at write
-        time. conflict ≥ min_prob → pending (annotated); EVERYTHING else —
-        no_conflict at any confidence, possible, conflict below threshold —
-        lands pending unannotated-or-annotated (fail-open, visible,
-        re-examinable). The scan-side strong model owns the negative verdict
-        via the existing internal queue + resurrection suppression; a
-        probabilistic dismissal (which blocks scan until a version lift) is
-        not a decision a 0.1s encoder gets to make."""
+        三段形状：pass 1 收集（internal 先、cross 后，逐候选保留全部前置
+        检查；R1-5 的跨对读快照事务包裹收集与跨对落地）→ 一批 drain
+        （judge_fn 统一、逐片异常免疫、片间让路探针）→ 按来源分账落地
+        （各自现役连接纪律）。池耗尽的 internal 尾对静默消失（现状帽
+        break 语义的池化等价，R2 对抗轮修正对照物）；判定缺席/让路窗口
+        触发的 internal 对 unannotated 立即落地（fail-open，消费池保上限
+        ——帽撤销后唯一的有界保证）。0.17.1（owner 拍板 2026-09-28，不变）：
+        judge 写时永不 dismiss——conflict ≥ min_prob → 标注落地；其余
+        （no_conflict 任意置信、possible、below_threshold、error）unannotated
+        或带否定意见落地，扫描侧强模型拥有否定裁决权。"""
         phase_started = time.monotonic()
-        memory_id = int(ctx["memory_id"])
-        record = ctx["record"]
-        internal_version = int(ctx["internal_version"])
-        budget: _JobQwenBudget = ctx["budget"]
-        min_budget: float = ctx["min_budget"]
         backend = self._ensure_semantic_backend()
+        budget: _JobJudgeBudget = ctx["budget"]
+        min_budget: float = ctx["min_budget"]
         min_prob = float(self.settings.semantic_conflict_mdeberta_notice_min_prob)
-        for unit_a, unit_b, internal_decision in ctx["internal_qwen_pairs"]:
-            if budget.internal_used >= budget.internal_cap:
-                # E10① keeps its land-first guarantee — within this smaller,
-                # value-ranked budget.
-                break
-            reason_text = str(internal_decision.reason or "")
-            if backend is not None:
-                active_deadline = _job_fair_deadline(self._semantic_worker, ctx["publish_done_at"])
-                budget_ok = not (
-                    active_deadline is not None
-                    and active_deadline - time.monotonic() < min_budget * 2
-                ) and budget.spend_internal()
-                if budget_ok:
-                    content_text = str(ctx.get("content") or "")
-                    ja = row_window(content_text, int(unit_a.start_offset or 0),
-                                    int(unit_a.end_offset or 0), subject=str(record.get("subject") or ""),
-                                    before=SEMANTIC_JUDGE_CONTEXT_BEFORE, after=SEMANTIC_JUDGE_CONTEXT_AFTER)
-                    jb = row_window(content_text, int(unit_b.start_offset or 0),
-                                    int(unit_b.end_offset or 0), subject=str(record.get("subject") or ""),
-                                    before=SEMANTIC_JUDGE_CONTEXT_BEFORE, after=SEMANTIC_JUDGE_CONTEXT_AFTER)
-                    verdict = self._judge_pair(backend, ja, jb)
+        content = str(ctx["content"])
+        record = ctx["record"]
+        own_subject_text = str((record or {}).get("subject") or "")
+
+        def _drain_stop_probe() -> bool:
+            deadline = _job_fair_deadline(self._semantic_worker, ctx["publish_done_at"])
+            return deadline is not None and deadline - time.monotonic() < min_budget * 2
+
+        with self.db.connection() as dispatch_conn:
+            dispatch_conn.execute("BEGIN")
+            try:
+                batch = _JudgeBatch()
+                internal_entries: list[tuple[Any, Any, str]] = []
+                # ── pass 1a：internal keepers 优先入批（land-first 排序）──
+                for unit_a, unit_b, internal_decision in ctx["internal_judge_pairs"]:
+                    if not budget.spend("internal"):
+                        break
+                    reason_text = str(internal_decision.reason or "")
+                    if backend is None or _drain_stop_probe():
+                        self._land_internal_conflict(ctx, unit_a, unit_b, reason_text)
+                        continue
+                    ja = row_window(
+                        content, int(unit_a.start_offset or 0), int(unit_a.end_offset or 0),
+                        subject=own_subject_text,
+                        before=SEMANTIC_JUDGE_CONTEXT_BEFORE, after=SEMANTIC_JUDGE_CONTEXT_AFTER)
+                    jb = row_window(
+                        content, int(unit_b.start_offset or 0), int(unit_b.end_offset or 0),
+                        subject=own_subject_text,
+                        before=SEMANTIC_JUDGE_CONTEXT_BEFORE, after=SEMANTIC_JUDGE_CONTEXT_AFTER)
+                    batch.add(
+                        peer_id=int(ctx["memory_id"]), hit=None, unit=None,
+                        decision=None, peer=None, left_version=1, right_version=1,
+                        text_a=unit_a.text, text_b=unit_b.text, decision_values=None,
+                        judge_text_a=ja, judge_text_b=jb,
+                    )
+                    internal_entries.append((unit_a, unit_b, reason_text))
+                # ── pass 1b：跨记忆对收集（六道前置 + 直出 + 池消费）──
+                peer_rows = self.conflicts_cross_collect(ctx, dispatch_conn, backend, batch)
+                # ── pass 2：一批判定（judge_fn 统一；片间让路）──
+                judged_started = time.monotonic()
+                judged = batch.drain(self._make_judge_fn(backend), stop_probe=_drain_stop_probe)
+                judged_ms = (time.monotonic() - judged_started) * 1000
+                per_pair_ms = int(judged_ms / max(1, len(judged)))
+                internal_count = len(internal_entries)
+                # internal 分账落地：判成→标注；clear→否定意见；error/
+                # below_threshold→unannotated fail-open——池内全部落地。
+                for item, (unit_a, unit_b, reason_text) in zip(judged[:internal_count], internal_entries):
+                    verdict = item["verdict"]
                     outcome = _judge_outcome(verdict, min_prob)
                     if outcome in ("notice", "possible"):
                         if verdict.error is None:
@@ -1610,46 +1617,65 @@ class EvidencePipeline:
                             )
                         if outcome == "notice":
                             ctx["internal_qwen_confirmed"] += 1
-                    else:
-                        if outcome == "clear":
-                            # NO write-time dismissal: land pending with the
-                            # model's negative opinion attached — the scan
-                            # strong model decides (owner 2026-09-28).
-                            reason_text = (
-                                f"{reason_text} | mdeberta:no_conflict"
-                                f" P={verdict.probs.get('no_conflict', 0.0):.2f}"
-                                if verdict.error is None else reason_text
-                            )
-                        # below_threshold / error: pending unannotated
-                        # (fail-open)
-            if self.db.internal_conflicts.create(
-                memory_id=int(memory_id), memory_version=internal_version,
-                unit_a=unit_a.unit_index, unit_b=unit_b.unit_index,
-                quote_a=unit_a.text, quote_b=unit_b.text,
-                span_a=[unit_a.start_offset, unit_a.end_offset],
-                span_b=[unit_b.start_offset, unit_b.end_offset],
-                reason=reason_text, detector_version=CONFLICT_DETECTOR_VERSION,
-            ):
-                ctx["internal_found"] += 1
-        ctx["phase_ms"].append((time.monotonic() - phase_started) * 1000)
-
-    def conflicts_dispatch_phase(self, ctx: dict[str, Any]) -> None:
-        """Q1 相分裂 phase 2 (owner plan §3.1): the A-cross ordered-pair loop.
-        Judge dispatch is gated by the job-global pool's RESIDUAL
-        (max(0, total − internal)); exhaustion turns the old break into a
-        continue — deterministic direct verdicts still land and undispatched
-        pairs fall to the backlog sweep (D2)."""
-        phase_started = time.monotonic()
-        ordered = ctx["ordered"]
-        backend = self._ensure_semantic_backend()
-        # R1-5: the dispatch probes run on their OWN read snapshot — notices
-        # landed between the deterministic collection and this phase mean the
-        # collection snapshot (job_conn) no longer describes the world the
-        # closed-pair probes must see.
-        with self.db.connection() as dispatch_conn:
-            dispatch_conn.execute("BEGIN")
-            try:
-                self.conflicts_dispatch_loop(ctx, dispatch_conn, backend)
+                    elif outcome == "clear":
+                        reason_text = (
+                            f"{reason_text} | mdeberta:no_conflict"
+                            f" P={verdict.probs.get('no_conflict', 0.0):.2f}"
+                        )
+                    self._land_internal_conflict(ctx, unit_a, unit_b, reason_text)
+                # cross 分账落地（现役 drain 循环体原样）
+                for item in judged[internal_count:]:
+                    verdict = item["verdict"]
+                    self._tools._record_pair_sample(pair_ms=per_pair_ms)
+                    outcome = _judge_outcome(verdict, min_prob)
+                    if outcome == "error":
+                        error_text = str(verdict.error or "")
+                        reason = (
+                            "judge_timeout" if "timeout" in error_text.lower()
+                            else "judge_unavailable" if "disabled" in error_text.lower()
+                            else "judge_backend_error"
+                        )
+                        self._record_job_degradation(ctx, reason)
+                        ctx["incomplete_reason"] = ctx["incomplete_reason"] or reason
+                        # 未判成的对必须回 backlog（与 drain 自己的失败留队契约同构，
+                        # 实施对抗 review P1）：pass1 已标 settled，回滚让 sweep 收走。
+                        ctx["reached_pair"].discard(int(item["peer_id"]))
+                        continue
+                    if outcome == "clear":
+                        ctx["model_clear"] = ctx.get("model_clear", 0) + 1
+                        continue
+                    if outcome == "below_threshold":
+                        ctx["model_conflict_below_threshold"] = (
+                            ctx.get("model_conflict_below_threshold", 0) + 1
+                        )
+                        continue
+                    # 等值守卫（owner 2026-09-28，对抗轮收窄）：只比较确定性层抽取的
+                    # 值对——decision_values 存在且归一相等 → 同值不同面 clear。
+                    # 全行值集相等但含无量纲数字（1000条 vs 2000条）不再误杀。
+                    dv = item.get("decision_values")
+                    if outcome in ("notice", "possible") and dv is not None and _values_all_equivalent(dv[0], dv[1]):
+                        ctx["model_unit_equivalent"] = ctx.get("model_unit_equivalent", 0) + 1
+                        continue
+                    self._land_dispatch_notice(
+                        ctx, dispatch_conn, peer_rows, int(item["peer_id"]), item["hit"],
+                        item["unit"], item["decision"], content,
+                        int(item["left_version"]), int(item["right_version"]),
+                        slot_attribute=(
+                            # 0.17.1 §3.4: no extraction → a reproducible pair-hash
+                            # difference anchor; suppression pairs see owner A-3 note
+                            # in _suppressed_by_applying.
+                            _pair_diff_anchor(str(item["text_a"]), str(item["text_b"]))
+                        ),
+                        # §3.4 owner 口径：判定 notice 的两侧值 = 两侧行文本（quote
+                        # 即值——无抽取物可放，判断页直接可读）。
+                        value_a=str(item["text_a"])[:400], value_b=str(item["text_b"])[:400],
+                        reason=f"model_classified_{verdict.label}",
+                        applying_slots=ctx["applying_slots"],
+                        applying_pairs=ctx.get("applying_pairs", set()),
+                        surfaced_peer_ids=ctx["surfaced_peer_ids"],
+                        severity="normal" if outcome == "notice" else "info",
+                        model_signal=_JudgePairView.signal(verdict),
+                    )
             finally:
                 try:
                     dispatch_conn.rollback()
@@ -1658,7 +1684,9 @@ class EvidencePipeline:
         # 0.17.0 P2-4.2: budget/cap leftovers land in the backlog — bounded,
         # visible, never silently dropped (owner design #8). Stale/duplicate
         # keys report as enqueued here; eviction counts ride the store.
-        leftover_entries = [item for item in ordered if item[0] not in ctx["reached_pair"]]
+        leftover_entries = [
+            item for item in ctx["ordered"] if item[0] not in ctx["reached_pair"]
+        ]
         ctx["sweep_evicted"] = 0
         if leftover_entries:
             ctx["backlogged"], ctx["sweep_evicted"] = self._enqueue_backlog_entries(
@@ -1666,38 +1694,90 @@ class EvidencePipeline:
             )
         ctx["phase_ms"].append((time.monotonic() - phase_started) * 1000)
 
-    def conflicts_dispatch_loop(
-        self, ctx: dict[str, Any], dispatch_conn: "sqlite3.Connection",
-        backend: "SemanticBackend | None",
+    def _land_internal_conflict(
+        self, ctx: dict[str, Any], unit_a: Any, unit_b: Any, reason_text: str,
     ) -> None:
-        """The ordered-pair loop body (kept as its own method so the dispatch
-        phase's read transaction wraps every probe).
+        """internal keeper 落 internal_conflicts（现役 create 语义：UNIQUE
+        去重、fail-open；判定意见已拼进 reason_text 时为标注态）。"""
+        if self.db.internal_conflicts.create(
+            memory_id=int(ctx["memory_id"]), memory_version=int(ctx["internal_version"]),
+            unit_a=unit_a.unit_index, unit_b=unit_b.unit_index,
+            quote_a=unit_a.text, quote_b=unit_b.text,
+            span_a=[unit_a.start_offset, unit_a.end_offset],
+            span_b=[unit_b.start_offset, unit_b.end_offset],
+            reason=reason_text, detector_version=CONFLICT_DETECTOR_VERSION,
+        ):
+            ctx["internal_found"] += 1
 
-        0.17.1 (owner 拍板: 攒批进本版): TWO-PASS shape. Pass 1 walks the
-        ordered pairs through every pre-judge gate UNCHANGED (active check,
-        closed-pair, version drift, deterministic direct, budget,
-        deadline) and COLLECTS judge inputs. Pass 2 fires one batched
-        judge_pairs call and drains verdicts into notices. The
-        applying-slot suppression moves to the drain (a notice-time concern),
-        its widened match lives in _suppressed_by_applying."""
+    @staticmethod
+    def _make_judge_fn(backend: "SemanticBackend | None") -> "Any":
+        """合一判定注入（方案 §2.2.2）。异常/形状不符统一降级为 error
+        verdict（逐片免疫——R2 对抗轮 P1：internal 旧路径全 try 单对免疫、
+        cross 旧路径异常掀翻整相，两形态不可共存；统一取免疫形态，单后端
+        故障不再 worker_error，error verdict 由各源分账落地）。
+        classify_pair-only 后端统一走 _judge_pair_compat 的 candidate 布尔
+        映射——旧 cross 侧 conflict-1.0 直通语义退役（R1 抓出的两相位适配
+        语义冲突）。"""
+        from ..semantic_judge import PairVerdict as _PV
+
+        def _bad(reason: str, count: int) -> list[Any]:
+            return [_PV("no_conflict", {}, None, "mdeberta:unavailable", error=reason)
+                    for _ in range(count)]
+
+        def _run_judge(judge_pairs_in: list[tuple[str, str]]) -> list[Any]:
+            if backend is None:
+                return []
+            try:
+                if hasattr(backend, "judge_pairs"):
+                    verdicts = backend.judge_pairs(judge_pairs_in)
+                elif hasattr(backend, "judge_pair"):
+                    # single-pair judge interface (ErrBackend fixtures)
+                    verdicts = [backend.judge_pair(a, b) for a, b in judge_pairs_in]
+                else:
+                    # Test/legacy backends exposing classify_pair(env_a, env_b).
+                    verdicts = []
+                    for a, b in judge_pairs_in:
+                        compat = _judge_pair_compat(backend, a, b)
+                        verdicts.append(compat if compat is not None else _PV(
+                            "no_conflict", {}, None, "mdeberta:unavailable",
+                            error="backend cannot serve"))
+            except Exception as exc:  # 降级为 error verdict，不掀翻相位（R2 P1）
+                return _bad(str(exc), len(judge_pairs_in))
+            if len(verdicts) != len(judge_pairs_in):
+                return _bad(
+                    f"judge returned {len(verdicts)} verdicts for {len(judge_pairs_in)} pairs",
+                    len(judge_pairs_in),
+                )
+            return verdicts
+
+        return _run_judge
+
+    def conflicts_cross_collect(
+        self, ctx: dict[str, Any], dispatch_conn: "sqlite3.Connection",
+        backend: "SemanticBackend | None", batch: _JudgeBatch,
+    ) -> "dict[int, dict[str, Any]]":
+        """跨记忆腿收集（原 conflicts_dispatch_loop 的 pass 1；判定与落地
+        上移合并相位）。六道前置逐候选保留：active/closed-pair/版本漂移/
+        确定性直出（不耗池、backend 缺席照常落地）/deadline 探针/池消费。
+        R1-5：探测读走调用方的 dispatch_conn 读快照事务。饱和不终止确定性
+        检查（Q1 D2）：池耗尽 continue 不 break，未派发对留给 backlog
+        sweep；直出对在 backend 缺席时照样落地。"""
         memory_id = int(ctx["memory_id"])
         record = ctx["record"]
         content = str(ctx["content"])
-        workspace = ctx["workspace"]
         embedder = ctx["embedder"]
-        budget: _JobQwenBudget = ctx["budget"]
+        budget: _JobJudgeBudget = ctx["budget"]
         min_budget: float = ctx["min_budget"]
         reached_pair: set[int] = ctx["reached_pair"]
         applying_slots: set[str] = ctx["applying_slots"]
         applying_pairs: set[tuple[int, int]] = ctx.get("applying_pairs", set())
         surfaced_peer_ids: set[int] = ctx["surfaced_peer_ids"]
-        min_prob = float(self.settings.semantic_conflict_mdeberta_notice_min_prob)
         # P2-T6: batch-prefetch every candidate peer in ONE id-IN query
-        # instead of one get_memory connection per pair.
+        # instead of one get_memory connection per pair. Returned for the
+        # drain-landing loop (same read snapshot, R1-5).
         peer_rows = self.db.get_memories_by_ids(
             [int(pid) for pid, _triple in ctx["ordered"]], conn=dispatch_conn,
         )
-        batch = _JudgeBatch()
         for peer_id, (hit, unit, decision, _pair_cos) in ctx["ordered"]:
             peer = peer_rows.get(int(peer_id))
             if not peer or peer.get("status") != "active":
@@ -1758,12 +1838,10 @@ class EvidencePipeline:
                 self._record_job_degradation(ctx, "judge_budget_exhausted")
                 ctx["incomplete_reason"] = ctx["incomplete_reason"] or "judge_budget_exhausted"
                 continue
-            # Q1 (owner D1/D2): the job-global pool's RESIDUAL gates dispatch;
-            # exhaustion no longer breaks the loop — it CONTINUES: direct
-            # verdicts still land and undispatched pairs stay unsettled for
-            # the backlog sweep (饱和不终止确定性检查). First skip reason
-            # wins (same first-trip-wins semantics the old break had).
-            if not budget.spend_a_cross():
+            # Q1 (owner D1/D2)：池耗尽 continue 不 break（饱和不终止确定性
+            # 检查）；未派发对留给 backlog sweep。internal 腿先行消费池
+            # （land-first），cross 吃余量。
+            if not budget.spend("a_cross"):
                 self._record_job_degradation(ctx, "pairs_examined_capped")
                 ctx["incomplete_reason"] = ctx["incomplete_reason"] or "pairs_examined_capped"
                 continue
@@ -1788,80 +1866,7 @@ class EvidencePipeline:
                     subject=peer_subject_text,
                     before=SEMANTIC_JUDGE_CONTEXT_BEFORE, after=SEMANTIC_JUDGE_CONTEXT_AFTER),
             )
-        # ── pass 2: one batched judge call, verdicts → notices ──────────────
-        def _run_judge(judge_pairs_in: list[tuple[str, str]]) -> list[Any]:
-            if backend is None:
-                return []
-            if hasattr(backend, "judge_pairs"):
-                return backend.judge_pairs(judge_pairs_in)
-            if hasattr(backend, "judge_pair"):
-                # single-pair judge interface (ErrBackend fixtures)
-                return [backend.judge_pair(a, b) for a, b in judge_pairs_in]
-            # Test/legacy backends exposing classify_pair(env_a, env_b):
-            # wrap each bare-text pair as a minimal judge call.
-            from ..semantic_judge import PairVerdict as _PV
-
-            return [
-                _PV("conflict", {"conflict": 1.0, "no_conflict": 0.0, "possible_conflict": 0.0},
-                    None, "test-backend")
-                for _ in judge_pairs_in
-            ]
-
-        judged_started = time.monotonic()
-        judged = batch.drain(_run_judge)
-        judged_ms = (time.monotonic() - judged_started) * 1000
-        per_pair_ms = int(judged_ms / max(1, len(judged)))
-        for item in judged:
-            verdict = item["verdict"]
-            self._tools._record_pair_sample(pair_ms=per_pair_ms)
-            outcome = _judge_outcome(verdict, min_prob)
-            if outcome == "error":
-                error_text = str(verdict.error or "")
-                reason = (
-                    "judge_timeout" if "timeout" in error_text.lower()
-                    else "judge_unavailable" if "disabled" in error_text.lower()
-                    else "judge_backend_error"
-                )
-                self._record_job_degradation(ctx, reason)
-                ctx["incomplete_reason"] = ctx["incomplete_reason"] or reason
-                # 未判成的对必须回 backlog（与 drain 自己的失败留队契约同构，
-                # 实施对抗 review P1）：pass1 已标 settled，回滚让 sweep 收走。
-                reached_pair.discard(int(item["peer_id"]))
-                continue
-            if outcome == "clear":
-                ctx["model_clear"] = ctx.get("model_clear", 0) + 1
-                continue
-            if outcome == "below_threshold":
-                ctx["model_conflict_below_threshold"] = (
-                    ctx.get("model_conflict_below_threshold", 0) + 1
-                )
-                continue
-            # 等值守卫（owner 2026-09-28，对抗轮收窄）：只比较确定性层抽取的
-            # 值对——decision_values 存在且归一相等 → 同值不同面 clear。
-            # 全行值集相等但含无量纲数字（1000条 vs 2000条）不再误杀。
-            dv = item.get("decision_values")
-            if outcome in ("notice", "possible") and dv is not None and _values_all_equivalent(dv[0], dv[1]):
-                ctx["model_unit_equivalent"] = ctx.get("model_unit_equivalent", 0) + 1
-                continue
-            self._land_dispatch_notice(
-                ctx, dispatch_conn, peer_rows, int(item["peer_id"]), item["hit"],
-                item["unit"], item["decision"], content,
-                int(item["left_version"]), int(item["right_version"]),
-                slot_attribute=(
-                    # 0.17.1 §3.4: no extraction → a reproducible pair-hash
-                    # difference anchor; suppression pairs see owner A-3 note
-                    # in _suppressed_by_applying.
-                    _pair_diff_anchor(str(item["text_a"]), str(item["text_b"]))
-                ),
-                # §3.4 owner 口径：判定 notice 的两侧值 = 两侧行文本（quote
-                # 即值——无抽取物可放，判断页直接可读）。
-                value_a=str(item["text_a"])[:400], value_b=str(item["text_b"])[:400],
-                reason=f"model_classified_{verdict.label}",
-                applying_slots=applying_slots, applying_pairs=applying_pairs,
-                surfaced_peer_ids=surfaced_peer_ids,
-                severity="normal" if outcome == "notice" else "info",
-                model_signal=_JudgePairView.signal(verdict),
-            )
+        return peer_rows
 
     @staticmethod
     def _suppressed_by_applying(
@@ -2087,11 +2092,9 @@ class EvidencePipeline:
         terminal branch forgot elapsed, finalize stamped pairs_examined: 0
         unconditionally).
 
-        0.17.1: the key is ``judge_budget`` (renamed from qwen_budget;
-        harness runner/score read the new key in the same commit). The old
-        ``qwen_budget`` key is echoed too when present-shaped, for one
-        release, so older harness raw files still attribute — dropped in
-        0.17.2."""
+        0.17.1 重标合一: the key is ``judge_budget`` — the one-release
+        ``qwen_budget`` compat echo is dropped now that harness runner/score
+        read the new key (owner 拍板 2026-10-03，方案 §2.4)."""
         if ctx["phase_ms"]:
             result["elapsed_ms"] = round(sum(ctx["phase_ms"]), 1)
         if ctx["budget"].pairs_examined:
@@ -2101,7 +2104,6 @@ class EvidencePipeline:
             # Q1 §3.3 additive observability — absent entirely when nothing
             # was deducted and nothing was skipped.
             result["judge_budget"] = judge_budget
-            result["qwen_budget"] = judge_budget  # one-release compat echo
         # 0.17.1 §3.3 outcome counters — observability, zero values absent.
         for key in ("model_clear", "model_conflict_below_threshold",
                     "model_possible_count", "model_notices_capped"):

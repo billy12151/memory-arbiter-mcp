@@ -117,7 +117,10 @@ SEMANTIC_JUDGE_CONTEXT_AFTER = 1
 # no startup knee probe.
 SEMANTIC_MDEBERTA_BATCH = 8
 
-SEMANTIC_JOB_TIMEOUT_MS = 5000
+# 0.17.1 重标（owner 2026-10-03 拍板）：5000→10000——池 500 对 ≈63 片
+# （_JudgeBatch 客户端切片恒 8）× (IPC+前向) 的量级余量；公平期限机制不变
+# （队列空闲无墙、忙时生效），突发保护自动保留。开工实测校准后回写依据。
+SEMANTIC_JOB_TIMEOUT_MS = 10000
 SEMANTIC_INFERENCE_TIMEOUT_MS = 30000
 SEMANTIC_LOAD_TIMEOUT_MS = 120000
 SEMANTIC_MIN_PAIR_BUDGET_MS = 1000
@@ -143,12 +146,6 @@ SEMANTIC_STREAM_BATCH_ROWS = 16
 # ~45k pairs). Independent from the cross-loop cap so E10① (internal keepers
 # land despite cross truncation) keeps its own headroom.
 SEMANTIC_INTERNAL_MAX_ROWS = 256
-# Harness-found regression: row granularity multiplied internal keepers
-# (~dozens per long memory) and they consumed the WHOLE shared Qwen pair
-# budget (cross pairs never reached Qwen — recall 0.372→0.163). Internal
-# keepers now take at most this many Qwen slots (value-anchored ranking
-# already ordered them); E10①'s land-first guarantee is unchanged.
-SEMANTIC_INTERNAL_QWEN_MAX_PAIRS = 3
 # Owner insight 2026-09-23: the detection window must surface CONFLICT
 # candidates, not the globally most-similar rows — a wide window deduped per
 # peer keeps every plausible opponent represented; the per-peer dict then
@@ -244,12 +241,13 @@ SEMANTIC_NEIGHBOR_SCREEN = 50
 # 0.15.14 (A5): unit cap covers the real-library maximum (62 observed in #956);
 # collection cost per unit is one k=5 KNN + rule gate (milliseconds) — the
 # expensive resource is Qwen pairs, bounded separately below.
-# 0.15.14 (A5): deterministic second gate on Qwen work per write-check — the
-# fair job deadline remains the first. Formula (plan mema-01514 §A5):
-# clamp(6, 16, round(20s target check budget ÷ p95 pair wall)); with the
-# grammar-free decode (A2) the measured p95 pair ≈ 1.6s ×1.5 load margin
-# ⇒ 10. Pairs beyond the cap report incomplete reason=pairs_examined_capped.
-SEMANTIC_MAX_EXAMINED_PAIRS = 10
+# 0.17.1 重标（owner 2026-10-03 拍板，方案 §3）：判定执行合一后 internal 与
+# A-cross 消费同一个 job 全局池；旧值 10 = Qwen 时代公式（20s 目标预算 ÷
+# 1.6s p95 pair，plan mema-01514 §A5）——mDeBERTa 批前向实测 ~0.1s/16 对，
+# 前提不成立。新值 500 = 32 次前向 ≈3.2s 的量级余量，为候选面扩容留位
+# （当前实际候选几十对，池是名义上限；实际判定量仍由 rows/window/漏斗门
+# 管）。超池对仍报 incomplete reason=pairs_examined_capped。
+SEMANTIC_MAX_EXAMINED_PAIRS = 500
 # 0.17.0 P2-3.1: row cap for the row-level conflict channel (sentences +
 # header-folded table rows; ~35 rows per typical memory, 256 covers the
 # real-library tail). Rows sort value-anchored-first before the cap bites

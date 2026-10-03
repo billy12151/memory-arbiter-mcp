@@ -2703,9 +2703,11 @@ def test_idle_worker_job_budget_does_not_cap_inflight_qwen(tmp_path: Path, monke
     result.pop("claims_channel_c", None)  # gate-v2 G6b 通道 C 回执键
     result.pop("judge_budget", None); result.pop("qwen_budget", None)  # Q1 additive receipt key（本用例 a_cross 扣池 1）
     assert result == {"status": "completed", "outcome": "notices_created", "notices_created": 1, "pairs_examined": 1, "rows_mode": True, "rows_examined": 1}
-    # 0.17.1 攒批：判定走批前向，deadline 检查粒度从每对变为每块——慢后端
-    # 的 classify_pair 不再被逐对调用，deadlines 观测点 retired。
-    assert deadlines == []
+    # 0.17.1 攒批：判定走批前向，deadline 检查粒度从每对变为每块。
+    # 0.17.1 重标合一：classify_pair-only 后端统一走 _judge_pair_compat
+    # 映射被真实调用（旧 cross 侧 conflict-1.0 直通退役），批前向不传
+    # deadline_monotonic → 每个 chunk 一次调用、观测值恒 None。
+    assert deadlines == [None]
 
 
 def test_backlog_job_budget_stops_before_next_pair_not_during_inference(tmp_path: Path, monkeypatch) -> None:
@@ -2769,7 +2771,8 @@ def test_backlog_job_budget_stops_before_next_pair_not_during_inference(tmp_path
     } == {k: v for k, v in result.items() if k in {
         "status", "outcome", "notices_created", "pairs_examined",
     }}
-    assert deadlines == []
+    # 重标合一：两对一片、compat 映射各真调一次 classify_pair（无 deadline）
+    assert deadlines == [None, None]
     assert len(tools.db.list_semantic_notices(status="open", limit=10)) == 2
 
 

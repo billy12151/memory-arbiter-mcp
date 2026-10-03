@@ -5,6 +5,17 @@ Versions follow semantic versioning.
 
 ## [0.17.1 追加] — 未发版（claim 对比通道退役 + 判定输入上下文化，owner 2026-09-28 拍板）
 
+### Changed (判定执行合一总池 + 常量重标，2026-10-03)
+
+方案 §2/§3（两轮 review 记录：`ZCodeProject/docs/mema-judge-recalib-escalate-plan-2026-10-03.md` v3）。owner 2026-10-03 拍板：合一只留总池、池 500、期限 10s。
+
+- **相位合一**：internal 判定相与 A-cross 派发相合并为单一 `conflicts_judge_phase`——internal keepers 与跨记忆对一批发出，internal 对在提交列表前部（E10① land-first 改为批量内排序保证）。判定缺席/让路窗口的 internal 对 unannotated 立即落地；池耗尽 internal 尾对静默消失（现状帽 break 语义的池化等价，R2 对抗轮修正对照物）。跨对六道前置、确定性直出、R1-5 读快照事务、backlog sweep 全部原样。
+- **单一总池**：`_JobQwenBudget` → `_JobJudgeBudget`，internal 保护帽（3）撤销；`SEMANTIC_MAX_EXAMINED_PAIRS` 10→500（Qwen 一对 ~1.6s 的前提随 mDeBERTa 批前向 ~0.1s/16 对不成立；500≈32 次前向量级余量，为候选面扩容留位）；`SEMANTIC_JOB_TIMEOUT_MS` 5000→10000。病态语料（非表格同句型多行）的判定/落地由总池封顶（§5.11 探针测试钉住）。
+- **judge_fn 统一（R1/R2 对抗轮）**：internal/cross 共用一个判定注入——异常/形状不符逐片降级为 error verdict（单后端故障不再 worker_error 掀翻整相）；classify_pair-only 后端统一走 `_judge_pair_compat` candidate 布尔映射（旧 cross 侧 conflict-1.0 直通退役）。`_judge_pair` 单对包装随相位合并退役。
+- **drain 片间让路探针**：忙时 63 片不再一口气越墙（对齐 INTEGRATION 的 worker-yield 宣称）；越墙余片补 error verdict 按源分账。
+- **回执/退役**：`qwen_budget` 兼容 echo 摘除（单键 `judge_budget`）；`a_cross_dispatch_skipped` 键退役；`SEMANTIC_INTERNAL_QWEN_MAX_PAIRS` 常量删除；`internal_qwen_pairs` ctx 键更名 `internal_judge_pairs`（`internal_qwen_confirmed` 回执键保留，历史命名）。tools 降级说明文案与 INTEGRATION 两文件预算数字同步。
+- 测试：`test_qwen_budget_reorder.py` 重写为 `test_judge_budget_pool.py`（池算术/单批 internal-first/池耗尽消失/异常免疫/病态探针）。
+
 ### Fixed (判定型 notice escalate/promote 修通——D1 双通道，2026-10-03)
 
 方案与两轮 review 记录：`ZCodeProject/docs/mema-judge-recalib-escalate-plan-2026-10-03.md`（v3）。全项目对抗审查（mema #1172）P1-4。

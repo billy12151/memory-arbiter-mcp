@@ -54,7 +54,7 @@ Six environment variables remain as launch context: `MEMORY_ARBITER_CONFIG`, `ME
 | `semantic_conflict.backend`, `semantic_conflict.max_concurrency` | Removed — dead knobs (single local backend, serial worker) |
 | `semantic_conflict.preload`, `semantic_conflict.resident` | Frozen `true` — configured model loads at startup and stays resident |
 | `semantic_conflict.n_ctx` / `n_threads` / `n_batch` | Frozen constants (2048 since 0.15.8 / 4 / 128) |
-| `semantic_conflict.job_timeout_ms` / `inference_timeout_ms` / `load_timeout_ms` / `min_pair_budget_ms` | Frozen constants (5000 / 30000 / 120000 / 1000 ms) |
+| `semantic_conflict.job_timeout_ms` / `inference_timeout_ms` / `load_timeout_ms` / `min_pair_budget_ms` | Frozen constants (10000 / 30000 / 120000 / 1000 ms) |
 | `semantic_conflict.queue_max_size`, `semantic_conflict.max_evidence_units` | Frozen constants (100 / 24) |
 | `semantic_conflict.scan_enhance`, `semantic_conflict.scan_max_pairs`, `semantic_conflict.scan_budget_ms` | Frozen constants (true / 8 / 60000) |
 | `semantic_conflict.workspace_qwen_budget_ms` | Frozen constant (750 ms) — `notice_sync_wait_ms` left this table in 0.15.8 (live key again: default 3000, clamp 0–5000, 0 = never block the write response) |
@@ -116,7 +116,7 @@ A user-visible notice requires the judge to return `conflict` at P ≥ `semantic
 
 After a successful write, the server waits at most `semantic_conflict.notice_sync_wait_ms` (v0.15.8 live config key, default `3000`, clamp `0–5000`) for the bounded notice task. If the wait expires, the write returns successfully and the same accepted task continues asynchronously; it is not cancelled or recomputed. A queue-full/rejected enqueue is different: there is no task to wait for. `checked_no_notice` means only that every candidate inside that bounded write-time task completed the funnel; it is not a whole-library claim. Scheduled scan remains the durable recall backstop.
 
-The job budget (5000 ms, frozen) is a queue-fairness budget, not an inference timeout. It activates only when another semantic job is waiting and is checked between candidate pairs. An already-started judge batch runs under the inference timeout (30000 ms, frozen) even if the job budget expires; after the batch returns, the worker yields before starting another. Judged pairs that could not settle (timeout/unavailable/error) stay in the conflict backlog and retry on later writes; when pre-deduction or skipping occurred, the receipt carries a `judge_budget` breakdown. With no backlog, the job budget is inactive.
+The job budget (10000 ms, frozen) is a queue-fairness budget, not an inference timeout. It activates only when another semantic job is waiting and is checked between candidate pairs. An already-started judge batch runs under the inference timeout (30000 ms, frozen) even if the job budget expires; after the batch returns, the worker yields before starting another. Judged pairs that could not settle (timeout/unavailable/error) stay in the conflict backlog and retry on later writes; when pre-deduction or skipping occurred, the receipt carries a `judge_budget` breakdown. With no backlog, the job budget is inactive.
 
 ## One Conflicts Table
 
