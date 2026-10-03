@@ -215,7 +215,6 @@ def test_knn_restricted_to_clean_neighbor_list(tmp_path, monkeypatch) -> None:
 def test_pair_score_orders_high_band_first(tmp_path, monkeypatch) -> None:
     """带内两对都被 Qwen 消费（预算顺序的纯函数钉在 compute_pair_score 单测）。"""
     import tests.test_vnext_evidence as tv
-    from memory_arbiter.constants import SEMANTIC_MAX_EXAMINED_PAIRS
 
     tools = tv.make_tools(tmp_path, semantic_enabled=True)
     tools.settings.semantic_conflict_on_write = "off"

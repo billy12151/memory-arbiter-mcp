@@ -299,3 +299,65 @@ def test_pathological_internal_storm_bounded_by_pool(tmp_path, monkeypatch) -> N
     assert len(_Recorder.calls) <= 20
     assert receipt.get("internal_conflicts", 0) <= 20
     assert receipt["status"] in ("completed", "incomplete")
+
+
+def test_drain_stop_probe_yields_mid_batch(tmp_path, monkeypatch) -> None:
+    """方案 §5.6 / R1 P2-3：drain 片间让路——越墙停发余片，已发片 verdicts
+    照常落地，余片 error verdict 归 judge_budget_exhausted（与收集侧同一
+    面墙同口径）回 backlog。1 internal + 9 cross = 10 对 → 2 片（8+2），
+    第 2 片前探针触发。"""
+    tools = tv.make_tools(tmp_path, semantic_enabled=True)
+    tools.settings.semantic_conflict_on_write = "off"
+    peers = [
+        tools.memory_write(content=f"连接池上限为 300，队列长度为 {4 + i}。", subject="yield", tags=[])["data"]
+        for i in range(9)
+    ]
+    own_content = "连接池上限为 99，队列长度为 99。\n连接池上限为 100，队列长度为 100。"
+    new = tools.memory_write(content=own_content, subject="yield-own", tags=[])["data"]
+    assert tools.wait_semantic_worker_drained(timeout=5)
+    _Recorder.reset()
+    monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: _Recorder)
+
+    def _subject_hit(peer: dict[str, Any]) -> dict[str, Any]:
+        return {"memory_id": int(peer["id"]), "id": 900, "kind": "subject", "text": "subject",
+                "subject": "yield", "tags": "[]", "distance": 0.5, "memory_row_version": 1}
+
+    hits = [
+        {"memory_id": peer["id"], "id": index + 1, "kind": "text",
+         "text": f"连接池上限为 300，队列长度为 {4 + index}。", "start_offset": 0,
+         "end_offset": len(f"连接池上限为 300，队列长度为 {4 + index}。"),
+         "distance": 0.1 + index * 0.001, "memory_row_version": 1}
+        for index, peer in enumerate(peers)
+    ]
+
+    def stub_row_knn(embedding: Any, **kw: Any) -> list[dict[str, Any]]:
+        if kw.get("subject_rows_only"):
+            return [_subject_hit(peers[0])]
+        if kw.get("conn") is not None:
+            return list(hits)
+        return []
+
+    monkeypatch.setattr(tools.db, "row_knn", stub_row_knn)
+    monkeypatch.setattr(_gates, "candidate_cos_gate",
+                        lambda own, hs, vecs: ([(h, 0.85) for h in hs], [], []))
+    monkeypatch.setattr(tools.db.evidence, "row_vectors_for_ids", lambda ids, conn=None: {})
+    # 收集期探针（每候选一次）返回 None；drain 开跑（chunk 1 已发出）后
+    # 片间探针立即返回已过的墙 → 停发第 2 片。
+    def _deadline(timeout):
+        return None if not _Recorder.chunks else 1.0
+
+    monkeypatch.setattr(tools._semantic_worker, "pending_job_deadline", _deadline)
+
+    receipt = tools._process_semantic_conflict_job(new["id"], tv._job_snapshot(tools, new["id"]))
+
+    assert _Recorder.chunks == [8]  # 第 2 片未发出
+    assert receipt["internal_conflicts"] == 1
+    assert receipt["backlogged"] == 2  # 停发余片 error verdict 回 backlog
+    # 来源守恒：收集期扣池的每个 cross 对要么落地 notice、要么回 backlog
+    assert receipt["notices_created"] == 7
+    assert receipt["judge_budget"] == {"internal": 1, "a_cross": 9}  # 收集期 10 对全扣池
+    assert receipt["notices_created"] + receipt["backlogged"] == receipt["judge_budget"]["a_cross"]
+    # 有 notice 落地时 finalize 契约：completed + truncated + reasons_seen
+    # 承载让路原因（R1 P2-1 修复口径：停发归 judge_budget_exhausted）
+    assert receipt["truncated"] is True
+    assert "judge_budget_exhausted" in receipt["reasons_seen"]

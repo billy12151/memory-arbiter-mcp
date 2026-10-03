@@ -187,11 +187,12 @@ class _JudgeBatch:
 
     def drain(self, judge_fn: "Any", *, stop_probe: "Any = None") -> list[dict[str, Any]]:
         """judge_fn(list[(a, b)]) -> list[PairVerdict]; returns the queued
-        items with ``verdict`` attached, in queue order. A judge_fn result
-        whose length disagrees with the request is failed wholesale (never
-        silently zipped short). ``stop_probe``（0.17.1 重标合一）：片间让路
-        探针，返回 True 即停发余片——余 item 补 error verdict（忙时公平性，
-        对齐 INTEGRATION 的 worker-yield 宣称）；已发片结果照常回填。"""
+        items with ``verdict`` attached, in queue order. 逐片契约（R1 实施
+        review P2-2）：每片返回数与该片对数逐一校验，违约片连同其后的全部
+        item 补 error verdict——此前各片的结果保留，zip 永不跨片错位。
+        ``stop_probe``（0.17.1 重标合一）：片间让路探针，返回 True 即停发
+        余片——余 item 补 error verdict（忙时公平性，对齐 INTEGRATION 的
+        worker-yield 宣称）；已发片结果照常回填。"""
         out: list[dict[str, Any]] = list(self._items)
         self._items = []
         if not out:
@@ -204,23 +205,28 @@ class _JudgeBatch:
         from ..constants import SEMANTIC_MDEBERTA_BATCH
         chunk = max(1, int(SEMANTIC_MDEBERTA_BATCH))
         verdicts: list[Any] = []
-        stopped = False
+        fail_start: int | None = None
+        fail_reason = ""
         for start in range(0, len(pairs), chunk):
             # 0.17.1 重标合一：片间让路探针（方案 §2.2.5）——忙时 63 片不再
-            # 一口气越墙，对齐 INTEGRATION「batch 返回后 worker 让路」宣称；
-            # 已发片结果照常回填，余片补 error verdict 由各源分账落地。
+            # 一口气越墙，对齐 INTEGRATION「batch 返回后 worker 让路」宣称。
             if stop_probe is not None and start > 0 and stop_probe():
-                stopped = True
+                fail_start, fail_reason = start, "job budget expired mid-batch"
                 break
-            verdicts.extend(judge_fn(pairs[start : start + chunk]))
-        if len(verdicts) != len(out):
+            part = judge_fn(pairs[start : start + chunk])
+            if len(part) != len(pairs[start : start + chunk]):
+                fail_start = start
+                fail_reason = (
+                    f"judge returned {len(part)} verdicts "
+                    f"for {len(pairs[start:start + chunk])} pairs"
+                )
+                break
+            verdicts.extend(part)
+        if fail_start is not None:
+            # 对齐保证：fail_start == len(verdicts)（此前各片逐片校验满额）。
             from ..semantic_judge import PairVerdict
-            reason = (
-                "job budget expired mid-batch" if stopped
-                else f"judge returned {len(verdicts)} verdicts for {len(out)} pairs"
-            )
-            bad = PairVerdict("no_conflict", {}, None, "mdeberta:unavailable", error=reason)
-            verdicts.extend([bad] * (len(out) - len(verdicts)))
+            bad = PairVerdict("no_conflict", {}, None, "mdeberta:unavailable", error=fail_reason)
+            verdicts.extend([bad] * (len(out) - fail_start))
         for item, verdict in zip(out, verdicts):
             item["verdict"] = verdict
         return out
@@ -498,6 +504,7 @@ class EvidencePipeline:
                     self._record_backlog_notice(
                         left, right, left_text, right_text, decision,
                         left_text[:32], left_text, right_text,
+                        # 值=行文本（§3.4 快照原文形态，D1 双通道放行）
                         reason=f"backlog_judged:{verdict.label}",
                         severity="normal" if outcome == "notice" else "info",
                         model_signal=_JudgePairView.signal(verdict),
@@ -859,6 +866,7 @@ class EvidencePipeline:
             "below_cos_floor": 0,
             "repeatability_skipped": 0,
             "internal_found": 0,
+            # 历史命名（Qwen 时代），回执/eval 链消费方钉住故不改名——现役判定引擎是 mDeBERTa
             "internal_qwen_confirmed": 0,
             "surfaced": 0,
             "surfaced_peer_ids": set(),
@@ -1633,6 +1641,9 @@ class EvidencePipeline:
                         reason = (
                             "judge_timeout" if "timeout" in error_text.lower()
                             else "judge_unavailable" if "disabled" in error_text.lower()
+                            # drain 片间让路停发的 error 归让路（与收集侧同一面
+                            # 墙的 judge_budget_exhausted 同口径），非后端故障
+                            else "judge_budget_exhausted" if "budget" in error_text.lower()
                             else "judge_backend_error"
                         )
                         self._record_job_degradation(ctx, reason)
@@ -1667,7 +1678,8 @@ class EvidencePipeline:
                             _pair_diff_anchor(str(item["text_a"]), str(item["text_b"]))
                         ),
                         # §3.4 owner 口径：判定 notice 的两侧值 = 两侧行文本（quote
-                        # 即值——无抽取物可放，判断页直接可读）。
+                        # 即值——无抽取物可放，判断页直接可读）。快照原文形态
+                        # 由 D1 双通道放行（db/conflicts.py _normalize_members）。
                         value_a=str(item["text_a"])[:400], value_b=str(item["text_b"])[:400],
                         reason=f"model_classified_{verdict.label}",
                         applying_slots=ctx["applying_slots"],

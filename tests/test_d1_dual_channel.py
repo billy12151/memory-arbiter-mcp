@@ -218,3 +218,44 @@ def test_record_conflict_paraphrase_still_rejected_on_free_intake(tmp_path) -> N
     rejected = tools.memory_repair("record_conflict", submitted)
     assert rejected["ok"] is False
     assert "value_raw verbatim" in str(rejected)
+
+
+def test_backlog_dialect_judged_notice_escalates(tmp_path) -> None:
+    """§1.6.5：backlog 判定型 notice（slot attribute=行文本头 32 字方言，
+    evidence.py:504 左值锚形态）escalate 端到端——通道二的第三个消费面。"""
+    tools = tv.make_tools(tmp_path)
+    left = tools.memory_write(content="接口超时为 5 秒。", subject="timeout", tags=[])["data"]
+    right = tools.memory_write(content="接口超时为 30 秒。", subject="timeout", tags=[])["data"]
+    left_text, right_text = "接口超时为 5 秒。", "接口超时为 30 秒。"
+    payload = _conflict_notice_payload(
+        reason="backlog_judged:conflict",
+        attribute=left_text[:32],  # backlog 方言：行文本头，非 12-hex
+        slot_key=_retired_gate_slot_key("default", left_text[:32], "timeout"),
+        left_id=left["id"], left_version=1,
+        left_value_norm=left_text, left_display=left_text, left_quote=left_text,
+        right_id=right["id"], right_version=1,
+        right_value_norm=right_text, right_display=right_text, right_quote=right_text,
+        left_content=left_text, right_content=right_text,
+        extra={"model_signal": {"label": "conflict", "probs": {
+            "conflict": 0.9, "no_conflict": 0.05, "possible_conflict": 0.05,
+        }, "mechanism": None, "model_version": "mdeberta:test"}},
+    )
+    created = tools.db.record_semantic_notice(
+        memory_id=left["id"], peer_id=right["id"], severity="normal",
+        notice_type="semantic_evidence",
+        title=f"Possible memory change with #{right['id']}",
+        message="backlog_judged:conflict",
+        payload=payload,
+        dedupe_key=f"backlog-judged:{left['id']}:{right['id']}",
+        left_version=1, right_version=1,
+    )
+    escalated = tools.memory_repair(
+        "notice", {"action": "escalate", "notice_id": int(created["notice_id"]), "reason": "verified"},
+    )
+    assert escalated["ok"] is True, escalated
+    detail = tools.memory_review(
+        "conflict_detail", {"conflict_id": int(created["notice_id"])},
+    )["data"]["conflict"]
+    assert detail["status"] == "open"
+    member_values = {str(m["normalized_value"]) for m in detail["member_versions"]}
+    assert member_values == {left_text, right_text}
