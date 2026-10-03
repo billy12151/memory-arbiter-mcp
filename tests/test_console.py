@@ -391,6 +391,17 @@ def test_settings_view_exposes_isolation(tmp_path: Path) -> None:
     assert isolation["label_zh"] == "工作区隔离等级"
 
 
+def test_settings_view_renders_mdeberta_model_dir_and_batch(tmp_path: Path) -> None:
+    """P2 #3: the two mdeberta siblings of mdeberta_ckpt are registered
+    descriptors and render their effective settings values (batch 0=auto)."""
+    api = _api(tmp_path)
+    view = api.settings_view()
+    items = {item["path"]: item for group in view["groups"] for item in group["items"]}
+    assert items["semantic_conflict.mdeberta_model_dir"]["current"] is None
+    assert items["semantic_conflict.mdeberta_batch"]["current"] == 0
+    assert items["semantic_conflict.mdeberta_batch"]["default"] == 0
+
+
 def test_settings_view_is_read_only_and_bilingual(tmp_path: Path) -> None:
     api = _api(tmp_path)
     view = api.settings_view()

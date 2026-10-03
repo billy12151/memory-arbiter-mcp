@@ -31,6 +31,23 @@ def _submit(tools: MemoryTools, decisions):
 
 # ── page assembly ───────────────────────────────────────────────────────────
 
+def test_page_invalid_page_size_returns_structured_invalid_input(tmp_path: Path) -> None:
+    """P2 #1: loosely-typed page_size/page_token must not leak a bare
+    traceback from the int coercion — the surface answers with the shared
+    invalid_input envelope instead."""
+    tools = make_tools(tmp_path)
+    result = tools.memory_repair("scan_queue", {"action": "page", "page_size": "abc"})
+    assert result["ok"] is False
+    assert result["data"]["outcome"] == "invalid_input"
+    assert result["data"]["error"]
+    token = tools.memory_repair("scan_queue", {"action": "page", "page_token": "abc"})
+    assert token["ok"] is False
+    assert token["data"]["outcome"] == "invalid_input"
+    # valid int behavior is unchanged
+    ok_page = tools.memory_repair("scan_queue", {"action": "page", "page_size": 5})
+    assert ok_page["ok"] is True
+
+
 def test_page_returns_pair_items_with_evidence_quotes(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     # 0.16.4: numeric shape (same-sentence two-values) — the only reliable

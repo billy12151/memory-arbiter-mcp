@@ -1736,7 +1736,10 @@ class MemoryTools:
             max_memories=payload.get("max_memories") or 400,
             time_budget_s=payload.get("time_budget_s") or 45.0,
             neighbor_k=payload.get("neighbor_k") or 10,
-            slow_lane=bool(payload.get("slow_lane", True)),
+            # P2 #2: loosely-typed JSON flag — bool("false") is True in Python
+            # and would silently re-enable the slow lane; use the same
+            # allow-list truthiness as every other surface flag.
+            slow_lane=self._is_truthy(payload.get("slow_lane", True)),
         )
 
     def scan_pipeline_status(self) -> dict[str, Any]:

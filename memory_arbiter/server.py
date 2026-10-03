@@ -353,7 +353,7 @@ def build_runtime() -> ServerBundle:
         value enums, update modes, and action_required paths before relying on a
         result that requests attention.
 
-        update edits in place: <=3 local edits use patches=[{old_text,new_text}]
+        update edits in place: 1..8 local edits use patches=[{old_text,new_text}]
         (atomic all-or-nothing, one version bump); full rewrites use new_content;
         a single small edit may use old_text/new_text.
 

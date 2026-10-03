@@ -25,7 +25,9 @@ def test_config_registry_only_describes_current_architecture() -> None:
     # 0.15.14 added semantic_conflict.n_gpu_layers, removed
     # semantic_conflict.max_notice_pairs and removed policy_path (B1).
     # 0.17.1: model_path/n_gpu_layers retired with the Qwen judge; mdeberta
-    # keys (ckpt + notice_min_prob) replace them in the registry.
+    # keys (ckpt + notice_min_prob) replace them in the registry;
+    # 0.17.1 P2 #3: mdeberta_model_dir + mdeberta_batch (0 = auto) joined
+    # their sibling descriptors (19 -> 21 current keys).
     # Everything else froze into memory_arbiter.constants
     # and must NOT reappear here.
     assert paths == {
@@ -33,6 +35,7 @@ def test_config_registry_only_describes_current_architecture() -> None:
         "mcp.transport", "mcp.http.host", "mcp.http.port", "workspace", "isolation",
         "embedding.model_path", "embedding.auto_query", "embedding.auto_write",
         "semantic_conflict.enabled", "semantic_conflict.mdeberta_ckpt",
+        "semantic_conflict.mdeberta_model_dir", "semantic_conflict.mdeberta_batch",
         "semantic_conflict.on_write", "semantic_conflict.mdeberta_notice_min_prob",
         "semantic_conflict.notice_sync_wait_ms",
         "update_check.enabled", "include_size",

@@ -72,6 +72,28 @@ def _write(tools: MemoryTools, subject: str, content: str, workspace: str = "ws"
     return int(res["data"]["id"])
 
 
+def test_kick_slow_lane_loose_string_flags(tmp_path: Path, monkeypatch) -> None:
+    """P2 #2: slow_lane accepts loosely-typed JSON flags — bool("false") is
+    True in Python and used to silently re-enable the slow lane; the shared
+    allow-list truthiness must turn "false"/"no" off and true-tokens on."""
+    tools = make_tools(tmp_path)
+    slow_calls: list[dict] = []
+    monkeypatch.setattr(
+        tools.db, "least_recently_scanned_ids",
+        lambda **kw: slow_calls.append(kw) or [],
+    )
+    for off_flag in ("false", "no"):
+        kick_off = tools.memory_repair("scan_pipeline", {"action": "kick", "slow_lane": off_flag})
+        assert kick_off["data"]["ok"] is True
+        assert slow_calls == [], f"slow lane ran despite slow_lane={off_flag!r}"
+    kick_on = tools.memory_repair("scan_pipeline", {"action": "kick", "slow_lane": "yes"})
+    assert kick_on["data"]["ok"] is True
+    assert slow_calls  # explicit true-token still enables the lane
+    default_kick = tools.memory_repair("scan_pipeline", {"action": "kick"})
+    assert default_kick["data"]["ok"] is True
+    assert len(slow_calls) >= 2  # omitted flag defaults to on
+
+
 # ── additive completion (§6⑲) ──────────────────────────────────────────────
 
 def test_additive_completion_upgrades_legacy_database(tmp_path: Path) -> None:

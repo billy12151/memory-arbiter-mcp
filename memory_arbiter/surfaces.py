@@ -1310,7 +1310,15 @@ class ProductSurfaces:
                     "internal_conflicts": self.db.internal_conflicts.counts(),
                 })
             if action_value == "page":
-                result = self._tools.scan_queue_page(caller=caller, **payload)
+                try:
+                    result = self._tools.scan_queue_page(caller=caller, **payload)
+                except (TypeError, ValueError) as exc:
+                    # int coercion of a loosely-typed page_size/page_token must
+                    # not leak a bare traceback — align with _forward's
+                    # loose-JSON posture (structured invalid_input, ok=False).
+                    return self.db.state.response(
+                        {"outcome": "invalid_input", "error": str(exc)}, ok=False,
+                    )
                 return self.db.state.response(result, ok=result.get("ok", True))
             if action_value == "submit":
                 result = self._tools.scan_queue_submit(caller=caller, **payload)
