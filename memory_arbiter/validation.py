@@ -103,7 +103,7 @@ PRODUCT_FIELD_REGISTRY: dict[tuple[str, str], set[str]] = {
         "workspace",
     },
     ("memory_review", "overview"): _COMMON,
-    ("memory_review", "doctor"): {"deep", "workspace"},
+    ("memory_review", "doctor"): {"deep"},  # 疑似#3（owner 2026-10-04）：workspace 幽灵参数删除——doctor 恒全局
     ("memory_review", "audit"): {"workspace"},
     ("memory_review", "conflicts"): {"status", "limit", "source", "workspace"},
     ("memory_review", "conflict_detail"): {"id", "conflict_id", "workspace"},
@@ -146,7 +146,7 @@ PRODUCT_FIELD_REGISTRY: dict[tuple[str, str], set[str]] = {
     ("memory_repair", "activate_pending"): {"id", "memory_id", "authorized", "workspace"},
     ("memory_repair", "semantic_control"): {"action", "timeout", "workspace"},
     ("memory_repair", "notice"): {"action", "status", "limit", "id", "notice_id", "reason", "workspace"},
-    ("memory_repair", "scan_pipeline"): {"action", "max_memories", "time_budget_s", "neighbor_k", "slow_lane", "workspace"},
+    ("memory_repair", "scan_pipeline"): {"action", "max_memories", "time_budget_s", "neighbor_k", "slow_lane"},  # 疑似#3：同上
     ("memory_repair", "scan_queue"): {"action", "page_size", "page_token", "decisions", "workspace"},
     ("memory_repair", "scan_candidates"): {
         "anchor_memory_id", "batch", "k", "include_check", "max_distance",

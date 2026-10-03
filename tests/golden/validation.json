@@ -962,8 +962,7 @@
    "max_memories": 10,
    "neighbor_k": 5,
    "slow_lane": false,
-   "time_budget_s": 5,
-   "workspace": "ws"
+   "time_budget_s": 5
   },
   "error": null,
   "warnings": [],
@@ -972,8 +971,7 @@
    "max_memories": 10,
    "neighbor_k": 5,
    "slow_lane": false,
-   "time_budget_s": 5,
-   "workspace": "ws"
+   "time_budget_s": 5
   },
   "raises": null
  },
@@ -1114,14 +1112,12 @@
   "surface": "memory_review",
   "operation": "doctor",
   "payload_in": {
-   "deep": false,
-   "workspace": "ws"
+   "deep": false
   },
   "error": null,
   "warnings": [],
   "payload_out": {
-   "deep": false,
-   "workspace": "ws"
+   "deep": false
   },
   "raises": null
  },
@@ -1239,6 +1235,22 @@
   "warnings": [],
   "payload_out": {
    "topic": "scheduled_tasks",
+   "workspace": "ws"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "A/memory_review.workspaces",
+  "surface": "memory_review",
+  "operation": "workspaces",
+  "payload_in": {
+   "limit": 10,
+   "workspace": "ws"
+  },
+  "error": null,
+  "warnings": [],
+  "payload_out": {
+   "limit": 10,
    "workspace": "ws"
   },
   "raises": null
@@ -39357,8 +39369,7 @@
    "max_memories": 10,
    "neighbor_k": 5,
    "slow_lane": false,
-   "time_budget_s": 5,
-   "workspace": "ws"
+   "time_budget_s": 5
   },
   "error": null,
   "warnings": [],
@@ -39369,8 +39380,7 @@
    "max_memories": 10,
    "neighbor_k": 5,
    "slow_lane": false,
-   "time_budget_s": 5,
-   "workspace": "ws"
+   "time_budget_s": 5
   },
   "raises": null
  },
@@ -39385,8 +39395,7 @@
    },
    "neighbor_k": 5,
    "slow_lane": false,
-   "time_budget_s": 5,
-   "workspace": "ws"
+   "time_budget_s": 5
   },
   "error": null,
   "warnings": [],
@@ -39397,8 +39406,7 @@
    },
    "neighbor_k": 5,
    "slow_lane": false,
-   "time_budget_s": 5,
-   "workspace": "ws"
+   "time_budget_s": 5
   },
   "raises": null
  },
@@ -39413,8 +39421,7 @@
     "unexpected": "object"
    },
    "slow_lane": false,
-   "time_budget_s": 5,
-   "workspace": "ws"
+   "time_budget_s": 5
   },
   "error": null,
   "warnings": [],
@@ -39425,8 +39432,7 @@
     "unexpected": "object"
    },
    "slow_lane": false,
-   "time_budget_s": 5,
-   "workspace": "ws"
+   "time_budget_s": 5
   },
   "raises": null
  },
@@ -39441,8 +39447,7 @@
    "slow_lane": {
     "unexpected": "object"
    },
-   "time_budget_s": 5,
-   "workspace": "ws"
+   "time_budget_s": 5
   },
   "error": null,
   "warnings": [],
@@ -39453,8 +39458,7 @@
    "slow_lane": {
     "unexpected": "object"
    },
-   "time_budget_s": 5,
-   "workspace": "ws"
+   "time_budget_s": 5
   },
   "raises": null
  },
@@ -39469,8 +39473,7 @@
    "slow_lane": false,
    "time_budget_s": {
     "unexpected": "object"
-   },
-   "workspace": "ws"
+   }
   },
   "error": null,
   "warnings": [],
@@ -39481,132 +39484,7 @@
    "slow_lane": false,
    "time_budget_s": {
     "unexpected": "object"
-   },
-   "workspace": "ws"
-  },
-  "raises": null
- },
- {
-  "case_id": "B/memory_repair.scan_pipeline/workspace/wrongtype",
-  "surface": "memory_repair",
-  "operation": "scan_pipeline",
-  "payload_in": {
-   "action": "page",
-   "max_memories": 10,
-   "neighbor_k": 5,
-   "slow_lane": false,
-   "time_budget_s": 5,
-   "workspace": 123
-  },
-  "error": {
-   "error": "invalid_input",
-   "field": "workspace",
-   "reason": "must be a string of at most 2000 characters"
-  },
-  "warnings": [],
-  "payload_out": {
-   "action": "page",
-   "max_memories": 10,
-   "neighbor_k": 5,
-   "slow_lane": false,
-   "time_budget_s": 5,
-   "workspace": 123
-  },
-  "raises": null
- },
- {
-  "case_id": "B/memory_repair.scan_pipeline/workspace/over",
-  "surface": "memory_repair",
-  "operation": "scan_pipeline",
-  "payload_in": {
-   "action": "page",
-   "max_memories": 10,
-   "neighbor_k": 5,
-   "slow_lane": false,
-   "time_budget_s": 5,
-   "workspace": {
-    "$rep": "x",
-    "$n": 2001,
-    "$pad": true
    }
-  },
-  "error": {
-   "error": "invalid_input",
-   "field": "workspace",
-   "reason": "must be a string of at most 2000 characters"
-  },
-  "warnings": [],
-  "payload_out": {
-   "action": "page",
-   "max_memories": 10,
-   "neighbor_k": 5,
-   "slow_lane": false,
-   "time_budget_s": 5,
-   "workspace": {
-    "$rep": "x",
-    "$n": 2001,
-    "$pad": true
-   }
-  },
-  "raises": null
- },
- {
-  "case_id": "B/memory_repair.scan_pipeline/workspace/atcap",
-  "surface": "memory_repair",
-  "operation": "scan_pipeline",
-  "payload_in": {
-   "action": "page",
-   "max_memories": 10,
-   "neighbor_k": 5,
-   "slow_lane": false,
-   "time_budget_s": 5,
-   "workspace": {
-    "$rep": "x",
-    "$n": 2000,
-    "$pad": true
-   }
-  },
-  "error": null,
-  "warnings": [],
-  "payload_out": {
-   "action": "page",
-   "max_memories": 10,
-   "neighbor_k": 5,
-   "slow_lane": false,
-   "time_budget_s": 5,
-   "workspace": {
-    "$rep": "x",
-    "$n": 2000,
-    "$pad": true
-   }
-  },
-  "raises": null
- },
- {
-  "case_id": "B/memory_repair.scan_pipeline/workspace/surrogate",
-  "surface": "memory_repair",
-  "operation": "scan_pipeline",
-  "payload_in": {
-   "action": "page",
-   "max_memories": 10,
-   "neighbor_k": 5,
-   "slow_lane": false,
-   "time_budget_s": 5,
-   "workspace": "a\ud800b"
-  },
-  "error": {
-   "error": "invalid_input",
-   "field": "workspace",
-   "reason": "must be a string of at most 2000 characters"
-  },
-  "warnings": [],
-  "payload_out": {
-   "action": "page",
-   "max_memories": 10,
-   "neighbor_k": 5,
-   "slow_lane": false,
-   "time_budget_s": 5,
-   "workspace": "a\ud800b"
   },
   "raises": null
  },
@@ -41783,108 +41661,14 @@
   "payload_in": {
    "deep": {
     "unexpected": "object"
-   },
-   "workspace": "ws"
+   }
   },
   "error": null,
   "warnings": [],
   "payload_out": {
    "deep": {
     "unexpected": "object"
-   },
-   "workspace": "ws"
-  },
-  "raises": null
- },
- {
-  "case_id": "B/memory_review.doctor/workspace/wrongtype",
-  "surface": "memory_review",
-  "operation": "doctor",
-  "payload_in": {
-   "deep": false,
-   "workspace": 123
-  },
-  "error": {
-   "error": "invalid_input",
-   "field": "workspace",
-   "reason": "must be a string of at most 2000 characters"
-  },
-  "warnings": [],
-  "payload_out": {
-   "deep": false,
-   "workspace": 123
-  },
-  "raises": null
- },
- {
-  "case_id": "B/memory_review.doctor/workspace/over",
-  "surface": "memory_review",
-  "operation": "doctor",
-  "payload_in": {
-   "deep": false,
-   "workspace": {
-    "$rep": "x",
-    "$n": 2001,
-    "$pad": true
    }
-  },
-  "error": {
-   "error": "invalid_input",
-   "field": "workspace",
-   "reason": "must be a string of at most 2000 characters"
-  },
-  "warnings": [],
-  "payload_out": {
-   "deep": false,
-   "workspace": {
-    "$rep": "x",
-    "$n": 2001,
-    "$pad": true
-   }
-  },
-  "raises": null
- },
- {
-  "case_id": "B/memory_review.doctor/workspace/atcap",
-  "surface": "memory_review",
-  "operation": "doctor",
-  "payload_in": {
-   "deep": false,
-   "workspace": {
-    "$rep": "x",
-    "$n": 2000,
-    "$pad": true
-   }
-  },
-  "error": null,
-  "warnings": [],
-  "payload_out": {
-   "deep": false,
-   "workspace": {
-    "$rep": "x",
-    "$n": 2000,
-    "$pad": true
-   }
-  },
-  "raises": null
- },
- {
-  "case_id": "B/memory_review.doctor/workspace/surrogate",
-  "surface": "memory_review",
-  "operation": "doctor",
-  "payload_in": {
-   "deep": false,
-   "workspace": "a\ud800b"
-  },
-  "error": {
-   "error": "invalid_input",
-   "field": "workspace",
-   "reason": "must be a string of at most 2000 characters"
-  },
-  "warnings": [],
-  "payload_out": {
-   "deep": false,
-   "workspace": "a\ud800b"
   },
   "raises": null
  },
@@ -45856,6 +45640,218 @@
   "warnings": [],
   "payload_out": {
    "topic": "scheduled_tasks",
+   "workspace": "a\ud800b"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory_review.workspaces/limit/wrongtype",
+  "surface": "memory_review",
+  "operation": "workspaces",
+  "payload_in": {
+   "limit": "abc",
+   "workspace": "ws"
+  },
+  "error": {
+   "error": "invalid_input",
+   "field": "limit",
+   "reason": "must be an integer between 1 and 100"
+  },
+  "warnings": [],
+  "payload_out": {
+   "limit": "abc",
+   "workspace": "ws"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory_review.workspaces/limit/under",
+  "surface": "memory_review",
+  "operation": "workspaces",
+  "payload_in": {
+   "limit": 0,
+   "workspace": "ws"
+  },
+  "error": {
+   "error": "invalid_input",
+   "field": "limit",
+   "reason": "must be an integer between 1 and 100"
+  },
+  "warnings": [],
+  "payload_out": {
+   "limit": 0,
+   "workspace": "ws"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory_review.workspaces/limit/over",
+  "surface": "memory_review",
+  "operation": "workspaces",
+  "payload_in": {
+   "limit": 101,
+   "workspace": "ws"
+  },
+  "error": {
+   "error": "invalid_input",
+   "field": "limit",
+   "reason": "must be an integer between 1 and 100"
+  },
+  "warnings": [],
+  "payload_out": {
+   "limit": 101,
+   "workspace": "ws"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory_review.workspaces/limit/atmin",
+  "surface": "memory_review",
+  "operation": "workspaces",
+  "payload_in": {
+   "limit": 1,
+   "workspace": "ws"
+  },
+  "error": null,
+  "warnings": [],
+  "payload_out": {
+   "limit": 1,
+   "workspace": "ws"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory_review.workspaces/limit/atmax",
+  "surface": "memory_review",
+  "operation": "workspaces",
+  "payload_in": {
+   "limit": 100,
+   "workspace": "ws"
+  },
+  "error": null,
+  "warnings": [],
+  "payload_out": {
+   "limit": 100,
+   "workspace": "ws"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory_review.workspaces/limit/hugedigits",
+  "surface": "memory_review",
+  "operation": "workspaces",
+  "payload_in": {
+   "limit": {
+    "$rep": "9",
+    "$n": 5000,
+    "$pad": true
+   },
+   "workspace": "ws"
+  },
+  "error": {
+   "error": "invalid_input",
+   "field": "limit",
+   "reason": "must be an integer between 1 and 100"
+  },
+  "warnings": [],
+  "payload_out": {
+   "limit": {
+    "$rep": "9",
+    "$n": 5000,
+    "$pad": true
+   },
+   "workspace": "ws"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory_review.workspaces/workspace/wrongtype",
+  "surface": "memory_review",
+  "operation": "workspaces",
+  "payload_in": {
+   "limit": 10,
+   "workspace": 123
+  },
+  "error": {
+   "error": "invalid_input",
+   "field": "workspace",
+   "reason": "must be a string of at most 2000 characters"
+  },
+  "warnings": [],
+  "payload_out": {
+   "limit": 10,
+   "workspace": 123
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory_review.workspaces/workspace/over",
+  "surface": "memory_review",
+  "operation": "workspaces",
+  "payload_in": {
+   "limit": 10,
+   "workspace": {
+    "$rep": "x",
+    "$n": 2001,
+    "$pad": true
+   }
+  },
+  "error": {
+   "error": "invalid_input",
+   "field": "workspace",
+   "reason": "must be a string of at most 2000 characters"
+  },
+  "warnings": [],
+  "payload_out": {
+   "limit": 10,
+   "workspace": {
+    "$rep": "x",
+    "$n": 2001,
+    "$pad": true
+   }
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory_review.workspaces/workspace/atcap",
+  "surface": "memory_review",
+  "operation": "workspaces",
+  "payload_in": {
+   "limit": 10,
+   "workspace": {
+    "$rep": "x",
+    "$n": 2000,
+    "$pad": true
+   }
+  },
+  "error": null,
+  "warnings": [],
+  "payload_out": {
+   "limit": 10,
+   "workspace": {
+    "$rep": "x",
+    "$n": 2000,
+    "$pad": true
+   }
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory_review.workspaces/workspace/surrogate",
+  "surface": "memory_review",
+  "operation": "workspaces",
+  "payload_in": {
+   "limit": 10,
+   "workspace": "a\ud800b"
+  },
+  "error": {
+   "error": "invalid_input",
+   "field": "workspace",
+   "reason": "must be a string of at most 2000 characters"
+  },
+  "warnings": [],
+  "payload_out": {
+   "limit": 10,
    "workspace": "a\ud800b"
   },
   "raises": null

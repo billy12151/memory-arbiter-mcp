@@ -1307,6 +1307,39 @@ class ReadPipeline:
                        "Read specific items via memory(action='read') with outline offsets.")
                 ),
             }
+        # 疑似#7（owner 2026-10-04 拍板：要补）：batch_find 全文/hits 页补响应
+        # 字节预算——与 batch_read 的 80KB 家族同款同常数、同结构化降级
+        # （never silent truncation）：超限整页降元数据（保留 content_chars），
+        # 指引 agent 逐条 read。preview 页本就无内容，不进此门。
+        if content_mode in {"full", "hits"}:
+            def _item_bytes(entry: dict[str, Any]) -> int:
+                memory = entry.get("memory") or {}
+                return len(str(memory.get("content") or "").encode("utf-8"))
+
+            total_bytes = sum(_item_bytes(entry) for entry in results)
+            if total_bytes > BATCH_READ_FULL_BUDGET_BYTES:
+                slim_results: list[dict[str, Any]] = []
+                for entry in results:
+                    memory = entry.get("memory") or {}
+                    if not str(memory.get("content") or ""):
+                        slim_results.append(entry)
+                        continue
+                    record = {key: value for key, value in memory.items() if key != "content"}
+                    record["content_chars"] = len(str(memory.get("content") or ""))
+                    slim_results.append(entry | {"memory": record})
+                response_data["results"] = slim_results
+                response_data["over_budget"] = True
+                response_data["budget_bytes"] = BATCH_READ_FULL_BUDGET_BYTES
+                response_data["total_bytes"] = total_bytes
+                response_data["hint"] = (
+                    "batch_find over the content byte budget; no contents were returned — "
+                    "read items individually (memory action='read') or lower limit_per_query"
+                )
+                if self.settings.include_size and isinstance(response_data.get("size"), dict):
+                    response_data["size"] = {
+                        **meter_payloads(slim_results),
+                        "display_hint": response_data["size"].get("display_hint"),
+                    }
         return self.db.state.response(response_data, extra_warnings=extra_warnings)
 
     def memory_search_expired(
