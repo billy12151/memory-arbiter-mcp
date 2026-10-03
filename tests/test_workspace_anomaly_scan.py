@@ -188,6 +188,7 @@ def test_move_stales_the_notice(vec_tools: MemoryTools) -> None:
         ).fetchone()[0] >= 1
 
     moved = tools.memory_govern("move_memories_workspace", {
+        "workspace": "default",
         "memory_ids": [12], "new_workspace": "dbpgsql",
         "reason": "confirmed placement", "authorized": True,
     })
@@ -364,6 +365,7 @@ def test_confirmed_pair_does_not_consume_cap(vec_tools: MemoryTools) -> None:
             subject=f"newbucket-{i}", tags=["db"], workspace="apisvc",
         )["data"]["id"])
     moved = tools.memory_govern("move_memories_workspace", {
+        "workspace": "default",
         "memory_ids": newbucket_ids, "new_workspace": "newbucket",
         "reason": "seed unconfirmed bucket", "authorized": True,
     })

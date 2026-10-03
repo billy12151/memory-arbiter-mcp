@@ -127,7 +127,7 @@ def test_server_memory_edit_preserves_tags_when_new_tags_omitted(tmp_path: Path,
     assert set(app.tools) == {"memory", "memory_review", "memory_govern", "memory_repair"}
     written = _sc(app.tools["memory"](
         action="remember",
-        data={
+        data={"workspace": "default", 
             "content": "draft content",
             "subject": "server-wrapper",
             "tags": ["keep-me"],
@@ -192,11 +192,13 @@ def test_product_memory_review_and_govern_wrappers(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     written = tools.memory(
         action="remember",
-        data={"content": "old whole fact", "subject": "old", "tags": ["govern"]},
+        data={"workspace": "default", 
+            "workspace": "default","content": "old whole fact", "subject": "old", "tags": ["govern"]},
     )
     replacement = tools.memory(
         action="remember",
-        data={"content": "new whole fact", "subject": "new", "tags": ["govern"]},
+        data={"workspace": "default", 
+            "workspace": "default","content": "new whole fact", "subject": "new", "tags": ["govern"]},
     )
     old_id = written["data"]["id"]
     new_id = replacement["data"]["id"]
@@ -237,7 +239,8 @@ def test_product_memory_review_and_govern_wrappers(tmp_path: Path) -> None:
 
 def test_product_wrappers_validate_aliases_and_bad_inputs(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
-    written = tools.memory(action="remember", data={"content": "old", "subject": "old"})
+    written = tools.memory(action="remember", data={"workspace": "default", 
+        "workspace": "default","content": "old", "subject": "old"})
     memory_id = written["data"]["id"]
     tools.memory(action="update", data={"id": memory_id, "new_content": "new"})
 
@@ -268,8 +271,10 @@ def test_product_wrappers_validate_aliases_and_bad_inputs(tmp_path: Path) -> Non
 
 def test_product_repair_cleanup_history_id_alias_is_not_full_cleanup(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
-    first = tools.memory(action="remember", data={"content": "a", "subject": "a"})["data"]["id"]
-    second = tools.memory(action="remember", data={"content": "b", "subject": "b"})["data"]["id"]
+    first = tools.memory(action="remember", data={"workspace": "default", 
+        "workspace": "default","content": "a", "subject": "a"})["data"]["id"]
+    second = tools.memory(action="remember", data={"workspace": "default", 
+        "workspace": "default","content": "b", "subject": "b"})["data"]["id"]
     tools.memory(action="update", data={"id": first, "new_content": "a2"})
     tools.memory(action="update", data={"id": second, "new_content": "b2"})
     assert tools.memory_review(view="history", data={"id": first})["data"]["count"] == 1
@@ -298,7 +303,8 @@ def test_product_repair_cleanup_history_id_alias_is_not_full_cleanup(tmp_path: P
 
 def test_string_false_authorized_fails_closed_across_product_surfaces(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
-    memory_id = tools.memory(action="remember", data={
+    memory_id = tools.memory(action="remember", data={"workspace": "default", 
+        "workspace": "default",
         "content": "protected fact", "subject": "protected",
         "source_type": "user_confirmed", "protection_level": "locked",
     })["data"]["id"]
@@ -325,7 +331,8 @@ def test_string_false_authorized_fails_closed_across_product_surfaces(tmp_path: 
 
 def test_string_true_authorized_remains_compatible(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
-    memory_id = tools.memory(action="remember", data={
+    memory_id = tools.memory(action="remember", data={"workspace": "default", 
+        "workspace": "default",
         "content": "protected fact", "subject": "protected",
         "source_type": "user_confirmed", "protection_level": "locked",
     })["data"]["id"]
@@ -350,9 +357,9 @@ def test_all_governance_actions_require_explicit_user_authorization(tmp_path: Pa
             "conflict_id": 1, "expected_revision": 2, "memory_id": 1,
             "action": "update_current_claim", "content": "corrected fact",
         },
-        "rename_workspace_canonical": {"old": "old", "new": "new"},
-        "migrate_workspace": {"from": "old", "to": "new"},
-        "confirm_pending_workspace": {"memory_id": 1, "canonical": "canonical"},
+        "rename_workspace_canonical": {"old": "old", "new": "new", "workspace": "ws"},
+        "migrate_workspace": {"from": "old", "to": "new", "workspace": "ws"},
+        "confirm_pending_workspace": {"memory_id": 1, "canonical": "canonical", "workspace": "ws"},
     }
 
     for action, payload in valid_payloads.items():
@@ -540,14 +547,16 @@ def test_product_forwards_handle_bad_secondary_int_args(tmp_path: Path) -> None:
     (``"5"``), which MCP clients commonly send, still coerce and succeed.
     """
     tools = make_tools(tmp_path)
-    new_id = tools.memory(action="remember", data={"content": "new", "subject": "s"})["data"]["id"]
+    new_id = tools.memory(action="remember", data={"workspace": "default", 
+        "workspace": "default","content": "new", "subject": "s"})["data"]["id"]
 
     def assert_clean(label: str, result: dict) -> None:
         assert result["ok"] is False, f"{label} unexpectedly succeeded: {result}"
         assert "error" in result["data"], f"{label} must attach an error"
 
     # retire: non-int superseded_by (primary memory_id coerced, secondary not)
-    old = tools.memory(action="remember", data={"content": "old", "subject": "s"})["data"]["id"]
+    old = tools.memory(action="remember", data={"workspace": "default", 
+        "workspace": "default","content": "old", "subject": "s"})["data"]["id"]
     assert_clean(
         "govern.retire superseded_by=xyz",
         tools.memory_govern(action="retire", data={
@@ -627,26 +636,31 @@ def test_product_memory_write_rejects_non_list_tags(tmp_path: Path) -> None:
     """The product schema rejects wrong tag types instead of coercing them."""
     tools = make_tools(tmp_path)
 
-    r = tools.memory(action="remember", data={"content": "a", "subject": "s", "tags": "todo"})
+    r = tools.memory(action="remember", data={"workspace": "default", 
+        "workspace": "default","content": "a", "subject": "s", "tags": "todo"})
     assert r["ok"] is False
     assert r["data"]["field"] == "tags"
 
-    r = tools.memory(action="remember", data={"content": "b", "subject": "s", "tags": 123})
+    r = tools.memory(action="remember", data={"workspace": "default", 
+        "workspace": "default","content": "b", "subject": "s", "tags": 123})
     assert r["ok"] is False
     assert r["data"]["field"] == "tags"
 
     # None → []
-    r = tools.memory(action="remember", data={"content": "c", "subject": "s"})
+    r = tools.memory(action="remember", data={"workspace": "default", 
+        "workspace": "default","content": "c", "subject": "s"})
     assert r["ok"] is True
     assert r["data"]["record"]["tags"] == []
 
     # list preserved
-    r = tools.memory(action="remember", data={"content": "d", "subject": "s", "tags": ["todo", "project"]})
+    r = tools.memory(action="remember", data={"workspace": "default", 
+        "workspace": "default","content": "d", "subject": "s", "tags": ["todo", "project"]})
     assert r["ok"] is True
     assert r["data"]["record"]["tags"] == ["todo", "project"]
 
     # Product JSON accepts arrays only; Python tuples are rejected at the boundary.
-    r = tools.memory(action="remember", data={"content": "e", "subject": "s", "tags": ("a", "b")})
+    r = tools.memory(action="remember", data={"workspace": "default", 
+        "workspace": "default","content": "e", "subject": "s", "tags": ("a", "b")})
     assert r["ok"] is False
     assert r["data"]["field"] == "tags"
 

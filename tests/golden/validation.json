@@ -509,7 +509,8 @@
    "authorized": true,
    "from": "ws-a",
    "reason": "because",
-   "to": "ws-b"
+   "to": "ws-b",
+   "workspace": "ws"
   },
   "error": null,
   "warnings": [],
@@ -517,7 +518,8 @@
    "authorized": true,
    "from": "ws-a",
    "reason": "because",
-   "to": "ws-b"
+   "to": "ws-b",
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -559,7 +561,8 @@
    "authorized": true,
    "new": "ws-b",
    "old": "ws-a",
-   "reason": "because"
+   "reason": "because",
+   "workspace": "ws"
   },
   "error": null,
   "warnings": [],
@@ -567,7 +570,8 @@
    "authorized": true,
    "new": "ws-b",
    "old": "ws-a",
-   "reason": "because"
+   "reason": "because",
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -23964,7 +23968,8 @@
    },
    "from": "ws-a",
    "reason": "because",
-   "to": "ws-b"
+   "to": "ws-b",
+   "workspace": "ws"
   },
   "error": null,
   "warnings": [],
@@ -23974,7 +23979,8 @@
    },
    "from": "ws-a",
    "reason": "because",
-   "to": "ws-b"
+   "to": "ws-b",
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -23986,7 +23992,8 @@
    "authorized": true,
    "from": 123,
    "reason": "because",
-   "to": "ws-b"
+   "to": "ws-b",
+   "workspace": "ws"
   },
   "error": {
    "error": "invalid_input",
@@ -23998,7 +24005,8 @@
    "authorized": true,
    "from": 123,
    "reason": "because",
-   "to": "ws-b"
+   "to": "ws-b",
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -24014,7 +24022,8 @@
     "$pad": true
    },
    "reason": "because",
-   "to": "ws-b"
+   "to": "ws-b",
+   "workspace": "ws"
   },
   "error": {
    "error": "invalid_input",
@@ -24030,7 +24039,8 @@
     "$pad": true
    },
    "reason": "because",
-   "to": "ws-b"
+   "to": "ws-b",
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -24046,7 +24056,8 @@
     "$pad": true
    },
    "reason": "because",
-   "to": "ws-b"
+   "to": "ws-b",
+   "workspace": "ws"
   },
   "error": null,
   "warnings": [],
@@ -24058,7 +24069,8 @@
     "$pad": true
    },
    "reason": "because",
-   "to": "ws-b"
+   "to": "ws-b",
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -24070,7 +24082,8 @@
    "authorized": true,
    "from": "a\ud800b",
    "reason": "because",
-   "to": "ws-b"
+   "to": "ws-b",
+   "workspace": "ws"
   },
   "error": {
    "error": "invalid_input",
@@ -24082,7 +24095,8 @@
    "authorized": true,
    "from": "a\ud800b",
    "reason": "because",
-   "to": "ws-b"
+   "to": "ws-b",
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -24094,7 +24108,8 @@
    "authorized": true,
    "from": "ws-a",
    "reason": 123,
-   "to": "ws-b"
+   "to": "ws-b",
+   "workspace": "ws"
   },
   "error": {
    "error": "invalid_input",
@@ -24106,7 +24121,8 @@
    "authorized": true,
    "from": "ws-a",
    "reason": 123,
-   "to": "ws-b"
+   "to": "ws-b",
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -24122,7 +24138,8 @@
     "$n": 2001,
     "$pad": true
    },
-   "to": "ws-b"
+   "to": "ws-b",
+   "workspace": "ws"
   },
   "error": {
    "error": "invalid_input",
@@ -24138,7 +24155,8 @@
     "$n": 2001,
     "$pad": true
    },
-   "to": "ws-b"
+   "to": "ws-b",
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -24154,7 +24172,8 @@
     "$n": 2000,
     "$pad": true
    },
-   "to": "ws-b"
+   "to": "ws-b",
+   "workspace": "ws"
   },
   "error": null,
   "warnings": [],
@@ -24166,7 +24185,8 @@
     "$n": 2000,
     "$pad": true
    },
-   "to": "ws-b"
+   "to": "ws-b",
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -24178,7 +24198,8 @@
    "authorized": true,
    "from": "ws-a",
    "reason": "a\ud800b",
-   "to": "ws-b"
+   "to": "ws-b",
+   "workspace": "ws"
   },
   "error": {
    "error": "invalid_input",
@@ -24190,7 +24211,8 @@
    "authorized": true,
    "from": "ws-a",
    "reason": "a\ud800b",
-   "to": "ws-b"
+   "to": "ws-b",
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -24202,7 +24224,8 @@
    "authorized": true,
    "from": "ws-a",
    "reason": "because",
-   "to": 123
+   "to": 123,
+   "workspace": "ws"
   },
   "error": {
    "error": "invalid_input",
@@ -24214,7 +24237,8 @@
    "authorized": true,
    "from": "ws-a",
    "reason": "because",
-   "to": 123
+   "to": 123,
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -24230,7 +24254,8 @@
     "$rep": "x",
     "$n": 2001,
     "$pad": true
-   }
+   },
+   "workspace": "ws"
   },
   "error": {
    "error": "invalid_input",
@@ -24246,7 +24271,8 @@
     "$rep": "x",
     "$n": 2001,
     "$pad": true
-   }
+   },
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -24262,7 +24288,8 @@
     "$rep": "x",
     "$n": 2000,
     "$pad": true
-   }
+   },
+   "workspace": "ws"
   },
   "error": null,
   "warnings": [],
@@ -24274,7 +24301,8 @@
     "$rep": "x",
     "$n": 2000,
     "$pad": true
-   }
+   },
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -24286,7 +24314,8 @@
    "authorized": true,
    "from": "ws-a",
    "reason": "because",
-   "to": "a\ud800b"
+   "to": "a\ud800b",
+   "workspace": "ws"
   },
   "error": {
    "error": "invalid_input",
@@ -24298,7 +24327,124 @@
    "authorized": true,
    "from": "ws-a",
    "reason": "because",
-   "to": "a\ud800b"
+   "to": "a\ud800b",
+   "workspace": "ws"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory_govern.migrate_workspace/workspace/wrongtype",
+  "surface": "memory_govern",
+  "operation": "migrate_workspace",
+  "payload_in": {
+   "authorized": true,
+   "from": "ws-a",
+   "reason": "because",
+   "to": "ws-b",
+   "workspace": 123
+  },
+  "error": {
+   "error": "invalid_input",
+   "field": "workspace",
+   "reason": "must be a string of at most 2000 characters"
+  },
+  "warnings": [],
+  "payload_out": {
+   "authorized": true,
+   "from": "ws-a",
+   "reason": "because",
+   "to": "ws-b",
+   "workspace": 123
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory_govern.migrate_workspace/workspace/over",
+  "surface": "memory_govern",
+  "operation": "migrate_workspace",
+  "payload_in": {
+   "authorized": true,
+   "from": "ws-a",
+   "reason": "because",
+   "to": "ws-b",
+   "workspace": {
+    "$rep": "x",
+    "$n": 2001,
+    "$pad": true
+   }
+  },
+  "error": {
+   "error": "invalid_input",
+   "field": "workspace",
+   "reason": "must be a string of at most 2000 characters"
+  },
+  "warnings": [],
+  "payload_out": {
+   "authorized": true,
+   "from": "ws-a",
+   "reason": "because",
+   "to": "ws-b",
+   "workspace": {
+    "$rep": "x",
+    "$n": 2001,
+    "$pad": true
+   }
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory_govern.migrate_workspace/workspace/atcap",
+  "surface": "memory_govern",
+  "operation": "migrate_workspace",
+  "payload_in": {
+   "authorized": true,
+   "from": "ws-a",
+   "reason": "because",
+   "to": "ws-b",
+   "workspace": {
+    "$rep": "x",
+    "$n": 2000,
+    "$pad": true
+   }
+  },
+  "error": null,
+  "warnings": [],
+  "payload_out": {
+   "authorized": true,
+   "from": "ws-a",
+   "reason": "because",
+   "to": "ws-b",
+   "workspace": {
+    "$rep": "x",
+    "$n": 2000,
+    "$pad": true
+   }
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory_govern.migrate_workspace/workspace/surrogate",
+  "surface": "memory_govern",
+  "operation": "migrate_workspace",
+  "payload_in": {
+   "authorized": true,
+   "from": "ws-a",
+   "reason": "because",
+   "to": "ws-b",
+   "workspace": "a\ud800b"
+  },
+  "error": {
+   "error": "invalid_input",
+   "field": "workspace",
+   "reason": "must be a string of at most 2000 characters"
+  },
+  "warnings": [],
+  "payload_out": {
+   "authorized": true,
+   "from": "ws-a",
+   "reason": "because",
+   "to": "ws-b",
+   "workspace": "a\ud800b"
   },
   "raises": null
  },
@@ -24824,7 +24970,8 @@
    },
    "new": "ws-b",
    "old": "ws-a",
-   "reason": "because"
+   "reason": "because",
+   "workspace": "ws"
   },
   "error": null,
   "warnings": [],
@@ -24834,7 +24981,8 @@
    },
    "new": "ws-b",
    "old": "ws-a",
-   "reason": "because"
+   "reason": "because",
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -24846,7 +24994,8 @@
    "authorized": true,
    "new": 123,
    "old": "ws-a",
-   "reason": "because"
+   "reason": "because",
+   "workspace": "ws"
   },
   "error": {
    "error": "invalid_input",
@@ -24858,7 +25007,8 @@
    "authorized": true,
    "new": 123,
    "old": "ws-a",
-   "reason": "because"
+   "reason": "because",
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -24874,7 +25024,8 @@
     "$pad": true
    },
    "old": "ws-a",
-   "reason": "because"
+   "reason": "because",
+   "workspace": "ws"
   },
   "error": {
    "error": "invalid_input",
@@ -24890,7 +25041,8 @@
     "$pad": true
    },
    "old": "ws-a",
-   "reason": "because"
+   "reason": "because",
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -24906,7 +25058,8 @@
     "$pad": true
    },
    "old": "ws-a",
-   "reason": "because"
+   "reason": "because",
+   "workspace": "ws"
   },
   "error": null,
   "warnings": [],
@@ -24918,7 +25071,8 @@
     "$pad": true
    },
    "old": "ws-a",
-   "reason": "because"
+   "reason": "because",
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -24930,7 +25084,8 @@
    "authorized": true,
    "new": "a\ud800b",
    "old": "ws-a",
-   "reason": "because"
+   "reason": "because",
+   "workspace": "ws"
   },
   "error": {
    "error": "invalid_input",
@@ -24942,7 +25097,8 @@
    "authorized": true,
    "new": "a\ud800b",
    "old": "ws-a",
-   "reason": "because"
+   "reason": "because",
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -24954,7 +25110,8 @@
    "authorized": true,
    "new": "ws-b",
    "old": 123,
-   "reason": "because"
+   "reason": "because",
+   "workspace": "ws"
   },
   "error": {
    "error": "invalid_input",
@@ -24966,7 +25123,8 @@
    "authorized": true,
    "new": "ws-b",
    "old": 123,
-   "reason": "because"
+   "reason": "because",
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -24982,7 +25140,8 @@
     "$n": 2001,
     "$pad": true
    },
-   "reason": "because"
+   "reason": "because",
+   "workspace": "ws"
   },
   "error": {
    "error": "invalid_input",
@@ -24998,7 +25157,8 @@
     "$n": 2001,
     "$pad": true
    },
-   "reason": "because"
+   "reason": "because",
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -25014,7 +25174,8 @@
     "$n": 2000,
     "$pad": true
    },
-   "reason": "because"
+   "reason": "because",
+   "workspace": "ws"
   },
   "error": null,
   "warnings": [],
@@ -25026,7 +25187,8 @@
     "$n": 2000,
     "$pad": true
    },
-   "reason": "because"
+   "reason": "because",
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -25038,7 +25200,8 @@
    "authorized": true,
    "new": "ws-b",
    "old": "a\ud800b",
-   "reason": "because"
+   "reason": "because",
+   "workspace": "ws"
   },
   "error": {
    "error": "invalid_input",
@@ -25050,7 +25213,8 @@
    "authorized": true,
    "new": "ws-b",
    "old": "a\ud800b",
-   "reason": "because"
+   "reason": "because",
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -25062,7 +25226,8 @@
    "authorized": true,
    "new": "ws-b",
    "old": "ws-a",
-   "reason": 123
+   "reason": 123,
+   "workspace": "ws"
   },
   "error": {
    "error": "invalid_input",
@@ -25074,7 +25239,8 @@
    "authorized": true,
    "new": "ws-b",
    "old": "ws-a",
-   "reason": 123
+   "reason": 123,
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -25090,7 +25256,8 @@
     "$rep": "x",
     "$n": 2001,
     "$pad": true
-   }
+   },
+   "workspace": "ws"
   },
   "error": {
    "error": "invalid_input",
@@ -25106,7 +25273,8 @@
     "$rep": "x",
     "$n": 2001,
     "$pad": true
-   }
+   },
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -25122,7 +25290,8 @@
     "$rep": "x",
     "$n": 2000,
     "$pad": true
-   }
+   },
+   "workspace": "ws"
   },
   "error": null,
   "warnings": [],
@@ -25134,7 +25303,8 @@
     "$rep": "x",
     "$n": 2000,
     "$pad": true
-   }
+   },
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -25146,7 +25316,8 @@
    "authorized": true,
    "new": "ws-b",
    "old": "ws-a",
-   "reason": "a\ud800b"
+   "reason": "a\ud800b",
+   "workspace": "ws"
   },
   "error": {
    "error": "invalid_input",
@@ -25158,7 +25329,124 @@
    "authorized": true,
    "new": "ws-b",
    "old": "ws-a",
-   "reason": "a\ud800b"
+   "reason": "a\ud800b",
+   "workspace": "ws"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory_govern.rename_workspace_canonical/workspace/wrongtype",
+  "surface": "memory_govern",
+  "operation": "rename_workspace_canonical",
+  "payload_in": {
+   "authorized": true,
+   "new": "ws-b",
+   "old": "ws-a",
+   "reason": "because",
+   "workspace": 123
+  },
+  "error": {
+   "error": "invalid_input",
+   "field": "workspace",
+   "reason": "must be a string of at most 2000 characters"
+  },
+  "warnings": [],
+  "payload_out": {
+   "authorized": true,
+   "new": "ws-b",
+   "old": "ws-a",
+   "reason": "because",
+   "workspace": 123
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory_govern.rename_workspace_canonical/workspace/over",
+  "surface": "memory_govern",
+  "operation": "rename_workspace_canonical",
+  "payload_in": {
+   "authorized": true,
+   "new": "ws-b",
+   "old": "ws-a",
+   "reason": "because",
+   "workspace": {
+    "$rep": "x",
+    "$n": 2001,
+    "$pad": true
+   }
+  },
+  "error": {
+   "error": "invalid_input",
+   "field": "workspace",
+   "reason": "must be a string of at most 2000 characters"
+  },
+  "warnings": [],
+  "payload_out": {
+   "authorized": true,
+   "new": "ws-b",
+   "old": "ws-a",
+   "reason": "because",
+   "workspace": {
+    "$rep": "x",
+    "$n": 2001,
+    "$pad": true
+   }
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory_govern.rename_workspace_canonical/workspace/atcap",
+  "surface": "memory_govern",
+  "operation": "rename_workspace_canonical",
+  "payload_in": {
+   "authorized": true,
+   "new": "ws-b",
+   "old": "ws-a",
+   "reason": "because",
+   "workspace": {
+    "$rep": "x",
+    "$n": 2000,
+    "$pad": true
+   }
+  },
+  "error": null,
+  "warnings": [],
+  "payload_out": {
+   "authorized": true,
+   "new": "ws-b",
+   "old": "ws-a",
+   "reason": "because",
+   "workspace": {
+    "$rep": "x",
+    "$n": 2000,
+    "$pad": true
+   }
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory_govern.rename_workspace_canonical/workspace/surrogate",
+  "surface": "memory_govern",
+  "operation": "rename_workspace_canonical",
+  "payload_in": {
+   "authorized": true,
+   "new": "ws-b",
+   "old": "ws-a",
+   "reason": "because",
+   "workspace": "a\ud800b"
+  },
+  "error": {
+   "error": "invalid_input",
+   "field": "workspace",
+   "reason": "must be a string of at most 2000 characters"
+  },
+  "warnings": [],
+  "payload_out": {
+   "authorized": true,
+   "new": "ws-b",
+   "old": "ws-a",
+   "reason": "because",
+   "workspace": "a\ud800b"
   },
   "raises": null
  },
@@ -45748,6 +46036,7 @@
   "surface": "memory",
   "operation": "remember",
   "payload_in": {
+   "workspace": "default",
    "content": "a",
    "subject": "b",
    "confidence": "garbage"
@@ -45759,6 +46048,7 @@
   },
   "warnings": [],
   "payload_out": {
+   "workspace": "default",
    "content": "a",
    "subject": "b",
    "confidence": "garbage"
@@ -45770,6 +46060,7 @@
   "surface": "memory",
   "operation": "remember",
   "payload_in": {
+   "workspace": "default",
    "content": "a",
    "subject": "b",
    "bogus_field": 1,
@@ -45784,6 +46075,7 @@
    "unknown field ignored: bogus_field"
   ],
   "payload_out": {
+   "workspace": "default",
    "content": "a",
    "subject": "b",
    "confidence": 5
@@ -45954,6 +46246,7 @@
   "surface": "memory_govern",
   "operation": "confirm_pending_workspace",
   "payload_in": {
+   "workspace": "ws",
    "id": "abc"
   },
   "error": {
@@ -45963,6 +46256,7 @@
   },
   "warnings": [],
   "payload_out": {
+   "workspace": "ws",
    "id": "abc"
   },
   "raises": null
@@ -45984,6 +46278,126 @@
   "payload_out": {
    "whatever": "The base class of the class hierarchy.\n\nWhen called, it accepts no arguments and returns a new featureless\ninstance that has no instance attributes and cannot be given any.\n",
    "id": "abc"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "D/required_workspace_missing",
+  "surface": "memory",
+  "operation": "remember",
+  "payload_in": {
+   "content": "a",
+   "subject": "b"
+  },
+  "error": {
+   "error": "invalid_input",
+   "field": "workspace",
+   "reason": "workspace is required for this action; call memory_review(view='workspaces') to list existing buckets, then pass the chosen canonical name (pass an existing name; use a new name only when deliberately creating a new bucket; 'default' is the global pool)"
+  },
+  "warnings": [],
+  "payload_out": {
+   "content": "a",
+   "subject": "b"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "D/required_workspace_empty",
+  "surface": "memory",
+  "operation": "remember",
+  "payload_in": {
+   "workspace": "   ",
+   "content": "a",
+   "subject": "b"
+  },
+  "error": {
+   "error": "invalid_input",
+   "field": "workspace",
+   "reason": "workspace is required for this action; call memory_review(view='workspaces') to list existing buckets, then pass the chosen canonical name (pass an existing name; use a new name only when deliberately creating a new bucket; 'default' is the global pool)"
+  },
+  "warnings": [],
+  "payload_out": {
+   "workspace": "   ",
+   "content": "a",
+   "subject": "b"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "D/required_workspace_pass",
+  "surface": "memory",
+  "operation": "remember",
+  "payload_in": {
+   "workspace": "default",
+   "content": "a",
+   "subject": "b"
+  },
+  "error": null,
+  "warnings": [],
+  "payload_out": {
+   "workspace": "default",
+   "content": "a",
+   "subject": "b"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "D/required_workspace_govern_missing",
+  "surface": "memory_govern",
+  "operation": "confirm_pending_workspace",
+  "payload_in": {
+   "memory_id": 1,
+   "canonical": "ws",
+   "authorized": true
+  },
+  "error": {
+   "error": "invalid_input",
+   "field": "workspace",
+   "reason": "workspace is required for this action; call memory_review(view='workspaces') to list existing buckets, then pass the chosen canonical name (pass an existing name; use a new name only when deliberately creating a new bucket; 'default' is the global pool)"
+  },
+  "warnings": [],
+  "payload_out": {
+   "memory_id": 1,
+   "canonical": "ws",
+   "authorized": true
+  },
+  "raises": null
+ },
+ {
+  "case_id": "D/required_workspace_govern_empty",
+  "surface": "memory_govern",
+  "operation": "rename_workspace_canonical",
+  "payload_in": {
+   "workspace": "",
+   "old": "a",
+   "new": "b",
+   "authorized": true
+  },
+  "error": {
+   "error": "invalid_input",
+   "field": "workspace",
+   "reason": "workspace is required for this action; call memory_review(view='workspaces') to list existing buckets, then pass the chosen canonical name (pass an existing name; use a new name only when deliberately creating a new bucket; 'default' is the global pool)"
+  },
+  "warnings": [],
+  "payload_out": {
+   "workspace": "",
+   "old": "a",
+   "new": "b",
+   "authorized": true
+  },
+  "raises": null
+ },
+ {
+  "case_id": "D/required_workspace_not_enforced_on_read",
+  "surface": "memory",
+  "operation": "find",
+  "payload_in": {
+   "query": "x"
+  },
+  "error": null,
+  "warnings": [],
+  "payload_out": {
+   "query": "x"
   },
   "raises": null
  },
@@ -47798,8 +48212,8 @@
   },
   "error": {
    "error": "invalid_input",
-   "field": "memory_ids",
-   "reason": "must be a list with at most 1000 items"
+   "field": "workspace",
+   "reason": "workspace is required for this action; call memory_review(view='workspaces') to list existing buckets, then pass the chosen canonical name (pass an existing name; use a new name only when deliberately creating a new bucket; 'default' is the global pool)"
   },
   "warnings": [],
   "payload_out": {
@@ -49072,15 +49486,8 @@
   },
   "error": {
    "error": "invalid_input",
-   "field": "source_type",
-   "reason": "invalid enum value",
-   "allowed": [
-    "agent_generated",
-    "document_extracted",
-    "pending",
-    "unknown",
-    "user_confirmed"
-   ]
+   "field": "workspace",
+   "reason": "workspace is required for this action; call memory_review(view='workspaces') to list existing buckets, then pass the chosen canonical name (pass an existing name; use a new name only when deliberately creating a new bucket; 'default' is the global pool)"
   },
   "warnings": [],
   "payload_out": {
@@ -49136,8 +49543,8 @@
   },
   "error": {
    "error": "invalid_input",
-   "field": "status",
-   "reason": "must be 'active' (default) or 'pending'; superseded/conflicted/deleted are lifecycle outcomes, not write inputs"
+   "field": "workspace",
+   "reason": "workspace is required for this action; call memory_review(view='workspaces') to list existing buckets, then pass the chosen canonical name (pass an existing name; use a new name only when deliberately creating a new bucket; 'default' is the global pool)"
   },
   "warnings": [],
   "payload_out": {
@@ -49156,7 +49563,11 @@
    "subject": "b",
    "status": "pending"
   },
-  "error": null,
+  "error": {
+   "error": "invalid_input",
+   "field": "workspace",
+   "reason": "workspace is required for this action; call memory_review(view='workspaces') to list existing buckets, then pass the chosen canonical name (pass an existing name; use a new name only when deliberately creating a new bucket; 'default' is the global pool)"
+  },
   "warnings": [],
   "payload_out": {
    "content": "a",
@@ -50242,9 +50653,9 @@
    }
   },
   "error": {
-   "error": "resource_limit_exceeded",
-   "field": "metadata",
-   "max_bytes": 262144
+   "error": "invalid_input",
+   "field": "workspace",
+   "reason": "workspace is required for this action; call memory_review(view='workspaces') to list existing buckets, then pass the chosen canonical name (pass an existing name; use a new name only when deliberately creating a new bucket; 'default' is the global pool)"
   },
   "warnings": [],
   "payload_out": {
@@ -50507,8 +50918,8 @@
   },
   "error": {
    "error": "invalid_input",
-   "field": "memory_ids",
-   "reason": "must contain positive integer ids"
+   "field": "workspace",
+   "reason": "workspace is required for this action; call memory_review(view='workspaces') to list existing buckets, then pass the chosen canonical name (pass an existing name; use a new name only when deliberately creating a new bucket; 'default' is the global pool)"
   },
   "warnings": [],
   "payload_out": {
@@ -50534,8 +50945,8 @@
   },
   "error": {
    "error": "invalid_input",
-   "field": "memory_ids",
-   "reason": "must contain positive integer ids"
+   "field": "workspace",
+   "reason": "workspace is required for this action; call memory_review(view='workspaces') to list existing buckets, then pass the chosen canonical name (pass an existing name; use a new name only when deliberately creating a new bucket; 'default' is the global pool)"
   },
   "warnings": [],
   "payload_out": {
@@ -50990,8 +51401,8 @@
   },
   "error": {
    "error": "invalid_input",
-   "field": "status",
-   "reason": "must be 'active' (default) or 'pending'; superseded/conflicted/deleted are lifecycle outcomes, not write inputs"
+   "field": "workspace",
+   "reason": "workspace is required for this action; call memory_review(view='workspaces') to list existing buckets, then pass the chosen canonical name (pass an existing name; use a new name only when deliberately creating a new bucket; 'default' is the global pool)"
   },
   "warnings": [],
   "payload_out": {
@@ -51016,8 +51427,8 @@
   },
   "error": {
    "error": "invalid_input",
-   "field": "status",
-   "reason": "must be 'active' (default) or 'pending'; superseded/conflicted/deleted are lifecycle outcomes, not write inputs"
+   "field": "workspace",
+   "reason": "workspace is required for this action; call memory_review(view='workspaces') to list existing buckets, then pass the chosen canonical name (pass an existing name; use a new name only when deliberately creating a new bucket; 'default' is the global pool)"
   },
   "warnings": [],
   "payload_out": {
@@ -51061,8 +51472,8 @@
   },
   "error": {
    "error": "invalid_input",
-   "field": "tags",
-   "reason": "must be a list of at most 100 strings, each at most 256 characters"
+   "field": "workspace",
+   "reason": "workspace is required for this action; call memory_review(view='workspaces') to list existing buckets, then pass the chosen canonical name (pass an existing name; use a new name only when deliberately creating a new bucket; 'default' is the global pool)"
   },
   "warnings": [],
   "payload_out": {
@@ -51151,8 +51562,8 @@
   },
   "error": {
    "error": "invalid_input",
-   "field": "confidence",
-   "reason": "must be a finite number between 0 and 1"
+   "field": "workspace",
+   "reason": "workspace is required for this action; call memory_review(view='workspaces') to list existing buckets, then pass the chosen canonical name (pass an existing name; use a new name only when deliberately creating a new bucket; 'default' is the global pool)"
   },
   "warnings": [],
   "payload_out": {
@@ -51175,8 +51586,8 @@
   },
   "error": {
    "error": "invalid_input",
-   "field": "event_time",
-   "reason": "must be a valid ISO 8601 timestamp of at most 128 characters"
+   "field": "workspace",
+   "reason": "workspace is required for this action; call memory_review(view='workspaces') to list existing buckets, then pass the chosen canonical name (pass an existing name; use a new name only when deliberately creating a new bucket; 'default' is the global pool)"
   },
   "warnings": [],
   "payload_out": {
@@ -51199,15 +51610,8 @@
   },
   "error": {
    "error": "invalid_input",
-   "field": "source_type",
-   "reason": "invalid enum value",
-   "allowed": [
-    "agent_generated",
-    "document_extracted",
-    "pending",
-    "unknown",
-    "user_confirmed"
-   ]
+   "field": "workspace",
+   "reason": "workspace is required for this action; call memory_review(view='workspaces') to list existing buckets, then pass the chosen canonical name (pass an existing name; use a new name only when deliberately creating a new bucket; 'default' is the global pool)"
   },
   "warnings": [],
   "payload_out": {
@@ -51229,14 +51633,17 @@
    "bogus": 1,
    "event_time": "2026-01-01T00:00:00+00:00"
   },
-  "error": null,
-  "warnings": [
-   "unknown field ignored: bogus"
-  ],
+  "error": {
+   "error": "invalid_input",
+   "field": "workspace",
+   "reason": "workspace is required for this action; call memory_review(view='workspaces') to list existing buckets, then pass the chosen canonical name (pass an existing name; use a new name only when deliberately creating a new bucket; 'default' is the global pool)"
+  },
+  "warnings": [],
   "payload_out": {
    "content": "a",
    "subject": "b",
-   "confidence": 0.5,
+   "confidence": "0.5",
+   "bogus": 1,
    "event_time": "2026-01-01T00:00:00+00:00"
   },
   "raises": null
@@ -51248,15 +51655,21 @@
   "payload_in": {
    "content": "a",
    "subject": "b",
-   "confidence": 0.5,
+   "confidence": "0.5",
+   "bogus": 1,
    "event_time": "2026-01-01T00:00:00+00:00"
   },
-  "error": null,
+  "error": {
+   "error": "invalid_input",
+   "field": "workspace",
+   "reason": "workspace is required for this action; call memory_review(view='workspaces') to list existing buckets, then pass the chosen canonical name (pass an existing name; use a new name only when deliberately creating a new bucket; 'default' is the global pool)"
+  },
   "warnings": [],
   "payload_out": {
    "content": "a",
    "subject": "b",
-   "confidence": 0.5,
+   "confidence": "0.5",
+   "bogus": 1,
    "event_time": "2026-01-01T00:00:00+00:00"
   },
   "raises": null

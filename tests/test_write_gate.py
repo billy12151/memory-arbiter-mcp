@@ -125,6 +125,7 @@ def test_move_into_same_content_workspace_refused(tmp_path: Path) -> None:
     a = _write(tools, "s", "跨区同文", workspace="memory-arbiter")
     _write(tools, "s", "跨区同文", workspace="金营项目")
     res = tools.memory_govern("move_memories_workspace", {
+        "workspace": "default",
         "memory_ids": [a], "new_workspace": "金营项目",
         "reason": "relocate", "authorized": True,
     })
@@ -134,6 +135,7 @@ def test_move_into_same_content_workspace_refused(tmp_path: Path) -> None:
     # moving the NON-duplicate sibling still works
     other = _write(tools, "s2", "唯一内容", workspace="memory-arbiter")
     ok = tools.memory_govern("move_memories_workspace", {
+        "workspace": "default",
         "memory_ids": [other], "new_workspace": "金营项目",
         "reason": "relocate", "authorized": True,
     })

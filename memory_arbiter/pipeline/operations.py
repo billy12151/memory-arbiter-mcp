@@ -25,7 +25,7 @@ from ..db import _normalize_alias_key
 from ..embedder import ManagedEmbedder
 from ..db_generation import database_startup_lock
 from ..db.workspaces import _coerce_ws, _mechanical_ws_key
-from ..validation import MAX_BATCH_IDS, _controlled_integer
+from ..validation import MAX_BATCH_IDS, WORKSPACE_GUIDANCE, _controlled_integer
 from ..models import MemoryStatus, ProtectionLevel, SourceType, TrustedApplyingContext, utc_now_iso
 from ..semantic_conflict import normalize_value, value_is_grounded
 from ..text import canon_entity as _canon_entity, canon_scope as _canon_scope
@@ -1209,6 +1209,15 @@ class OperationsPipeline:
         """
         authorized = self._is_truthy(authorized)
         explicit_workspace = _.get("workspace")
+        # owner 2026-10-03 拍板（P1-2，方案 A2+C1 两层定序）：validation 层
+        # 是唯一产品门（缺 workspace 一律 invalid_input+指路）；本层保留
+        # 轻量兜底——strict+缺参/空串 → ValueError，供绕过 validation 的
+        # 直调路径。此前省略参数会让 caller=None：两道 strict 校验整体
+        # 短路（可确认他人桶的 pending 行），错误路径还回退 db.get_memory
+        # 泄漏外来记录。非 strict 维持原行为（全局池，无 ACL 可跳过）。
+        isolation = str(getattr(self.settings, "isolation", "none") or "none")
+        if isolation == "strict" and not str(explicit_workspace or "").strip():
+            raise ValueError("workspace_required_strict: " + WORKSPACE_GUIDANCE)
         caller = self._caller_workspace(explicit_workspace) if explicit_workspace else None
         if caller is not None:
             denied = self._strict_acl_unavailable(caller)
@@ -1257,7 +1266,21 @@ class OperationsPipeline:
                     if not memory_workspace or memory_workspace != caller.canonical:
                         raise ValueError("forbidden_strict_workspace: pending memory is outside caller workspace")
                     if str(canonical or "").strip() != caller.canonical:
-                        raise ValueError("forbidden_strict_workspace: canonical must match caller workspace")
+                        # twin 等价豁免（A2×A3 交汇，2026-10-03）：twin 改道
+                        # pending 行的 canonical 列已是 mema-twin-dev，安全
+                        # confirm（canonical=原名 mema-twin）会被本校验误拒。
+                        # canonical 会被 redirect tail 落进调用方桶（=caller.
+                        # canonical）时二者等价合规——0.16.2 §1.2「非 twin
+                        # 调用方确认改道行入 -dev」的既有流程保持可达。
+                        from ..twin_redirect import twin_redirect_target
+
+                        _equiv = twin_redirect_target(
+                            str(canonical or "").strip(),
+                            client=self._tools.current_client(),
+                            agent_id=self._tools.current_agent_id(),
+                        )
+                        if _equiv != caller.canonical:
+                            raise ValueError("forbidden_strict_workspace: canonical must match caller workspace")
                 alias_warnings: list[str]
                 if is_default_workspace_term(raw_ws):
                     # a reserved default synonym raw is already the global
@@ -1272,6 +1295,24 @@ class OperationsPipeline:
                 elif _normalize_alias_key(raw_ws) == _normalize_alias_key(canonical):
                     ok_alias, alias_warnings = True, []
                 else:
+                    # P1-3 防毒守卫（R2 对抗轮改宽形态，owner 2026-10-03 方案
+                    # A3）：raw 是会触发 twin 改道的保护键时，只许 no-op（键
+                    # 相等，上一分支）走通；canonical 无论 -dev 还是任意第三桶
+                    # 一律拦——毒化的资产是 raw 这个 alias 键本身，任何以它为
+                    # 键的 confirmed 行都会让 alias 命中先于 identity 改道，
+                    # 整体劫持 twin 本体的写入。twin 自身（redirect 判定返回
+                    # None）不在拦截面，属可信主体。
+                    from ..twin_redirect import twin_redirect_target
+
+                    _redirect = twin_redirect_target(
+                        str(raw_ws or ""), client=self._tools.current_client(),
+                        agent_id=self._tools.current_agent_id(),
+                    )
+                    if _redirect is not None:
+                        raise ValueError(
+                            "protected_bucket_redirect: a redirected workspace key "
+                            "confirms only into itself; use the original name"
+                        )
                     ok_alias, alias_warnings = self.db.record_workspace_decision_on_conn(
                         conn, raw_ws, canonical, status="confirmed",
                         force=self._is_truthy(authorized),

@@ -120,6 +120,7 @@ def test_post_move_pair_becomes_recordable_candidate(vec_tools: MemoryTools) -> 
     lib = _library_with_misplacement(tools)
     tools.memory_repair("scan_workspace_anomalies", {})
     moved = tools.memory_govern("move_memories_workspace", {
+        "workspace": "default",
         "memory_ids": [int(lib["misplaced"]["id"])], "new_workspace": "dbpgsql",
         "reason": "confirmed placement", "authorized": True,
     })

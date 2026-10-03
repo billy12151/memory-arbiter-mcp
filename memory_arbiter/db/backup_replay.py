@@ -124,8 +124,12 @@ class BackupReplayStore:
                     seen.add(replay_key)
                     if not isinstance(record, dict):
                         raise ValueError("record must be an object")
+                    # C1 3c（owner 2026-10-03 拍板）：remember 的 workspace 必传
+                    # 不适用于历史备份行——workspace 可选年代的全局池记录其
+                    # raw workspace 为空串，恢复是数据抢救通道不得被新校验
+                    # 斩断（enforce_required=False，record 原样校验原样落盘）。
                     validation = validate_product_payload(
-                        "memory", "remember", dict(record),
+                        "memory", "remember", dict(record), enforce_required=False,
                     )
                     if validation.error is not None:
                         raise ValueError(f"invalid record: {validation.error.get('field')}: {validation.error.get('reason')}")

@@ -647,6 +647,7 @@ def test_hint_branches_leave_no_durable_row(tmp_path: Path) -> None:
     _write(tools, "族甲", "dbpgsql 后端栈内容，兄弟 0", workspace="dbpgsql")
     fw_id = _write(tools, "族乙", "前端栈内容，兄弟 0", workspace="dbpgsql")
     moved = tools.memory_govern("move_memories_workspace", {
+        "workspace": "default",
         "memory_ids": [fw_id], "new_workspace": "frontweb",
         "reason": "seed second family", "authorized": True,
     })

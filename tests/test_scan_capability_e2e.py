@@ -297,6 +297,7 @@ def test_scan_capability_e2e_real_models(
     # read-time stale semantics carried over to the queue), the memory
     # participates in bucket B, and the anomaly check stays quiet about it.
     moved = tools.memory_govern("move_memories_workspace", {
+        "workspace": "default",
         "memory_ids": [misplaced_id], "new_workspace": "dbpgsql",
         "reason": "confirmed placement", "authorized": True,
     })

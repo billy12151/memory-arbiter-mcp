@@ -44,6 +44,25 @@ from .constants import (  # noqa: E402
     MAX_BATCH_FIND_QUERIES,
 )
 
+# owner 2026-10-03 拍板（方案 Part C1）：语义上「动桶」的动作 workspace 必传
+# （=strip 后非空——空串等价缺失，否则下游 explicit_workspace 为 falsy 回到
+# caller=None，strict 隔离门被空串绕过）。读路径与其余 govern（memory_id
+# 语义动作）不强制。
+WORKSPACE_GUIDANCE = (
+    "workspace is required for this action; call "
+    "memory_review(view='workspaces') to list existing buckets, then pass the "
+    "chosen canonical name (pass an existing name; use a new name only when "
+    "deliberately creating a new bucket; 'default' is the global pool)"
+)
+PRODUCT_REQUIRED_FIELDS: dict[tuple[str, str], set[str]] = {
+    ("memory", "remember"): {"workspace"},
+    ("memory_govern", "confirm_pending_workspace"): {"workspace"},
+    ("memory_govern", "rename_workspace_canonical"): {"workspace"},
+    ("memory_govern", "migrate_workspace"): {"workspace"},
+    ("memory_govern", "separate_workspace_alias"): {"workspace"},
+    ("memory_govern", "move_memories_workspace"): {"workspace"},
+}
+
 _SENSITIVE_FIELDS = {
     "authorized", "workspace", "memory_id", "conflict_id", "notice_id",
     "source_type", "protection_level", "status", "content", "new_content",
@@ -112,8 +131,8 @@ PRODUCT_FIELD_REGISTRY: dict[tuple[str, str], set[str]] = {
         "resolution_memory_id", "authorized", "workspace",
     },
     ("memory_govern", "confirm"): {"id", "memory_id", "source_ref", "confidence", "authorized", "workspace"},
-    ("memory_govern", "rename_workspace_canonical"): {"old", "new", "reason", "authorized"},
-    ("memory_govern", "migrate_workspace"): {"from", "to", "reason", "authorized"},
+    ("memory_govern", "rename_workspace_canonical"): {"old", "new", "reason", "authorized", "workspace"},
+    ("memory_govern", "migrate_workspace"): {"from", "to", "reason", "authorized", "workspace"},
     ("memory_govern", "move_memories_workspace"): {"memory_ids", "new_workspace", "reason", "authorized", "workspace", "default_fallback"},
     ("memory_govern", "rollback_auto_move"): {"audit_id", "reason", "authorized", "workspace"},
     ("memory_govern", "confirm_pending_workspace"): {"id", "memory_id", "canonical", "reason", "authorized", "workspace"},
@@ -277,6 +296,26 @@ def _v_unknown_fields(
         unknown_keys.append(key)
     for key in unknown_keys:
         payload.pop(key, None)
+    return None
+
+
+
+def _v_required_fields(
+    surface: str, operation: str, payload: dict[str, Any], result: ValidationResult,
+) -> dict[str, Any] | None:
+    """owner 2026-10-03（方案 C1）：语义动作的 workspace 必传=strip 后非空。
+
+    只拦 MCP 产品面：内部直调（backup_replay 的恢复校验走占位副本、测试
+    直调 MemoryTools）不经本函数。空串与缺失同拒——下游 explicit_workspace
+    对 falsy 一律当未传，strict 隔离门不能被空串绕过。
+    """
+    required = PRODUCT_REQUIRED_FIELDS.get((surface, operation))
+    if not required:
+        return None
+    for field in sorted(required):
+        value = payload.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return _error(field, WORKSPACE_GUIDANCE)
     return None
 
 
@@ -846,8 +885,19 @@ _VALIDATORS: tuple[_Validator, ...] = (
 )
 
 
-def validate_product_payload(surface: str, operation: str, payload: dict[str, Any]) -> ValidationResult:
+def validate_product_payload(
+    surface: str, operation: str, payload: dict[str, Any],
+    *, enforce_required: bool = True,
+) -> ValidationResult:
+    """enforce_required：必传门只在 MCP 产品面（surfaces 分派层）强制；
+    管线内部复验（write.py:331 的形状/范围二道校验）与 backup_replay 的
+    历史行校验走 False——内部直调不受产品必传约束（方案 C1 影响面口径）。"""
     result = ValidationResult()
+    if enforce_required:
+        error = _v_required_fields(surface, operation, payload, result)
+        if error is not None:
+            result.error = error
+            return result
     for validator in _VALIDATORS:
         error = validator(surface, operation, payload, result)
         if error is not None:

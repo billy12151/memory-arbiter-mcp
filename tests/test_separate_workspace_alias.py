@@ -33,6 +33,7 @@ def _alias_rows(tools: MemoryTools) -> list[tuple[str, str, str]]:
 def test_separate_requires_authorization_with_impact(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     result = tools.memory_govern("separate_workspace_alias", {
+        "workspace": "default",
         "alias": "旧项目", "canonical": "新项目",
     })
     assert result["ok"] is False
@@ -53,6 +54,7 @@ def test_separate_overrides_installed_redirect(tmp_path: Path) -> None:
     assert resolved["canonical"] == "新项目"
 
     result = tools.memory_govern("separate_workspace_alias", {
+        "workspace": "default",
         "alias": "旧项目", "canonical": "新项目",
         "reason": "user says they are different projects", "authorized": True,
     })
@@ -67,6 +69,7 @@ def test_separate_overrides_installed_redirect(tmp_path: Path) -> None:
 def test_separate_guard_blocks_silent_reconfirm(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     separated = tools.memory_govern("separate_workspace_alias", {
+        "workspace": "default",
         "alias": "a-ws", "canonical": "b-ws", "reason": "keep apart", "authorized": True,
     })
     assert separated["ok"] is True
@@ -88,6 +91,7 @@ def test_separate_guard_blocks_silent_reconfirm(tmp_path: Path) -> None:
 def test_separate_rejects_default_pool(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     result = tools.memory_govern("separate_workspace_alias", {
+        "workspace": "default",
         "alias": "default", "canonical": "b-ws", "authorized": True,
     })
     assert result["ok"] is False

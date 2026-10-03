@@ -138,6 +138,7 @@ def test_move_clears_watermark_and_requeues(tmp_path: Path) -> None:
     tools.db.mark_scanned(mid, 1)
     assert tools.db.pending_scan_memory_ids() == []
     res = tools.memory_govern("move_memories_workspace", {
+        "workspace": "default",
         "memory_ids": [mid], "new_workspace": "ws2",
         "reason": "re-home", "authorized": True,
     })
@@ -189,6 +190,7 @@ def test_move_voids_old_bucket_ticket_and_reestablishes(tmp_path: Path) -> None:
     conflict_id = recorded["conflict_id"]
 
     res = tools.memory_govern("move_memories_workspace", {
+        "workspace": "default",
         "memory_ids": [a], "new_workspace": "ws2", "reason": "re-home", "authorized": True,
     })
     assert res.get("ok"), res
@@ -510,6 +512,7 @@ def test_move_after_queue_requeues_in_new_bucket_only(tmp_path: Path) -> None:
     assert tools.wait_semantic_worker_drained(timeout=10)
     tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})
     tools.memory_govern("move_memories_workspace", {
+        "workspace": "default",
         "memory_ids": [a], "new_workspace": "ws9", "reason": "re-home", "authorized": True,
     })
     tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 10})

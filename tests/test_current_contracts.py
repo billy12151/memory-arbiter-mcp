@@ -239,6 +239,7 @@ def test_backup_replay_follows_current_workspace_redirect(tmp_path: Path) -> Non
         content="old", subject="old", workspace="Old", source_type="agent_generated",
     )
     moved = tool.memory_govern("rename_workspace_canonical", {
+        "workspace": "default",
         "old": "Old", "new": "New", "authorized": True,
     })
     assert moved["ok"] is True

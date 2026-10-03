@@ -29,6 +29,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from memory_arbiter.validation import PRODUCT_REQUIRED_FIELDS as REQUIRE_WORKSPACE
 from memory_arbiter.validation import (  # noqa: E402
     MAX_BATCH_FIND_QUERIES,
     MAX_BATCH_IDS,
@@ -350,10 +351,10 @@ def build_combination_cases() -> list[dict[str, Any]]:
     # The unknown-field pop decides whether a later block runs at all.
     add("D/pop_suppresses_confidence", "memory", "find", {"query": "x", "confidence": "garbage"})
     add("D/no_pop_reports_confidence", "memory", "remember",
-        {"content": "a", "subject": "b", "confidence": "garbage"})
+        {"workspace": "default", "content": "a", "subject": "b", "confidence": "garbage"})
     # A warning and an error can coexist; the warning is still recorded.
     add("D/warning_plus_error", "memory", "remember",
-        {"content": "a", "subject": "b", "bogus_field": 1, "confidence": 5})
+        {"workspace": "default", "content": "a", "subject": "b", "bogus_field": 1, "confidence": 5})
     # Multiple unknown fields: warning order follows payload iteration order,
     # and every one of them is popped before the later blocks run.
     add("D/multiple_unknown_fields", "memory", "find",
@@ -371,9 +372,26 @@ def build_combination_cases() -> list[dict[str, Any]]:
         ("memory_repair", "set_entity"), ("memory_repair", "activate_pending"),
         ("memory_repair", "cleanup_history"), ("memory_govern", "confirm_pending_workspace"),
     ):
-        add(f"D/id_rename/{surface}.{operation}", surface, operation, {"id": "abc"})
+        payload = {"id": "abc"}
+        if (surface, operation) in REQUIRE_WORKSPACE:
+            payload = {"workspace": "ws", "id": "abc"}
+        add(f"D/id_rename/{surface}.{operation}", surface, operation, payload)
     # Unregistered (surface, operation): the unknown-field block is skipped.
     add("D/unregistered_combo", "memory", "nosuchaction", {"whatever": object.__doc__, "id": "abc"})
+    # C1（owner 2026-10-03）：动桶动作 workspace 必传=strip 后非空。
+    add("D/required_workspace_missing", "memory", "remember",
+        {"content": "a", "subject": "b"})
+    add("D/required_workspace_empty", "memory", "remember",
+        {"workspace": "   ", "content": "a", "subject": "b"})
+    add("D/required_workspace_pass", "memory", "remember",
+        {"workspace": "default", "content": "a", "subject": "b"})
+    add("D/required_workspace_govern_missing", "memory_govern", "confirm_pending_workspace",
+        {"memory_id": 1, "canonical": "ws", "authorized": True})
+    add("D/required_workspace_govern_empty", "memory_govern", "rename_workspace_canonical",
+        {"workspace": "", "old": "a", "new": "b", "authorized": True})
+    # 非必传动作不受影响（读路径缺 workspace 照常过形状校验）。
+    add("D/required_workspace_not_enforced_on_read", "memory", "find", {"query": "x"})
+
     # Removed field and remember-only aliases fail loudly with a migration hint.
     add("D/include_content_removed", "memory", "find", {"query": "x", "include_content": True})
     add("D/batch_find_include_content", "memory", "batch_find",

@@ -328,7 +328,7 @@ class WritePipeline:
 
     def memory_write(self, **payload: Any) -> dict[str, Any]:
         payload = dict(payload)
-        validation = validate_product_payload("memory", "remember", payload)
+        validation = validate_product_payload("memory", "remember", payload, enforce_required=False)
         if validation.error is not None:
             error = dict(validation.error)
             if error.get("field") in {"content", "subject"} and str(error.get("reason") or "").startswith("is required"):
@@ -707,17 +707,32 @@ class WritePipeline:
                 "retry": "Write another memory using this workspace after sqlite-vec recovers.",
             }
         if workspace["strict_block"]:
+            # P1-3 hint 修正（owner 2026-10-03 方案 A3）：twin 改道形态下
+            # workspace["canonical"] 已被改成 mema-twin-dev——照它 confirm 会
+            # 写下 mema-twin→mema-twin-dev 毒别名（operations 侧守卫同款拦
+            # 截）。指引改回改道前 raw 名，confirm 走 no-op 分支后由既有
+            # redirect tail 落 -dev 桶。
+            _twin_redirected = workspace.get("matched_by") == "twin_redirect"
+            _hint_canonical = (
+                workspace["redirect_notice"]["requested_workspace"] if _twin_redirected
+                else workspace["canonical"]
+            )
             data.update({
                 "attention_required": True,
                 "action_required": "confirm_new_workspace",
                 "verification_status": "pending_user",
                 "workspace_is_new": True,
                 "pending_workspace": {
-                    "canonical": workspace["canonical"],
+                    "canonical": _hint_canonical,
                     "similar_workspaces": workspace["similar"],
+                    **({"protected_bucket": (
+                        "confirm with the original name; the system redirects "
+                        "mema-twin to mema-twin-dev automatically — never confirm "
+                        "into mema-twin-dev directly"
+                    )} if _twin_redirected else {}),
                 },
                 "attention_summary": (
-                    f"strict isolation: workspace {workspace['canonical']!r} is new; "
+                    f"strict isolation: workspace {_hint_canonical!r} is new; "
                     "confirm it with memory_govern(action='confirm_pending_workspace')"
                 ),
             })

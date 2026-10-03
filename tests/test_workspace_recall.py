@@ -73,6 +73,9 @@ def _confirm_pending(tools: MemoryTools, memory_id: int) -> dict:
     if record["status"] != MemoryStatus.PENDING.value:
         return {"ok": True, "data": {"record": record}}
     return tools.memory_govern("confirm_pending_workspace", {
+        # strict 语义（P1-2 修活的两道校验）：确认者=该 pending 行自己桶的
+        # 写入方——caller workspace 取行自身 canonical。
+        "workspace": record["workspace_canonical"] or record["workspace"] or "default",
         "memory_id": memory_id,
         "canonical": record["workspace_canonical"] or record["workspace"],
         "authorized": True,
@@ -1016,6 +1019,7 @@ def active_write(tools: MemoryTools, content: str, workspace: str, subject: str 
     record = tools.db.get_memory(mid)
     if record["status"] == MemoryStatus.PENDING.value:
         confirmed = tools.memory_govern("confirm_pending_workspace", {
+            "workspace": record["workspace_canonical"] or record["workspace"] or "default",
             "memory_id": mid,
             "canonical": record["workspace_canonical"] or record["workspace"],
             "authorized": True,
@@ -1255,6 +1259,7 @@ def test_over_cutoff_abbreviation_uses_workspace_migration(tmp_path):
         tools.memory_search(query="mema abbreviation", workspace="memory-arbiter-mcp")
     )
     merged = tools.memory_govern("migrate_workspace", {
+        "workspace": "default",
         "from": "mema", "to": "memory-arbiter-mcp", "authorized": True,
     })
     assert merged["ok"] is True
@@ -1974,6 +1979,7 @@ def test_rename_refuses_default_in_both_directions(tmp_path, term):
     assert warnings and "reserved" in warnings[0]
 
     r = tools.memory_govern("rename_workspace_canonical", {
+        "workspace": "default",
         "old": "projX", "new": term, "reason": "try merge into default", "authorized": True,
     })
     assert r["ok"] is False
@@ -2078,6 +2084,7 @@ def test_move_refuses_full_width_default_destination(tmp_path):
     tools = default_insulation_make_tools(tmp_path)
     memory_id = int(_default_insulation_write(tools, "x", "proj-a", subject="s")["data"]["id"])
     outcome = tools.memory_govern("move_memories_workspace", {
+        "workspace": "default",
         "memory_ids": [memory_id], "new_workspace": "ＮＵＬＬ", "authorized": True,
     })
     assert not outcome["ok"]

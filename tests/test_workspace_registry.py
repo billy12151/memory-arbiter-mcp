@@ -875,6 +875,7 @@ def test_rename_moves_memories_and_prevents_old_name_resplit(tmp_path: Path) -> 
     tools = alias_governance_make_tools(tmp_path)
     memory_id = write(tools, "OldName")
     result = tools.memory_govern("rename_workspace_canonical", {
+        "workspace": "default",
         "old": "OldName", "new": "NewName", "authorized": True,
     })
     assert result["ok"] is True
@@ -891,6 +892,7 @@ def test_rename_moves_conflicts_with_their_members(tmp_path: Path) -> None:
     conflict_id = record_conflict(tools, "OldName", left, right)
 
     result = tools.memory_govern("rename_workspace_canonical", {
+        "workspace": "default",
         "old": "OldName", "new": "NewName", "authorized": True,
     })
 
@@ -906,6 +908,7 @@ def test_migrate_moves_memories_and_prevents_source_resplit(tmp_path: Path) -> N
     tools = alias_governance_make_tools(tmp_path)
     memory_id = write(tools, "Sub2")
     result = tools.memory_govern("migrate_workspace", {
+        "workspace": "default",
         "from": "Sub2", "to": "Main", "authorized": True,
     })
     assert result["ok"] is True
@@ -922,6 +925,7 @@ def test_migrate_moves_conflicts_with_their_members(tmp_path: Path) -> None:
     conflict_id = record_conflict(tools, "Sub2", left, right)
 
     result = tools.memory_govern("migrate_workspace", {
+        "workspace": "default",
         "from": "Sub2", "to": "Main", "authorized": True,
     })
 
@@ -944,6 +948,7 @@ def test_migrate_conflict_slot_collision_refused_up_front(tmp_path: Path) -> Non
     new_conflict = record_conflict(tools, "New", new_left, new_right)
 
     result = tools.memory_govern("migrate_workspace", {
+        "workspace": "default",
         "from": "Old", "to": "New", "authorized": True,
     })
 
@@ -963,6 +968,7 @@ def test_migrate_conflict_slot_collision_refused_up_front(tmp_path: Path) -> Non
             "UPDATE conflicts SET status='resolved' WHERE id=?", (old_conflict,),
         )
     retry = tools.memory_govern("migrate_workspace", {
+        "workspace": "default",
         "from": "Old", "to": "New", "authorized": True,
     })
     assert retry["ok"] is True
@@ -980,6 +986,7 @@ def test_rename_conflict_slot_collision_refused_up_front(tmp_path: Path) -> None
     new_conflict = record_conflict(tools, "New", new_left, new_right)
 
     result = tools.memory_govern("rename_workspace_canonical", {
+        "workspace": "default",
         "old": "Old", "new": "New", "authorized": True,
     })
 
@@ -998,6 +1005,7 @@ def test_migrate_different_slot_conflicts_do_not_collide(tmp_path: Path) -> None
     conflict_id = record_conflict(tools, "Old", left, right)
 
     result = tools.memory_govern("migrate_workspace", {
+        "workspace": "default",
         "from": "Old", "to": "New", "authorized": True,
     })
 
@@ -1058,6 +1066,7 @@ def test_normalize_reports_refused_merge_as_skipped_in_plan_and_execute(tmp_path
     assert tools.db.get_memory(winner_left)["workspace_canonical"] == "AgentLane"
     assert any("would collide" in warning for warning in executed["warnings"])
     result = tools.memory_govern("migrate_workspace", {
+        "workspace": "default",
         "from": "mema", "to": "memory-arbiter-mcp", "authorized": True,
     })
     assert result["ok"] is True
@@ -1071,6 +1080,7 @@ def test_exact_negative_blocks_rename_forwarding(tmp_path: Path) -> None:
     write(tools, "Old")
     decide(tools, "Old", "New", status="rejected")
     result = tools.memory_govern("rename_workspace_canonical", {
+        "workspace": "default",
         "old": "Old", "new": "New", "authorized": True,
     })
     assert result["ok"] is True
@@ -1084,6 +1094,7 @@ def test_unrelated_negative_does_not_block_rename_forwarding(tmp_path: Path) -> 
     write(tools, "Old")
     decide(tools, "Old", "Other", status="rejected")
     tools.memory_govern("rename_workspace_canonical", {
+        "workspace": "default",
         "old": "Old", "new": "New", "authorized": True,
     })
     resolved = tools.db.resolve_workspace_canonical("Old", None, register_new=False)
@@ -1102,6 +1113,7 @@ def test_repoint_is_collision_safe_and_preserves_existing_decision(tmp_path: Pat
     decide(tools, "foo", "Old", status="rejected")
     decide(tools, "foo", "New", status="rejected")
     result = tools.memory_govern("rename_workspace_canonical", {
+        "workspace": "default",
         "old": "Old", "new": "New", "authorized": True,
     })
     assert result["ok"] is True
@@ -1117,6 +1129,7 @@ def test_case_only_rename_leaves_no_self_redirect(tmp_path: Path) -> None:
     tools = alias_governance_make_tools(tmp_path)
     memory_id = write(tools, "ProjectX")
     result = tools.memory_govern("rename_workspace_canonical", {
+        "workspace": "default",
         "old": "ProjectX", "new": "projectx", "authorized": True,
     })
     assert result["ok"] is True
@@ -1145,6 +1158,7 @@ def test_confirm_pending_case_variant_reuses_raw_spelling(tmp_path: Path) -> Non
     tools = alias_governance_make_tools(tmp_path, isolation="strict")
     memory_id = write(tools, "BrandNew")
     result = tools.memory_govern("confirm_pending_workspace", {
+        "workspace": "BrandNew",
         "memory_id": memory_id, "canonical": "brandnew", "authorized": True,
     })
     assert result["ok"] is True
@@ -1163,6 +1177,7 @@ def test_default_pending_cannot_be_confirmed_into_project(tmp_path: Path) -> Non
         source_type="agent_generated", status="pending",
     )
     result = tools.memory_govern("confirm_pending_workspace", {
+        "workspace": "default",
         "memory_id": written["data"]["id"], "canonical": "ProjectX", "authorized": True,
     })
     assert result["ok"] is False
@@ -1174,9 +1189,11 @@ def test_competing_move_does_not_split_memory_and_redirect(tmp_path: Path) -> No
     tools = alias_governance_make_tools(tmp_path)
     memory_id = write(tools, "Old")
     first = tools.memory_govern("rename_workspace_canonical", {
+        "workspace": "default",
         "old": "Old", "new": "A", "authorized": True,
     })
     second = tools.memory_govern("rename_workspace_canonical", {
+        "workspace": "default",
         "old": "Old", "new": "B", "authorized": True,
     })
     assert first["ok"] is True
@@ -1190,6 +1207,7 @@ def test_confirm_pending_exact_name_activates_without_self_redirect(tmp_path: Pa
     memory_id = write(tools, "BrandNew")
     assert tools.db.get_memory(memory_id)["status"] == MemoryStatus.PENDING.value
     result = tools.memory_govern("confirm_pending_workspace", {
+        "workspace": "BrandNew",
         "memory_id": memory_id, "canonical": "BrandNew", "authorized": True,
     })
     assert result["ok"] is True
@@ -1201,9 +1219,17 @@ def test_confirm_pending_exact_name_activates_without_self_redirect(tmp_path: Pa
 
 
 def test_confirm_pending_different_name_records_redirect_atomically(tmp_path: Path) -> None:
-    tools = alias_governance_make_tools(tmp_path, isolation="strict")
-    memory_id = write(tools, "abbrev")
+    """redirect 力学（raw≠canonical → confirmed alias 原子落库）在 none 隔离 +
+    显式 pending 写入下钉住——strict 下该形态被第二道校验正确禁止（见
+    test_confirm_pending_strict_forbids_cross_canonical）。"""
+    tools = alias_governance_make_tools(tmp_path, isolation="none")
+    written = tools.memory_write(
+        content="abbrev scope", subject="redirect", workspace="abbrev",
+        source_type="agent_generated", status="pending",
+    )
+    memory_id = written["data"]["id"]
     result = tools.memory_govern("confirm_pending_workspace", {
+        "workspace": "abbrev",
         "memory_id": memory_id, "canonical": "CanonicalProject", "authorized": True,
     })
     assert result["ok"] is True
@@ -1223,6 +1249,7 @@ def test_confirm_pending_rolls_back_decision_assignment_and_activation(tmp_path:
 
     monkeypatch.setattr(tools.db, "set_memory_workspace_canonical_on_conn", fail)
     result = tools.memory_govern("confirm_pending_workspace", {
+        "workspace": "default",
         "memory_id": memory_id, "canonical": "CanonicalProject", "authorized": True,
     })
     assert result["ok"] is False
@@ -1724,6 +1751,7 @@ def test_snapshot_after_rename_records_final_registry(tmp_path):
     _write(tools, "a", "projA")
     _write(tools, "b", "projA2")
     renamed = tools.memory_govern("rename_workspace_canonical", {
+        "workspace": "default",
         "old": "projA2", "new": "projA", "reason": "duplicate spelling", "authorized": True,
     })
     assert renamed["ok"] is True
@@ -1845,6 +1873,7 @@ def test_confirm_pending_workspace_with_default_synonym_raw_no_longer_dead_ends(
     # An agent echoing the memory's own workspace as canonical must NOT
     # create a phantom "unknown" canonical — it folds to "default".
     r = tools.memory_govern("confirm_pending_workspace", {
+        "workspace": "default",
         "memory_id": mid, "canonical": "unknown", "authorized": True,
     })
     assert r["ok"] is True, r
@@ -2152,6 +2181,7 @@ def test_separate_refuses_mechanical_twin_pair(tmp_path):
             "VALUES('AgentLane',datetime('now'))"
         )
     result = t.memory_govern("separate_workspace_alias", {
+        "workspace": "default",
         "alias": "agent-lane", "canonical": "AgentLane",
         "reason": "try to split", "authorized": True,
     })
@@ -2258,3 +2288,21 @@ def test_multiple_rejected_rows_across_spellings_all_aggregated(tmp_path):
     assert "AgentLane" in r["rejected_canonicals"]
     assert "MemoryBank" in r["rejected_canonicals"]
     assert r["matched_by"] == "new"
+
+
+def test_workspace_required_on_govern_actions_surface(tmp_path: Path) -> None:
+    """C1 必传（owner 2026-10-03）：五个改桶动作缺/空 workspace 在 validation
+    层打回，报错带 workspaces 列表指路；move/separate 补钉（remember/confirm/
+    rename 已入 golden 语料）。"""
+    tools = alias_governance_make_tools(tmp_path, isolation="none")
+    for action, payload in (
+        ("separate_workspace_alias", {"alias": "agent-lane", "canonical": "AgentLane", "authorized": True}),
+        ("move_memories_workspace", {"memory_ids": [1], "new_workspace": "ws", "authorized": True}),
+    ):
+        missing = tools.memory_govern(action, dict(payload))
+        assert missing["ok"] is False, action
+        assert missing["data"]["field"] == "workspace"
+        assert "memory_review(view='workspaces')" in missing["data"]["reason"]
+        empty = tools.memory_govern(action, {**payload, "workspace": "  "})
+        assert empty["ok"] is False, action
+        assert empty["data"]["field"] == "workspace"

@@ -63,7 +63,8 @@ def test_temp_library_creates_and_destroys() -> None:
     with temp_library(embed_model=None) as tools:
         db_file = Path(tools.settings.db_path)
         assert db_file.exists()
-        result = tools.memory("remember", {"content": "x", "subject": "s"})
+        result = tools.memory("remember", {
+            "workspace": "default","content": "x", "subject": "s"})
         assert result["ok"] is True
         workdir = db_file.parent
     assert not workdir.exists()

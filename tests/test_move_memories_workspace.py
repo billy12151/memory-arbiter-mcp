@@ -50,7 +50,10 @@ def write(tools: MemoryTools, workspace: str, content: str | None = None) -> int
 
 
 def move(tools: MemoryTools, data: dict) -> dict:
-    return tools.memory_govern("move_memories_workspace", data)
+    # C1 必传（owner 2026-10-03）：move_memories_workspace 需 workspace；缺省补
+    # settings.workspace（strict 用例的 settings 回退语义保持），再退 default。
+    ws = data.get("workspace") or getattr(tools.settings, "workspace", "") or "default"
+    return tools.memory_govern("move_memories_workspace", {**data, "workspace": ws})
 
 
 def row(tools: MemoryTools, memory_id: int) -> dict:
@@ -61,6 +64,7 @@ def confirm_pending(tools: MemoryTools, memory_id: int) -> None:
     record = tools.db.get_memory(memory_id)
     assert record["status"] == MemoryStatus.PENDING.value
     outcome = tools.memory_govern("confirm_pending_workspace", {
+        "workspace": record["workspace_canonical"] or record["workspace"] or "default",
         "memory_id": memory_id,
         "canonical": record["workspace_canonical"] or record["workspace"],
         "authorized": True,
