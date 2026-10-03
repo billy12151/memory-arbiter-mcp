@@ -229,14 +229,26 @@ def _mdeberta_inference_process(conn: Any, config: dict[str, Any]) -> None:
         hidden = base.config.hidden_size
         labels = list(config["labels"])
         mechs = list(config["mechs"])
-        lab_head = torch.nn.Sequential(
-            torch.nn.Dropout(0.1), torch.nn.Linear(hidden, len(labels)),
-        )
-        mech_head = torch.nn.Sequential(
-            torch.nn.Dropout(0.1), torch.nn.Linear(hidden, len(mechs)),
-        )
 
         state = torch.load(ckpt, map_location="cpu")
+        # Head dims come from the CHECKPOINT, not from local constants:
+        # mini-clash has expanded the mech taxonomy (10→12 at v46) without a
+        # mema release in between. The mech head is observational — adapt
+        # silently. The LABEL head is the pinned verdict protocol: a dim
+        # mismatch is a hard protocol break and must fail loudly.
+        lab_dim = int(state["lab_head.1.weight"].shape[0])
+        if lab_dim != len(labels):
+            raise RuntimeError(
+                f"label protocol mismatch: ckpt has {lab_dim} label classes, "
+                f"parent protocol pins {len(labels)} ({list(labels)})"
+            )
+        mech_dim = int(state["mech_head.1.weight"].shape[0])
+        lab_head = torch.nn.Sequential(
+            torch.nn.Dropout(0.1), torch.nn.Linear(hidden, lab_dim),
+        )
+        mech_head = torch.nn.Sequential(
+            torch.nn.Dropout(0.1), torch.nn.Linear(hidden, mech_dim),
+        )
         missing, unexpected = base.load_state_dict(
             {k.removeprefix("encoder."): v for k, v in state.items()
              if k.startswith("encoder.")},
@@ -287,7 +299,8 @@ def _mdeberta_inference_process(conn: Any, config: dict[str, Any]) -> None:
                     conn.send({
                         "ok": True, "result": {
                             "loaded": True, "labels": labels, "mechs": mechs,
-                            "model_version": f"mdeberta-v4m:{config['sha8']}",
+                            "mech_dim": mech_dim,
+                            "model_version": f"mdeberta:{config['sha8']}",
                         },
                     })
                     continue
@@ -321,9 +334,13 @@ def _mdeberta_inference_process(conn: Any, config: dict[str, Any]) -> None:
                             probs = torch.softmax(lab_logits, dim=-1).tolist()
                             mech_idx = mech_logits.argmax(dim=-1).tolist()
                             for pos, i in enumerate(chunk):
+                                # mech taxonomy may be longer than the known
+                                # name list (ckpt-side expansion) — unknown
+                                # indices stay None (observational field).
+                                midx = int(mech_idx[pos])
                                 batch_outputs[i] = {
                                     "probs": probs[pos],
-                                    "mech": mechs[int(mech_idx[pos])],
+                                    "mech": mechs[midx] if midx < len(mechs) else None,
                                 }
                     for i in range(len(pairs)):
                         item = batch_outputs.get(i)
