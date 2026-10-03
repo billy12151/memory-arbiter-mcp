@@ -267,33 +267,7 @@ def ensure_additive_structures(conn: sqlite3.Connection) -> list[str]:
     # 数据无消费方）。sqlite-vec 0.1.x DROP 虚拟主表不连带清影子表，
     # memory_claim_vec_% 需显式 sweep（对齐 rebuild_vec_tables 口径），
     # 否则跑过 claims 通道的存量库升级后影子表成永久孤儿。
-    dropped = []
-    for table in ("memory_claim_vec", "memory_claims"):
-        existed = bool(conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
-        ).fetchone())
-        if existed:
-            try:
-                conn.execute(f"DROP TABLE {table}")
-            except sqlite3.OperationalError as exc:
-                # vec0 虚拟表的 DROP 需要模块注册：未装 sqlite-vec extra 的
-                # 库上报 "no such module: vec0"。本轮跳过 vec 表（普通表
-                # 照清、影子表 sweep 照跑），不阻塞 additive 收尾；装 vec
-                # 后的首次启动再清。
-                if "no such module" not in str(exc):
-                    raise
-                applied.append(f"claims_vec_drop_deferred({table})")
-                continue
-            dropped.append(table)
-    claim_shadows = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' "
-        "AND name LIKE 'memory_claim_vec_%'"
-    ).fetchall()
-    for row in claim_shadows:
-        conn.execute(f'DROP TABLE IF EXISTS "{str(row[0])}"')
-        dropped.append(str(row[0]))
-    if dropped:
-        applied.append(f"claims_tables_dropped({','.join(dropped)})")
+    _retire_claims_tables(conn, applied)
 
     # 0.17.1 workspace dismiss 持久化：决策记录独立于 scan_queue 工作台——
     # 启动 purge / 检测器换代整表 DELETE 释放行身份后，dismiss 仍然存活。
@@ -809,6 +783,50 @@ def _void_evolution_queue_rows(conn: sqlite3.Connection) -> str:
         (_EVOLUTION_VOID_KEY, f"voided={voided}"),
     )
     return f"evolution_void({voided})" if voided else ""
+
+
+
+def _retire_claims_tables(conn: sqlite3.Connection, applied: list[str]) -> None:
+    """0.17.1 claims 数据层退役（P1-1 修复，2026-10-03 方案 A1）。
+
+    DROP 循环里 vec0 虚拟表在模块未注册的连接上报 "no such module" → 记
+    deferred 跳过。影子表 sweep **仅当没有 vec 表 deferred 时执行**——
+    deferred 轮若把影子表清光，恢复轮（模块就位）的 DROP 会因 xDestroy
+    找不到影子表报 "SQL logic error"（不含 no-such-module）→ re-raise →
+    additive 收尾对该库每次启动失败回滚，未来加列通道永久死亡。
+    deferred 轮影子表保留，恢复轮 DROP 成功后 sweep 照常清。
+    """
+    dropped: list[str] = []
+    vec_drop_pending = False
+    for table in ("memory_claim_vec", "memory_claims"):
+        existed = bool(conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone())
+        if existed:
+            try:
+                conn.execute(f"DROP TABLE {table}")
+            except sqlite3.OperationalError as exc:
+                # vec0 虚拟表的 DROP 需要模块注册：未装 sqlite-vec extra 的
+                # 库上报 "no such module: vec0"。本轮跳过 vec 表与影子表
+                # sweep（普通表照清），不阻塞 additive 收尾；装 vec 后的
+                # 首次启动再清（影子表保留是恢复轮 DROP 可重试的前提）。
+                if "no such module" not in str(exc):
+                    raise
+                applied.append(f"claims_vec_drop_deferred({table})")
+                vec_drop_pending = True
+                continue
+            dropped.append(table)
+    if vec_drop_pending:
+        return
+    claim_shadows = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' "
+        "AND name LIKE 'memory_claim_vec_%'"
+    ).fetchall()
+    for row in claim_shadows:
+        conn.execute(f'DROP TABLE IF EXISTS "{str(row[0])}"')
+        dropped.append(str(row[0]))
+    if dropped:
+        applied.append("claims_tables_dropped(" + ",".join(dropped) + ")")
 
 
 def _migrate_legacy_candidates(conn: sqlite3.Connection) -> int:
