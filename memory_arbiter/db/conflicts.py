@@ -130,16 +130,24 @@ class ConflictStore:
                 raise ValueError("member content_hash must be 64 characters")
             # D1 (#970): the stored normalized_value is every later gate's
             # anchor (judge canonicalization, D1 group validation). A
-            # paraphrased value_raw (an agent's retelling rather than the
-            # mechanically normalized extraction) would silently poison all
-            # of them, so reject it at intake. Unenhanced scan candidates
-            # legitimately carry no values (value_raw=None from the
-            # deterministic route); those are not D1's concern.
+            # paraphrased value_raw (an agent's retelling in neither the
+            # mechanical nor the verbatim form) would silently poison all of
+            # them, so reject it at intake. Dual-channel (0.17.1, owner
+            # 选项 1): a member value is legitimate in exactly two shapes —
+            # the mechanical normalization of value_raw, or the §3.4
+            # snapshot-verbatim form (judged notices carry row text as both
+            # fields, so escalate/promote can file them). The gate validates
+            # the RELATION between the two fields, never the content.
+            # Unenhanced scan candidates legitimately carry no values
+            # (value_raw=None from the deterministic route); those are not
+            # D1's concern.
             raw_value = member["value_raw"]
-            if raw_value is not None and str(raw_value) != "" and str(member["normalized_value"]) != normalize_value(str(raw_value)):
-                raise ValueError(
-                    "member normalized_value must equal normalize_value(value_raw)"
-                )
+            if raw_value is not None and str(raw_value) != "":
+                normalized_member_value = str(member["normalized_value"])
+                if normalized_member_value != str(raw_value) and normalized_member_value != normalize_value(str(raw_value)):
+                    raise ValueError(
+                        "member normalized_value must equal normalize_value(value_raw) or value_raw verbatim"
+                    )
             for key, value in member.items():
                 if isinstance(value, str) and len(value) > _MAX_FIELD_CHARS:
                     raise ValueError(f"member field {key} exceeds size bound")

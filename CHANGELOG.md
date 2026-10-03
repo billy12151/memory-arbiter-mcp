@@ -5,6 +5,14 @@ Versions follow semantic versioning.
 
 ## [0.17.1 追加] — 未发版（claim 对比通道退役 + 判定输入上下文化，owner 2026-09-28 拍板）
 
+### Fixed (判定型 notice escalate/promote 修通——D1 双通道，2026-10-03)
+
+方案与两轮 review 记录：`ZCodeProject/docs/mema-judge-recalib-escalate-plan-2026-10-03.md`（v3）。全项目对抗审查（mema #1172）P1-4。
+
+- **判定型 notice 一键升组 100% 失败**：0.17.1 §3.4「quote 即值」把判定 notice 两侧值改为两侧行文本（判定引擎无抽取物），D1 intake 门（conflicts `_normalize_members`）仍要求 `normalized_value == normalize_value(value_raw)`——行文本必不过机械归一 → escalate 对主力 notice 类别必然 `structured_group_required`，promote-in-place 对判定 notice 两头死（照抄成员被 D1 拒、交 D1 合法成员被快照比对拒）。修复：D1 校验改**双通道**——`normalized_value == normalize_value(value_raw)`（机械规整形态）或 `== value_raw`（§3.4 快照原文形态）任一放行；转述（两不靠）仍拒。escalate/promote 分支代码零改动即修通。owner 拍板选项 1：双通道作用于全部 intake（含 agent 自由建组）——噪声锚在单通道下本就可构造，防御纵深增量损失接近零。
+- surfaces 判定页与 escalate 结果文案补三步处置流程（escalate 立案 → judge 拍板+apply_plan 改值结案 → review 对账）及直改后 `stale_member` 恢复路（append 新版本成员或 resolve）。
+- 新增 `tests/test_d1_dual_channel.py`：双通道单测 + 真判定 notice 播种 escalate 端到端 + promote 照抄/转述对照 + 自由 intake 防回归。
+
 ### Fixed (did_you_mean 确定性化，2026-10-01)
 
 - `validate_product_payload` 的 `did_you_mean` 建议改用 `sorted(allowed)` 迭代（注册表值是 set，difflib 迭代顺序受哈希种子影响）。corpus 全部 7 个 did_you_mean 期望值在 sorted 序下零变化（golden 多种子 0/1/2/random 实证全绿）。随之摘除 `test_hash_randomization_disabled` 环境门与 CI 无关——本地裸跑 `uv run pytest` 不再因缺 `PYTHONHASHSEED=0` 被门拦下。

@@ -252,7 +252,7 @@ _PRODUCT_HELPS: dict[str, Any] = {
             "notice_resolve": {"task": "notice", "data": {"action": "resolve", "notice_id": 1, "reason": "Reviewed and handled."}},
             "notice_escalate": {"task": "notice", "data": {"action": "escalate", "notice_id": 1, "reason": "Verified against both memories: real contradiction needing governance."}},
         },
-        "semantic_notice_delivery": "Notices progress pending -> delivered while open, then dismissed/resolved, or stale when any frozen member is no longer active at its pinned version. Read requires freshness.fresh=true and executing every read_calls entry for complete memories before triage; two-member notices also expose optional left/right aliases. Dismiss a false positive, resolve a handled one, or escalate a verified contradiction into a formal conflict.",
+        "semantic_notice_delivery": "Notices progress pending -> delivered while open, then dismissed/resolved, or stale when any frozen member is no longer active at its pinned version. Read requires freshness.fresh=true and executing every read_calls entry for complete memories before triage; two-member notices also expose optional left/right aliases. Dismiss a false positive, resolve a handled one, or escalate a verified contradiction into a formal conflict. Escalate only files the case — it never edits memory content: escalate, then memory(action='judge') with apply_plan to land the correction and close the group (the judge records who decided what for audit); if a member was edited directly after escalating, judge reports stale_member — append the new version via record_conflict or resolve instead.",
         "checked_no_notice": "A completed semantic task with outcome=checked_no_notice examined its eligible candidates and emitted zero notices; it is not a claim that no conflict can exist outside that task snapshot or candidate budget.",
         "scan_duplicates": (
             "Full-library near-duplicate sweep in ONE bounded response: aggregates the "
@@ -1508,9 +1508,12 @@ class ProductSurfaces:
                         "member_versions": created.get("member_versions"),
                         "value_groups": created.get("value_groups"),
                         "next_step": (
-                            "Credible contradiction is now linked to a formal conflict. Use "
+                            "Credible contradiction is now filed as a formal conflict "
+                            "(escalate never edits memory content). Use "
                             "memory_review(view='conflict_detail') to inspect it, then "
-                            "memory(action='judge') with the pinned revision."
+                            "memory(action='judge') with the pinned revision and "
+                            "apply_plan to land the correction and close the group; the "
+                            "judge records who decided what for the audit trail."
                         ),
                     }, extra_warnings=list(caller.warnings),
                 )
