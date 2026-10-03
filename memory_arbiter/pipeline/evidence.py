@@ -503,8 +503,10 @@ class EvidencePipeline:
                 ):
                     self._record_backlog_notice(
                         left, right, left_text, right_text, decision,
-                        left_text[:32], left_text, right_text,
-                        # 值=行文本（§3.4 快照原文形态，D1 双通道放行）
+                        # 值=行文本（§3.4 快照原文形态，D1 双通道放行）；
+                        # [:400] 与 A-cross 组装同构——超 _MAX_FIELD_CHARS
+                        # 的长行会让 escalate 在 intake 重新堵死
+                        left_text[:32], left_text[:400], right_text[:400],
                         reason=f"backlog_judged:{verdict.label}",
                         severity="normal" if outcome == "notice" else "info",
                         model_signal=_JudgePairView.signal(verdict),
@@ -1667,27 +1669,35 @@ class EvidencePipeline:
                     if outcome in ("notice", "possible") and dv is not None and _values_all_equivalent(dv[0], dv[1]):
                         ctx["model_unit_equivalent"] = ctx.get("model_unit_equivalent", 0) + 1
                         continue
-                    self._land_dispatch_notice(
-                        ctx, dispatch_conn, peer_rows, int(item["peer_id"]), item["hit"],
-                        item["unit"], item["decision"], content,
-                        int(item["left_version"]), int(item["right_version"]),
-                        slot_attribute=(
-                            # 0.17.1 §3.4: no extraction → a reproducible pair-hash
-                            # difference anchor; suppression pairs see owner A-3 note
-                            # in _suppressed_by_applying.
-                            _pair_diff_anchor(str(item["text_a"]), str(item["text_b"]))
-                        ),
-                        # §3.4 owner 口径：判定 notice 的两侧值 = 两侧行文本（quote
-                        # 即值——无抽取物可放，判断页直接可读）。快照原文形态
-                        # 由 D1 双通道放行（db/conflicts.py _normalize_members）。
-                        value_a=str(item["text_a"])[:400], value_b=str(item["text_b"])[:400],
-                        reason=f"model_classified_{verdict.label}",
-                        applying_slots=ctx["applying_slots"],
-                        applying_pairs=ctx.get("applying_pairs", set()),
-                        surfaced_peer_ids=ctx["surfaced_peer_ids"],
-                        severity="normal" if outcome == "notice" else "info",
-                        model_signal=_JudgePairView.signal(verdict),
-                    )
+                    try:
+                        self._land_dispatch_notice(
+                            ctx, dispatch_conn, peer_rows, int(item["peer_id"]), item["hit"],
+                            item["unit"], item["decision"], content,
+                            int(item["left_version"]), int(item["right_version"]),
+                            slot_attribute=(
+                                # 0.17.1 §3.4: no extraction → a reproducible pair-hash
+                                # difference anchor; suppression pairs see owner A-3 note
+                                # in _suppressed_by_applying.
+                                _pair_diff_anchor(str(item["text_a"]), str(item["text_b"]))
+                            ),
+                            # §3.4 owner 口径：判定 notice 的两侧值 = 两侧行文本（quote
+                            # 即值——无抽取物可放，判断页直接可读）。快照原文形态
+                            # 由 D1 双通道放行（db/conflicts.py _normalize_members）。
+                            value_a=str(item["text_a"])[:400], value_b=str(item["text_b"])[:400],
+                            reason=f"model_classified_{verdict.label}",
+                            applying_slots=ctx["applying_slots"],
+                            applying_pairs=ctx.get("applying_pairs", set()),
+                            surfaced_peer_ids=ctx["surfaced_peer_ids"],
+                            severity="normal" if outcome == "notice" else "info",
+                            model_signal=_JudgePairView.signal(verdict),
+                        )
+                    except sqlite3.Error:
+                        # R2 对抗轮 P2：db 层写失败（磁盘满/锁超时）不掀翻相位
+                        # ——与 error verdict 分支同构（notice_write_failed 归因
+                        # + 回 backlog），已落地 notice 不受影响。
+                        self._record_job_degradation(ctx, "notice_write_failed")
+                        ctx["incomplete_reason"] = ctx["incomplete_reason"] or "notice_write_failed"
+                        ctx["reached_pair"].discard(int(item["peer_id"]))
             finally:
                 try:
                     dispatch_conn.rollback()

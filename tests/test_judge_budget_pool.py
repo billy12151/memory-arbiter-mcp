@@ -353,7 +353,9 @@ def test_drain_stop_probe_yields_mid_batch(tmp_path, monkeypatch) -> None:
     assert _Recorder.chunks == [8]  # 第 2 片未发出
     assert receipt["internal_conflicts"] == 1
     assert receipt["backlogged"] == 2  # 停发余片 error verdict 回 backlog
-    # 来源守恒：收集期扣池的每个 cross 对要么落地 notice、要么回 backlog
+    # 来源守恒：收集期扣池的每个 cross 对要么落地 notice、要么回 backlog。
+    # 场景绑定断言（本场景无直出/dedup/抑制/clear 排除）——禁止照抄到
+    # 直出或混合场景（直出不耗池却产 notice，会误红）。
     assert receipt["notices_created"] == 7
     assert receipt["judge_budget"] == {"internal": 1, "a_cross": 9}  # 收集期 10 对全扣池
     assert receipt["notices_created"] + receipt["backlogged"] == receipt["judge_budget"]["a_cross"]
