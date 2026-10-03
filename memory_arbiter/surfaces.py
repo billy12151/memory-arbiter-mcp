@@ -68,7 +68,7 @@ def _memory_value_reference() -> dict[str, Any]:
 # mutate this shared instance.
 _PRODUCT_HELPS: dict[str, Any] = {
     "memory": {
-        "description": "Daily memory operations: remember, find, read, update, judge, status. workspace is required on remember — first call memory_review(view='workspaces') to list existing buckets, then pass an existing canonical name ('default' is the global pool); pass a new name only when deliberately creating a new bucket.",
+        "description": "Daily memory operations: remember, find, read, update, judge, status. workspace is required on remember — discover buckets once with memory_review(view='workspaces') (session start) and reuse; re-query only when unsure or before creating a new bucket ('default' is the global pool).",
         "actions": ["remember", "find", "batch_find", "read", "batch_read", "update", "judge", "status", "help"],
         "examples": {
             "remember": {"action": "remember", "data": {"workspace": "memory-arbiter-mcp", "content": "Fact to remember", "subject": "Short subject", "tags": ["project"]}},

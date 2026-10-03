@@ -750,7 +750,7 @@ class WritePipeline:
             # C2 接线（owner 2026-10-03）：新桶裁决指引先查 workspaces 列表，
             # 确认无既有桶再决定 keep_separate/merge。
             data.setdefault("write_hints", {})["workspace_discovery"] = {
-                "call": {"tool": "memory_review", "view": "workspaces", "data": {"limit": 50}},
+                "call": {"tool": "memory_review", "view": "workspaces", "data": {"limit": 50}},  # 查一次复用；拿不准/起新桶前再查
             }
             similar = workspace["similar"]
             options: list[dict[str, Any]] = [

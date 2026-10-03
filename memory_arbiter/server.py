@@ -349,10 +349,10 @@ def build_runtime() -> ServerBundle:
     def memory(action: str = "help", data: dict[str, Any] | None = None) -> Any:
         """Daily memory operations: remember, find, batch_find, read, update, judge, status, help.
 
-        workspace is required on remember — first call
-        memory_review(view="workspaces") to list existing buckets, then pass an
-        existing canonical name ('default' is the global pool); pass a new name
-        only when deliberately creating a new bucket.
+        workspace is required on remember — discover buckets once with
+        memory_review(view="workspaces") (e.g., at session start) and reuse
+        that list; re-query only when unsure or before deliberately creating
+        a new bucket ('default' is the global pool).
 
         Call memory(action="help") to discover accepted fields, judge requirements,
         value enums, update modes, and action_required paths before relying on a

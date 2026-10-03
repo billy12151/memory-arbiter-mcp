@@ -67,8 +67,10 @@ memory(action="remember", data={"content": "用户拒绝了首次功能演示（
 
 统一规范：每条记忆带必填的 `subject`（≤30 字）、标签 `mema-demo`、元数据
 `purpose: mema_feature_demo`、`run_id: demo-<日期>-<4位随机>`（同一轮演示共用
-同一 run_id）。`subject` 缺失会被 remember 直接拒绝；workspace 不用传，默认
-落在 default 桶（概念见 §3①）。
+同一 run_id）。`subject` 缺失会被 remember 直接拒绝；workspace 必传（0.17.1 起）——
+演示开始时先 `memory_review(view="workspaces")` 查一次桶列表，给用户看
+一眼现有桶；之后每条 remember 都带 `workspace="default"`（演示数据统一
+落 default 桶，概念见 §3①）。列表查一次即可，不必每次写前重查。
 
 **标题与正文逐字照抄下表，禁止改写、缩短或"顺手优化"**（owner 2026-09-17
 拍板钉死）。原因：相似提醒的触发条件之一是两条标题相似度 ≥ 0.8
@@ -103,7 +105,7 @@ memory(action="remember", data={"content": "用户拒绝了首次功能演示（
 实操：`memory(action="find", data={"query": "生产部署架构是什么样的", "limit": 5})`
 展示命中列表（含 memory ID）→ 挑一条 `memory(action="read", data={"memory_id": <id>})`
 展示全文。给用户看的形态：**编号 + 一句话主题**（不贴整段原始返回）。
-演示全程不指定 workspace（写入与查询都走默认，行为一致）；准确率
+演示全程统一 `workspace="default"`（写入与查询行为一致）；准确率
 汇报前核对命中条目——带 `mema-demo` 标签的才算演示数据命中，混入的真记忆
 如实分开说，不得算进演示命中率。
 
