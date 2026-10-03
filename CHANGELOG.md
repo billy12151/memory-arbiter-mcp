@@ -5,6 +5,13 @@ Versions follow semantic versioning.
 
 ## [0.17.1 追加] — 未发版（claim 对比通道退役 + 判定输入上下文化，owner 2026-09-28 拍板）
 
+### Changed (eval 归因链收敛 judge_budget 单键，2026-10-03)
+
+方案 §2.4 收尾（commit ② 的回执退役在 eval 侧对齐）。
+
+- `eval/runner.py` receipt 白名单摘 `qwen_budget`（兼容 echo 已在 commit ② 摘除，白名单收旧键恒空）；`eval/score.py` 归因读键收敛 `judge_budget` 单键（旧 raw 无键按 0 计的兼容不变，归因输出键名不动）。
+- harness 基线锚：V4m 生产形态 recorded 数字（mema #1111：真冲突 21/33、误报 3/130 @T=0.80）；本 commit 后随 owner 指令换 v46_ep1 checkpoint 重测阈值并全量跑 harness（最终对照锚）。
+
 ### Changed (判定执行合一总池 + 常量重标，2026-10-03)
 
 方案 §2/§3（两轮 review 记录：`ZCodeProject/docs/mema-judge-recalib-escalate-plan-2026-10-03.md` v3）。owner 2026-10-03 拍板：合一只留总池、池 500、期限 10s。

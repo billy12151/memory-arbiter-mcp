@@ -212,14 +212,15 @@ def test_conflict_comprehensive_union_any_channel() -> None:
     assert score.gate(worse, scored, 0.1)["gate"] == "FAILED"
 
 
-def test_conflict_attribution_reads_qwen_budget_and_direct_verdicts() -> None:
-    """H1：分通道归因直读 Qwen 回执新键（review R1-6——pairs_examined 全局
-    口径之后，A qwen 归因不再用差额推算）；旧 raw 无此二键按 0 计。"""
+def test_conflict_attribution_reads_judge_budget_and_direct_verdicts() -> None:
+    """H1：分通道归因直读判定回执键（review R1-6——pairs_examined 全局
+    口径之后，A 归因不再用差额推算）。0.17.1 重标合一后回执单键
+    judge_budget（qwen_budget 兼容 echo 退役）；旧 raw 无此二键按 0 计。"""
     raw = {
         "conflict": [
             {"pair_id": "s1", "label": "true_conflict", "skipped_member_replay": False,
              "sync": True, "async": False, "notice_missing": False,
-             "_receipt": {"qwen_budget": {"internal": 1, "a_cross": 2},
+             "_receipt": {"judge_budget": {"internal": 1, "a_cross": 2},
                           "direct_verdicts": 3}},
             {"pair_id": "s2", "label": "true_conflict", "skipped_member_replay": False,
              "sync": False, "async": True, "notice_missing": False,
@@ -230,7 +231,7 @@ def test_conflict_attribution_reads_qwen_budget_and_direct_verdicts() -> None:
              "skipped_member_replay": False, "sync": True, "async": False, "notice_missing": False},
             {"pair_id": "c1", "channel": "C", "label": "true_conflict",
              "skipped_member_replay": False, "sync": True, "async": False, "notice_missing": False,
-             "_receipt": {"qwen_budget": {"channel_c": 2}}},
+             "_receipt": {"judge_budget": {"channel_c": 2}}},
         ],
     }
     attr = score.score_conflict_attribution(raw)
