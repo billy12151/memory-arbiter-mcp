@@ -45,14 +45,15 @@ def test_judge_budget_pool_arithmetic() -> None:
     assert pool.receipt_block() == {"internal": 2, "a_cross": 8}
 
 
-def test_judge_budget_single_pool_shared_by_sources() -> None:
-    # internal-first：internal 消费后 cross 只吃余量（帽 3 的保护语义由
-    # 排序继承，不再有独立帽）
+def test_judge_budget_single_pool_half_share() -> None:
+    # 半池守恒（harness 实测回归修复）：internal 份额 ⌈total/2⌉——行密集
+    # 语料的 internal keeper 不再吃光全池饿死跨记忆道；cross 保底 ⌊total/2⌋。
     pool = _JobJudgeBudget(total=3)
+    assert pool.internal_share == 2
     assert pool.spend("internal") is True
     assert pool.spend("internal") is True
-    assert pool.spend("internal") is True
-    assert pool.spend("a_cross") is False  # internal 吃光 → cross 无余量
+    assert pool.spend("internal") is False  # 超出半池份额 → 静默消失
+    assert pool.spend("a_cross") is True    # cross 保底至少 1 席
     assert pool.pairs_examined == 3
 
 
@@ -363,3 +364,28 @@ def test_drain_stop_probe_yields_mid_batch(tmp_path, monkeypatch) -> None:
     # 承载让路原因（R1 P2-1 修复口径：停发归 judge_budget_exhausted）
     assert receipt["truncated"] is True
     assert "judge_budget_exhausted" in receipt["reasons_seen"]
+
+
+def test_internal_storm_cannot_starve_cross(tmp_path, monkeypatch) -> None:
+    """半池守恒回归（harness 实测：无上限 internal-first 在行密集语料上
+    吃光全池 → 跨记忆 notice 归零、backlog 顶帽驱逐）。钉：internal 超份额
+    消失，cross 候选必拿到保底席位并落 notice。"""
+    tools, new, peer1 = _write_scene(tmp_path, monkeypatch)
+    peer_text = "连接池上限为 300，队列长度为 4。"
+    _install_stubs(
+        monkeypatch, tools, peer1=peer1,
+        a_hits=[_peer_hit(peer1, 901, peer_text, 0.1)],
+        c_hits=[], c_vectors={},
+    )
+    # 总池 2：internal 份额 ⌈2/2⌉=1，cross 保底 1。own 双行数值句 = 1 个
+    # internal keeper + 1 个 cross 对——两侧都能判。
+    monkeypatch.setattr(ev, "_JobJudgeBudget", lambda total=500: _JobJudgeBudget(total=2))
+
+    receipt = tools._process_semantic_conflict_job(new["id"], tv._job_snapshot(tools, new["id"]))
+
+    kinds = [kind for kind, _ in _Recorder.calls]
+    assert kinds.count("internal") == 1   # 半池份额内
+    assert kinds.count("A") == 1          # cross 保底席位未被饿死
+    assert receipt["internal_conflicts"] == 1
+    assert receipt["judge_budget"] == {"internal": 1, "a_cross": 1}
+    assert receipt["notices_created"] == 1

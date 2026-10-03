@@ -5,6 +5,14 @@ Versions follow semantic versioning.
 
 ## [0.17.1 追加] — 未发版（claim 对比通道退役 + 判定输入上下文化，owner 2026-09-28 拍板）
 
+### Fixed (合一池半池守恒——internal 不再饿死跨记忆道，2026-10-03)
+
+harness 实测回归（v46_ep1@0.55 CPU 全量跑）：无上限 internal-first 在行密集语料（数值/表格记忆的 O(n²) keeper）上吃光 500 池——conflict 道 106 写跨记忆 notice=0、internal_conflicts 9390 行、backlog 顶帽驱逐，冲突召回塌零（R2 对抗轮攻击#2 的实测复现；探针测试当时未带跨对场景，漏网）。修复：单一池保留，internal 消费份额上限 ⌈total/2⌉（500→250），跨记忆道保底半池；internal 超份额对静默消失（池语义不变）；正常写入（internal 1~5 对）零影响。补饥饿回归测试（internal 风暴下 cross 保底席位必得）。
+
+### Fixed (v46 系 checkpoint 机制头形状自适应，2026-10-03)
+
+mini-clash 训练侧机制分类学扩展（10→12 类，v46起新增 subject_mismatch/attribute_mismatch），mema 判定子进程按常量建 10 类头 → load_state_dict 形状不匹配 → 判定后端 crash-restart 循环。修复：头维度从 checkpoint 实际形状读取——机制头（观测字段）静默自适应、超名表索引返 None；标签头（verdict 协议）仍硬校验必须一致。model_version 前缀去 v4m 专属。
+
 ### Changed (eval 归因链收敛 judge_budget 单键，2026-10-03)
 
 方案 §2.4 收尾（commit ② 的回执退役在 eval 侧对齐）。

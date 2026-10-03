@@ -301,6 +301,13 @@ class _JobJudgeBudget:
     单一 job 全局判定池——internal keepers 与 A-cross 按提交顺序消费同一个池，
     internal-first 排序保证 land-first（E10①）。receipt 分账按来源保留。
 
+    半池守恒（harness 实测回归修复，2026-10-03）：internal 消费上限
+    ⌈total/2⌉——无上限的 internal-first 在行密集语料（数值/表格记忆的
+    O(n²) keeper）上会吃光全池，跨记忆对全部 capped→backlog（eval 冲突
+    道实测：106 写 0 notice、internal 9390 行、backlog 顶帽驱逐）。跨记忆
+    是召回主通道（0.372→0.163 前车之鉴），保底半池；internal 超出份额
+    静默消失（池语义不变）。正常写入（internal 1~5 对）不受影响。
+
     前身 _JobQwenBudget（0.17.0 Q1 owner D1）：internal 保护帽 ≤3 + A-cross
     吃余量——帽的原始理由是 Qwen 一对 ~1.6s、internal keepers 曾吃光共享预算
     （recall 0.372→0.163）；mDeBERTa 批前向 ~0.1s/16 对后前提不成立，帽退役，
@@ -313,18 +320,25 @@ class _JobJudgeBudget:
         self.a_cross_used = 0
 
     @property
+    def internal_share(self) -> int:
+        """internal 可用份额 = ⌈total/2⌉（cross 同样保底 ⌊total/2⌋）。"""
+        return max(1, self.total - self.total // 2)
+
+    @property
     def remaining(self) -> int:
         return max(0, self.total - self.internal_used - self.a_cross_used)
 
     def spend(self, source: str) -> bool:
-        """单一总池消费。池耗尽返回 False，收尾语义按来源分：internal 静默
-        消失（现状帽 break 的池化等价）、A-cross 记 pairs_examined_capped
+        """单一总池消费 + internal 半池份额。池/份额耗尽返回 False，收尾
+        语义按来源分：internal 静默消失、A-cross 记 pairs_examined_capped
         进 backlog。"""
-        if self.remaining <= 0:
-            return False
         if source == "internal":
+            if self.internal_used >= self.internal_share or self.remaining <= 0:
+                return False
             self.internal_used += 1
         else:
+            if self.remaining <= 0:
+                return False
             self.a_cross_used += 1
         return True
 
