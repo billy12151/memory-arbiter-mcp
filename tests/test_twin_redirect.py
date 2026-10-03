@@ -312,3 +312,34 @@ def test_confirm_safe_form_redirects_to_dev(tmp_path) -> None:
             "SELECT count(*) FROM workspace_aliases WHERE alias_workspace='mema-twin'"
         ).fetchone()[0]
     assert poison == 0
+
+
+def test_confirm_poison_case_variant_blocked(tmp_path) -> None:
+    """R3 P1 回归钉：大小写变体（"Mema-Twin"）不得绕过防毒守卫——
+    twin_redirect_target 规范化比较后，守卫对变体 raw 同样触发，毒行
+    （alias 键 casefold 后=保护键）不得落库。"""
+    tools = make_tools(tmp_path)
+    written = tools.memory_write(
+        content="twin probe", workspace="Mema-Twin", subject="twin",
+        source_type="agent_generated", status="pending",
+    )["data"]
+    rejected = tools.memory_govern("confirm_pending_workspace", {
+        "workspace": "Mema-Twin", "memory_id": written["id"],
+        "canonical": "mema-twin-dev", "authorized": True,
+    })
+    assert rejected["ok"] is False
+    assert "protected_bucket_redirect" in str(rejected["data"])
+    with tools.db.connection() as conn:
+        poison = conn.execute(
+            "SELECT count(*) FROM workspace_aliases WHERE alias_workspace='mema-twin'"
+        ).fetchone()[0]
+    assert poison == 0
+
+
+def test_redirect_target_normalizes_case() -> None:
+    from memory_arbiter.twin_redirect import twin_redirect_target
+
+    assert twin_redirect_target("Mema-Twin", client="x", agent_id="y") == "mema-twin-dev"
+    assert twin_redirect_target("  MEMA-TWIN ", client="x", agent_id="y") == "mema-twin-dev"
+    assert twin_redirect_target("mema-twin", client="mema-twin", agent_id=None) is None
+    assert twin_redirect_target("mema-twin-dev", client="x", agent_id="y") is None

@@ -349,6 +349,11 @@ def build_runtime() -> ServerBundle:
     def memory(action: str = "help", data: dict[str, Any] | None = None) -> Any:
         """Daily memory operations: remember, find, batch_find, read, update, judge, status, help.
 
+        workspace is required on remember — first call
+        memory_review(view="workspaces") to list existing buckets, then pass an
+        existing canonical name ('default' is the global pool); pass a new name
+        only when deliberately creating a new bucket.
+
         Call memory(action="help") to discover accepted fields, judge requirements,
         value enums, update modes, and action_required paths before relying on a
         result that requests attention.
@@ -412,7 +417,11 @@ def build_runtime() -> ServerBundle:
         """Authorized governance: retire, merge near-duplicates, apply/replan/resolve conflicts, confirm, and manage workspaces.
 
         Every state-changing action requires explicit user authorization for that
-        action, then authorized=true. Call memory_govern(action="help") for exact
+        action, then authorized=true. Workspace-mutating actions (confirm_pending_workspace,
+        rename_workspace_canonical, migrate_workspace, separate_workspace_alias,
+        move_memories_workspace) also require workspace — call
+        memory_review(view="workspaces") first to list existing buckets.
+        Call memory_govern(action="help") for exact
         actions, accepted fields, impact notes, and confirmation semantics.
         """
         identity = _identity_for_tool(app) or stdio_identity

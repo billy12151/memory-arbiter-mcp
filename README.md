@@ -57,7 +57,7 @@ The server requires an explicitly configured identity: set `client` and `agent_i
 
 stdio remains the default. For one local server shared by several clients, set `mcp.transport` to `streamable-http` (or `MEMORY_ARBITER_MCP_TRANSPORT=streamable-http`, one of the six retained launch-context variables) and connect to `http://127.0.0.1:8000/mcp`. Each client's MCP server entry must set fixed `X-Mema-Client` and `X-Mema-Agent-Id` headers; see [`examples/streamable-http.mcp.json`](examples/streamable-http.mcp.json). The client sends them automatically on every HTTP MCP request—agents should not add identity to individual tool calls. Missing, empty, invalid, duplicated, or conflicting identity is rejected instead of falling back to defaults. Community HTTP mode binds only to localhost, and these headers are advisory provenance, **not authentication or multi-tenant isolation**.
 
-The daily loop is four calls — `remember` a reusable fact, `find` to recall, `read` for exact lookup, `update` when a newer source replaces an existing current memory (never create a second active copy of one source of truth). Point any agent at the packaged rule:
+The daily loop is four calls — `remember` a reusable fact, `find` to recall, `read` for exact lookup, `update` when a newer source replaces an existing current memory (never create a second active copy of one source of truth). `remember` requires `workspace` (0.17.1): first call `memory_review(view="workspaces")` to list existing buckets, then pass an existing canonical name — `'default'` is the global pool; pass a new name only when deliberately creating a new bucket. Point any agent at the packaged rule:
 
 ```json
 {"action":"help","data":{"topic":"agent_onboarding"}}

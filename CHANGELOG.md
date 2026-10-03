@@ -83,19 +83,6 @@ mini-clash 训练侧机制分类学扩展（10→12 类，v46起新增 subject_m
 
 ## [0.17.1 追加] — 未发版（claim 对比通道退役 + 判定输入上下文化，owner 2026-09-28 拍板）
 
-### Changed (全量修复批 + 向量自查 + workspace 必传，2026-10-04)
-
-方案 v4（两轮方案 review 回写）：`ZCodeProject/docs/mema-full-fix-batch-and-selfknn-plan-2026-10-03.md`；实施后两轮 review 记录见 mema。
-
-- **P1-1** claims vec 虚表 deferred-DROP 与影子表 sweep 顺序（additive 通道永久失效）修复——deferred 轮影子表保留至恢复轮。
-- **P1-2 + C1** workspace 语义动作必传（remember + confirm_pending/rename/migrate/separate/move）：validation 层强制=strip 非空，报错带 workspaces 列表指路；enforce_required 开关分线（管线复验与 backup_replay 历史行豁免）；strict 隔离下 confirm 两道校验复活（caller 恒构建），错误路径越权回显同修；twin 等价豁免保 0.16.2 §1.2 流程可达。
-- **P1-3** twin 毒化双修：strict_block hint 指回原名+警告句；confirm 防毒守卫（改道键只许 no-op，canonical 无论 -dev 还是任意第三桶一律拦）。
-- **P2×20**：入口域 4（scan_queue 松散类型/slow_lane _is_truthy/config_registry 补 mdeberta 两键+契约 21/docstring 1..8）、写入ws 域 7（rejected 兄弟聚合/governance_audit 新表+三动作审计/ tags_only 拒元参数/register_new 三死分支删除/move 批量化+哨兵过滤/addopts not slow）、召回扫描DB 域 9（span 缺省读到末尾/weak 注释/慢车道计数/_caller 局部化/expire CAS/scoped 翻页/backup_replay 结构化降级/set 提出/doctor model_dir warn）。
-- **B2** 内部向量自查：numpy 内存 top-k（k=5）替换 O(n²) 双循环；批路径原地/streaming 流 drain 后插点（E10① 保持）；漏斗门（floor/同值双通道 skip/at-ceiling 值不同放行）+ internal_pair_admission 照旧；ImportError 跳过记 receipt。
-- **B3** 超长表格段豁免：单表格段（kind=table_row 且 row_index 连续）>100 行整体不存行向量不做检测，各数各的；公共 helper 三路径共用（检测 streaming/batch + index-only）；table_rows_exempted 回执可见。
-- **C2** memory_review(view="workspaces") 选桶发现接口 + **C4** help/docstring 三层指路。首次演示话术待 owner 点头单独改。
-
-
 ### Removed
 - **claim 对比通道整体退役**：通道 B（claims×claims：exact/vector 车道）、通道 C（claims×sentences）、单边桥、scan 慢道 claims 腿。理由：claim 属性无实体绑定（"数据库=MySQL" 与另一系统的 "数据库=Oracle" 无法区分），真实场景误报面大；通道 C harness 实测真召回 1/10。claims **整体退役**（owner 2026-09-29 拍板连表删）：`memory_claims`/`memory_claim_vec` 两表 DDL 删除、存量库启动幂等 DROP；`claims.required` 写入门、`memory_repair(task='claims_backfill')`、写入/编辑/继承/回执全链退役，claims 参数出 schema（未知键软着陆警告）。
 - 覆盖句跳过（claim 覆盖的句子不再被排除出通道 A）随退役删除——否则 claim 覆盖行成检测死区。
