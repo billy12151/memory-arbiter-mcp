@@ -254,6 +254,11 @@ SEMANTIC_MAX_EXAMINED_PAIRS = 500
 # (P2-3.1, plan §5); the truncation reason is rows_capped. Initial value —
 # P2-3.2 recalibrates on the noisy corpus (constants keep the evidence chain).
 SEMANTIC_MAX_ROWS = 256
+# 0.17.1 重标合一 B2（owner 2026-10-03 拍板：所有内部自查都要用向量，且过
+# 漏斗门）：内部配对=numpy 内存 top-k（批路径用已发布向量、streaming 用流
+# drain 后的 landed 向量——job_conn 快照对同相位发布必然不可见，不走 DB
+# KNN）。每行取最相似 k 邻居，n×k 对封顶（256 行 1280 对 vs n² 32640）。
+SEMANTIC_INTERNAL_SELF_KNN_K = 5
 # 0.17.0 P2-3.4: candidate pair_score weights (order-only, never a verdict).
 # Base is the C4 subject/tags overlap; value features outrank topic
 # similarity because 98% of same-topic pairs are continuations, not

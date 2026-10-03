@@ -1026,62 +1026,107 @@ class EvidencePipeline:
 
     def _collect_internal_pairs(
         self, ctx: dict[str, Any], job_conn: "sqlite3.Connection",
-        seg_views: "list[Any]",
-    ) -> None:
-        """Deterministic phase step 2 (r2s-02 split): O(n²) same-memory
-        keeper collection, feeding the internal Qwen phase (E10①).
+        views_with_vectors: "list[tuple[Any, Any]]",
+    ) -> bool:
+        """B2（owner 2026-10-03 拍板：内部自查一律走向量+漏斗门）：numpy 内存
+        top-k 邻居配对，替换 O(n²) 双循环。
 
-        0.16.0 E10① (§6⑳): same-memory internal examination comes FIRST —
-        units are in hand (no KNN), the rule is deterministic, and the
-        finding lands in the dedicated internal_conflicts structure (the
-        conflicts table's pair invariants reject a single memory@version
-        twice). It consumes no Qwen budget; the cross-memory loop is
-        untouched in shape, and a truncated cross loop still reports the
-        internal findings already landed this run.
-        0.16.2 (owner, unified flow): the internal check uses the SAME
-        filter-plus-slot-extraction logic as the cross-memory route.
-        0.16.4 §0.5/§2: the whole filter sequence is ONE shared gate —
-        internal_pair_admission (scan_pipeline) — called identically by
-        the scan side. Here: EVERY admitted shape (check AND notify)
-        collects for the Qwen final review — a real in-memory
-        self-contradiction has a recognition duty, and Qwen's verdict is
-        the triple ready→pending+attribution / definitive negative→
-        dismissed veto / technical failure→pending unannotated (fail-open).
-        0.17.0 P2-3.1: internal (same-memory) pairs are row segments in
-        rows mode (row_index lands in internal_conflicts' unit_a/unit_b)."""
+        - 批路径：已发布行向量（current_row_vectors）在收集点前就位，原地调用；
+        - streaming 首写：流 drain + publish 后、truncation 判断前调用
+          （landed 原生 RowSegment 经 getattr 双访问归一，消费方 .unit_index 不破；
+          晚于 truncation 会拔掉 E10①「internal findings land despite cross
+          truncation」的落地）；
+        - numpy ImportError → 返回 False（调用方记 internal_skipped_no_numpy，
+          fail-open 可见；无 numpy 的部署本就无判定引擎）。
+        漏斗门（与 cross 同序，直接常量比较——内存匹配已有全对余弦，不复用
+        candidate_cos_gate 的 dict 形态）：cos floor 出局 → decide_evidence 值
+        提取同值 skip → at-ceiling 且值不同放行（同键异值恰是自查目标形态，
+        值门比表面余弦准——与 cross 的 at_ceil→重复语义在此一处刻意分歧）→
+        internal_pair_admission（噪音/exists 探针，历史行由前序 job 落库快照
+        内可见）照旧 → 入池（internal-first/半池守恒/落地全部不变）。
+        已知后果（如实）：rows cap 截断的行无向量不进内部配对（原 n² 对 cap 外
+        行同样丢弃，无净损失）。"""
         memory_id = int(ctx["memory_id"])
         internal_version = int(ctx["internal_version"])
         from ..scan_pipeline import internal_pair_admission
+        from ..constants import (
+            SEMANTIC_CANDIDATE_COS_CEIL,
+            SEMANTIC_CANDIDATE_COS_FLOOR,
+            SEMANTIC_INTERNAL_MAX_ROWS,
+            SEMANTIC_INTERNAL_SELF_KNN_K,
+        )
 
-        # append-only through the alias — the list object lives in ctx and
-        # feeds the internal Qwen phase (E10① keepers).
+        try:
+            import numpy as _np
+        except ImportError:
+            return False
+
         internal_judge_pairs: list[tuple[Any, Any, Any]] = ctx["internal_judge_pairs"]
-        # C3 A+ guard: subject rows never originate pairs (internal or cross).
-        # Adversarial-review follow-up: an INDEPENDENT cap (not the cross
-        # loop's) — O(n²) construction with row granularity needs its own
-        # ceiling, while E10①'s guarantee (internal keepers land despite
-        # cross truncation) forbids sharing the cross cap.
-        from ..constants import SEMANTIC_INTERNAL_MAX_ROWS
-        originator_views = [
-            v for v in seg_views if v.kind != "subject"
+        originators = [
+            (view, vec) for view, vec in views_with_vectors
+            if str(view.kind) != "subject" and vec
         ][:SEMANTIC_INTERNAL_MAX_ROWS]
-        for i in range(len(originator_views)):
-            for j in range(i + 1, len(originator_views)):
-                seg_a, seg_b = originator_views[i], originator_views[j]
+        if len(originators) < 2:
+            return True
+        matrix = _np.array([list(map(float, vec)) for _v, vec in originators], dtype=_np.float32)
+        norms = _np.linalg.norm(matrix, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        unit = matrix / norms
+        sims = unit @ unit.T
+        k = min(int(SEMANTIC_INTERNAL_SELF_KNN_K), len(originators) - 1)
+        seen_pairs: set[frozenset[int]] = set()
+        for i in range(len(originators)):
+            # top-k 邻居（排除自身：先置 -1 再取前 k+1）
+            row = sims[i].copy()
+            row[i] = -1.0  # 自身在 -row 中成最大值，被 argpartition 前段天然排除
+            top = _np.argpartition(-row, k)[:k]
+            for j in top:
+                j = int(j)
+                if j == i:
+                    continue
+                pair_key = frozenset({i, j})
+                if pair_key in seen_pairs:
+                    continue
+                seen_pairs.add(pair_key)
+                seg_a, seg_b = originators[i][0], originators[j][0]
+                cos = float(sims[i, j])
+                if cos < SEMANTIC_CANDIDATE_COS_FLOOR:
+                    ctx["below_cos_floor"] = ctx.get("below_cos_floor", 0) + 1
+                    continue
                 internal_decision = decide_evidence(seg_a.text, seg_b.text)
+                left_v = getattr(internal_decision, "left_value", None)
+                right_v = getattr(internal_decision, "right_value", None)
+                # 同值判定双通道：值对齐（近同文本各抽值）或 reason 判等
+                # （完全同文本不抽值——decide_evidence 直接 ignore/equivalent_value）
+                same_value = (
+                    str(getattr(internal_decision, "reason", "") or "") == "equivalent_value"
+                    or (
+                        left_v is not None and right_v is not None
+                        and _values_all_equivalent(str(left_v), str(right_v))
+                    )
+                )
+                if cos >= SEMANTIC_CANDIDATE_COS_CEIL:
+                    # at-ceiling 分歧点：值不同放行（同键异值=自查目标），值同=重复 skip
+                    if same_value:
+                        ctx["no_difference_filtered"] = ctx.get("no_difference_filtered", 0) + 1
+                        continue
+                elif same_value:
+                    ctx["no_difference_filtered"] = ctx.get("no_difference_filtered", 0) + 1
+                    continue
                 admitted = internal_pair_admission(
                     seg_a.text, seg_b.text,
                     (seg_a.start_offset, seg_a.end_offset),
                     (seg_b.start_offset, seg_b.end_offset),
                     internal_decision,
-                    exists_probe=lambda: self.db.internal_conflicts.exists_on_conn(
+                    exists_probe=lambda a=seg_a, b=seg_b: self.db.internal_conflicts.exists_on_conn(
                         job_conn, int(memory_id), internal_version,
-                        seg_a.unit_index, seg_b.unit_index,
+                        a.unit_index, b.unit_index,
                     ),
                 )
                 if not admitted:
                     continue
                 internal_judge_pairs.append((seg_a, seg_b, internal_decision))
+        return True
 
     def _collect_neighbour_screen(
         self, ctx: dict[str, Any], record: dict[str, Any], paired: "list[Any]",
@@ -1264,7 +1309,13 @@ class EvidencePipeline:
         seg_embeddings = [embedding for _seg, embedding in paired]
         max_segments = max_rows
         segments_capped_reason = "rows_capped"
-        self._collect_internal_pairs(ctx, job_conn, seg_views)
+        # B2：批路径向量在手，就地收集；streaming 延后到流 drain+publish 后
+        # （见 truncation 判断前的 landed 收集点）——job_conn 快照对同相位
+        # 发布必然不可见，DB KNN 不可用，内存向量是唯一正确来源。
+        if not pending_segments:
+            ctx["_internal_knn_ok"] = self._collect_internal_pairs(
+                ctx, job_conn, list(zip(seg_views, seg_embeddings)),
+            )
         # 0.16.2 write-time pre-gates (owner, data-driven): two deterministic
         # filters run in the KNN collection loop, BEFORE the per-peer dedup —
         # a cleared representative would otherwise burn a peer slot that a
@@ -1449,6 +1500,23 @@ class EvidencePipeline:
             elif ranked_pending:
                 truncation_reason = truncation_reason or "embed_phase_incomplete"
             publish_done_at.append(time.monotonic())
+            # B2 streaming 插点：流 drain 完成后、truncation 判断前——内部
+            # keeper 收集必须在 truncation 消费（E10① unannotated 落地）之前。
+            # landed 是原生 RowSegment（无 .unit_index）——getattr 双访问归一
+            # 为 _SegView 形态（:1305 同款先例），两个消费方读 .unit_index 不破。
+            from collections import namedtuple as _nt
+            _LandedView = _nt("_LandedView", "text start_offset end_offset unit_index kind")
+            _landed_views = [
+                (_LandedView(
+                    seg.text, int(seg.start_offset), int(seg.end_offset),
+                    int(getattr(seg, "unit_index", getattr(seg, "row_index", 0))),
+                    str(getattr(seg, "kind", "sentence")),
+                ), embedding)
+                for seg, embedding in landed
+            ]
+            ctx["_internal_knn_ok"] = self._collect_internal_pairs(
+                ctx, job_conn, _landed_views,
+            )
         if truncation_reason:
             # E10① order guarantee: internal findings land BEFORE the cross
             # loop and survive its truncation. The internal Qwen pass has not
@@ -2112,6 +2180,9 @@ class EvidencePipeline:
         if ctx["rows_mode"]:
             result["rows_mode"] = True
             result["rows_examined"] = int(ctx["units_examined"])
+        if ctx.get("_internal_knn_ok") is False:
+            # B2 fail-open 可见：无 numpy → 内部自查整体跳过（非静默）
+            result["internal_skipped_no_numpy"] = True
         if ctx["reasons_seen"]:
             # Degradations may also occur on pairs before a later pair surfaces
             # a notice, so the list is attached to completed outcomes too.
