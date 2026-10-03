@@ -579,9 +579,16 @@ def run_conflict_suite(
         right_write_ms: float | None = None
         if left_sha not in seen_shas:
             tools.settings.semantic_conflict_notice_sync_wait_ms = setup_wait
+            # 提速三（owner 2026-10-03，harness ≤10min）：左写降级 index_only
+            # （on_write="off" 在 enqueue 侧的语义）——左成员仍嵌入索引供右写
+            # KNN 配对，但不跑检测 job；配对检测由右写完成（右写以左为 peer），
+            # identified/miss/recall/precision 语义不变，sync/async 拆分全落右写。
+            saved_on_write = tools.settings.semantic_conflict_on_write
+            tools.settings.semantic_conflict_on_write = "off"
             try:
                 left_id, _, _, _ = _remember_envelope(tools, left, pair_entity)
             finally:
+                tools.settings.semantic_conflict_on_write = saved_on_write
                 tools.settings.semantic_conflict_notice_sync_wait_ms = default_sync_wait
             seen_shas.add(left_sha)
         if right_sha not in seen_shas:
@@ -771,6 +778,12 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--neg-per-class",
+        type=int,
+        default=5,
+        help="负样本按类截留最小的 N 对（真冲突全保）；0=全量语料。默认 5（harness ≤10min 提速）",
+    )
+    parser.add_argument(
         "--setup-sync-wait-ms",
         type=int,
         default=0,
@@ -879,6 +892,21 @@ def main() -> int:
             conflict_pairs = _load_jsonl(FIXTURES / "conflict" / "pairs.jsonl")
             conflict_pairs += _load_jsonl(FIXTURES / "conflict" / "pairs_large.jsonl")
             conflict_pairs += _load_jsonl(FIXTURES / "conflict" / "pairs_noisy.jsonl")
+            # 提速四（owner 2026-10-03，harness ≤10min）：负样本按类截留最小的
+            # N 对（真冲突 33 对全保——召回分母与历史 15/33、21/33 直接可比）。
+            # 实测负样本占语料 90% 字符量（noise 巨页 12-43k 字符/对），是 CPU/
+            # GPU embed 与行级收集的大头。--neg-per-class 0 = 全量语料。
+            if args.neg_per_class > 0:
+                def _chars(pair: dict) -> int:
+                    return len(pair["left"]["content"]) + len(pair["right"]["content"])
+                kept: list[dict] = [p_ for p_ in conflict_pairs if p_["label"] == "true_conflict"]
+                for neg_label in ("noise", "coexist", "non_conflict"):
+                    negs = sorted(
+                        (p_ for p_ in conflict_pairs if p_["label"] == neg_label),
+                        key=_chars,
+                    )
+                    kept.extend(negs[: args.neg_per_class])
+                conflict_pairs = kept
             with temp_library(
                 embed_model, qwen_model=qwen_model, notice_min_prob=args.mdeberta_notice_min_prob,
                 sync_wait_ms=conflict_sync_wait_ms,
@@ -928,7 +956,10 @@ def main() -> int:
             # ②true_conflict 对新增 opposition_quality（ny-num-short-sentence
             # =insufficient：裸值句无属性名，疑似=正确按满分计）；③runner 行
             # 新增 notice_severity。旧基线（conflict-v4-noisy）作废须重建。
-            "conflict_corpus_version": "conflict-v5-audited",
+            "conflict_corpus_version": (
+                "conflict-v5-audited-fast" if args.neg_per_class > 0 else "conflict-v5-audited"
+            ),
+            "conflict_neg_per_class": int(args.neg_per_class),
             # 0.17.0 P2-0.1：相似套件同样可变（cases.jsonl + cases_noisy.jsonl），
             # 版本键进 env 供 gate 前置校验拒绝跨语料对比（review R1-5）
             "similarity_corpus_version": "similarity-v2-noisy",
