@@ -779,3 +779,29 @@ def test_scan_enqueue_stamps_pair_priority(tmp_path: Path) -> None:
         ).fetchall()
     assert rows, "数值对必须入队"
     assert all(float(r["priority"]) > 0 for r in rows), rows
+
+
+def test_slow_lane_increments_reach_persisted_state(tmp_path: Path, monkeypatch) -> None:
+    """P2 #14：慢车道增量此前只进 kick 回执的局部计数器，落库的
+    state 表不含慢车道工作——并入 state 后状态表计数含慢车道。"""
+    tools = make_tools(tmp_path)
+    marker_id = 12345  # empty library: the slow lane is the only visitor
+
+    monkeypatch.setattr(
+        tools.db, "least_recently_scanned_ids",
+        lambda **kwargs: [marker_id],
+    )
+
+    def fake_process(memory_id, *, suppression=None, neighbor_k=10):
+        return {
+            "version": 1, "workspace": "ws", "queued": 1,
+            "auto_rejected": 0, "internal": 0, "machine_cleared": 1,
+        }
+
+    monkeypatch.setattr(tools._scan_pipeline, "_process_memory", fake_process)
+    kick = tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 5})
+    assert kick["data"]["ok"] is True
+    assert kick["data"]["slow_lane_processed"] == 1
+    state = tools.db.meta.scan_pipeline_state() or {}
+    assert int(state.get("queued") or 0) == 1
+    assert int(state.get("machine_cleared") or 0) == 1

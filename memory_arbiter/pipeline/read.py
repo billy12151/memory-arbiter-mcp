@@ -1000,8 +1000,10 @@ class ReadPipeline:
         explicit_filter = isolation != "none" or caller.source == "explicit"
         ws_canonical = caller.canonical if explicit_filter else None
         workspace = caller.workspace if explicit_filter else workspace
-        # A none/weak explicit filter scopes recall in SQL (hard_scope) so the
-        # limit is applied AFTER workspace scoping — never a post-page truncation.
+        # An explicit filter goes through SQL hard_scope ONLY under none
+        # isolation, so the limit applies AFTER workspace scoping — never a
+        # post-page truncation. weak NEVER hard-filters (soft rerank only;
+        # pinned by test_weak_recall_never_filters).
         hard_scope = isolation == "none" and caller.source == "explicit" and bool(caller.canonical)
         # strict recall/ACL scope is the admitted canonical set (own +
         # in-radius neighbours). None/weak never hard-scope by it.
@@ -1536,8 +1538,10 @@ class ReadPipeline:
 
         0.16.0 four-call content_mode unification (plan §6⑨): find/batch_find/
         read/batch_read share preview/hits/full semantics. ``read`` defaults to
-        full (backward compatible). ``span={"start", "end"}`` selects complete
-        evidence units overlapping the window — mema's content atom is the unit,
+        full (backward compatible). ``span={"start", "end"}`` (``end`` optional
+        since 0.17.1 — an omitted end reads through the end of the content,
+        the same default as batch spans) selects complete evidence units
+        overlapping the window — mema's content atom is the unit,
         so windowed reads never slice a half sentence (the legacy char-slice
         remains only as the fallback when no evidence rows exist yet).
         """
@@ -1572,9 +1576,15 @@ class ReadPipeline:
                 )
             raw_start = span.get("start")
             raw_end = span.get("end")
+            # P2 #12: a span may carry only `start` — `end` defaults to the
+            # content length, resolved after the record is in hand (the
+            # validation point cannot see the content yet).
             if (
                 not isinstance(raw_start, int) or isinstance(raw_start, bool)
-                or not isinstance(raw_end, int) or isinstance(raw_end, bool)
+                or (
+                    raw_end is not None
+                    and (not isinstance(raw_end, int) or isinstance(raw_end, bool))
+                )
             ):
                 return self.db.state.response(
                     {"error": "span start/end must be integers"},
@@ -1582,7 +1592,7 @@ class ReadPipeline:
                 )
             span_start = raw_start
             span_end = raw_end
-            if span_start < 0 or span_end <= span_start:
+            if span_start < 0 or (span_end is not None and span_end <= span_start):
                 return self.db.state.response(
                     {"error": "span requires 0 <= start < end"},
                     ok=False, extra_warnings=read_warnings,
@@ -1602,6 +1612,13 @@ class ReadPipeline:
             )
 
         content = str(memory.get("content") or "")
+        if span is not None and span_end is None:
+            # P2 #12: {"start": N} without `end` reads through the end of the
+            # content — resolved here (the validation point cannot see the
+            # record) so every downstream consumer (full-mode slicing AND the
+            # hits-mode unit alignment) sees a concrete end.
+            span_end = len(content)
+            span = {**span, "end": span_end}
         data: dict[str, Any]
         if content_mode == "preview" and span is None:
             preview = {
@@ -1726,7 +1743,9 @@ class ReadPipeline:
         adds an 80KB byte budget (100KB hard ceiling) — an over-budget batch
         returns a structured over-long prompt and the agent re-reads items
         individually, never a silent truncation. ``spans`` maps memory_id to
-        {start, end} and is the ``hits`` unit selector for id-driven calls
+        {start, end} (``end`` optional since 0.17.1 — an omitted end reads
+        through the end of that record's content, matching single-read spans)
+        and is the ``hits`` unit selector for id-driven calls
         (complete evidence units, zero half-sentence truncation by
         construction). Every id passes the caller's ACL individually.
         """
@@ -1784,7 +1803,11 @@ class ReadPipeline:
         if denied is not None:
             return denied
 
-        span_map: dict[int, dict[str, int]] = {}
+        # P2 #12: end=None enters the map as-is — a spans entry carrying only
+        # `start` resolves its end to the record's content length once the
+        # visible records are prefetched (the construction point cannot see
+        # content), matching the single-read default.
+        span_map: dict[int, dict[str, int | None]] = {}
         for key, span in (spans or {}).items():
             try:
                 mid = int(str(key))
@@ -1794,7 +1817,10 @@ class ReadPipeline:
                 try:
                     start = int(span.get("start", 0))
                     end_raw = span.get("end")
-                    span_map[mid] = {"start": start, "end": int(end_raw) if end_raw is not None else 0}
+                    span_map[mid] = {
+                        "start": start,
+                        "end": int(end_raw) if end_raw is not None else None,
+                    }
                 except (TypeError, ValueError):
                     continue
 
@@ -1816,10 +1842,23 @@ class ReadPipeline:
             elif content_mode == "full":
                 span = span_map.get(mid)
                 if (
-                    span is not None and span["end"] > span["start"]
+                    span is not None and (span["end"] is None or span["end"] > span["start"])
                     and span["start"] < len(str(record.get("content") or ""))
                 ):
                     unit_needed.append((mid, int(record.get("version") or 1)))
+        # P2 #12 resolution point: deferred span ends ({"start": N} entries)
+        # resolve against the now-available content lengths. A start past the
+        # end keeps end > start (start+1) so the explicit-span semantics hold
+        # (empty window + span_past_end). Ids without a prefetched record
+        # keep a >start end — inert (reported not_found, never reaching a
+        # span consumer).
+        for mid, span_entry in span_map.items():
+            if span_entry["end"] is None:
+                record = prefetched.get(mid)
+                content_len = len(str((record or {}).get("content") or ""))
+                span_entry["end"] = (
+                    content_len if content_len > span_entry["start"] else span_entry["start"] + 1
+                )
         unit_rows_map: dict[int, list[dict[str, Any]]] = (
             self.db.evidence.text_unit_rows_for_ids(unit_needed) if unit_needed else {}
         )

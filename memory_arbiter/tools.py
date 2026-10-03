@@ -1871,10 +1871,15 @@ class MemoryTools:
                 return
             now = utc_now_iso()
             with self.db.write_transaction() as conn:
+                # P2 #16: CAS on status='pending' — a row the agent already
+                # decided between the SELECT above and this write (submit
+                # lands confirmed/dismissed) must keep that decision; the
+                # executemany form gets no rowcount per row, so skips are
+                # silent by design.
                 conn.executemany(
                     "UPDATE scan_queue SET status='expired', "
                     "decided_reason='resolved by move (subject left the pinned workspace)', "
-                    "decided_at=?, updated_at=? WHERE id=?",
+                    "decided_at=?, updated_at=? WHERE id=? AND status='pending'",
                     [(now, now, row_id) for row_id in stale_ids],
                 )
         except Exception:

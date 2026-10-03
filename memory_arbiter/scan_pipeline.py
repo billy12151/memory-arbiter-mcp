@@ -277,6 +277,16 @@ class ScanPipeline:
                         slow_lane_done += 1
             except Exception:
                 pass
+        # 0.17.1 P2 #14: the slow lane's increments used to land only in the
+        # local counters (visible in this kick's receipt but never in the
+        # persisted state table) — merge them before the single record call
+        # below so the state table's round counters include slow-lane work.
+        state.update({
+            "queued": queued,
+            "auto_rejected": auto_rejected,
+            "internal_found": internal_found,
+            "machine_cleared": machine_cleared,
+        })
         self.db.meta.record_scan_pipeline_state(state)
         # C5 pacing record + audit line: the same doctor faces the legacy
         # scan path uses (broken-chain alarm, scan_required/scan_stale).
@@ -769,7 +779,10 @@ class ScanPipeline:
         vectors = self.db.memories.all_summary_vectors()
         if not vectors:
             return 0
-        ids = [mid for mid in sorted(vectors) if mid in set(processed_ids)]
+        # P2 #19: the membership set is built once — the per-id `in` check
+        # below runs over the whole sorted vector index.
+        processed = set(processed_ids)
+        ids = [mid for mid in sorted(vectors) if mid in processed]
         if not ids:
             return 0
         # The vote matrix still spans the WHOLE library: a mis-placed memory

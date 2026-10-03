@@ -421,3 +421,36 @@ def test_batch_read_hits_window_budget(tmp_path: Path) -> None:
         assert item["memory"]["content_chars"] > 0
         assert item["memory"]["hit_spans"]  # 标注保留
     assert "individually" in data["hint"]
+
+
+def test_start_only_span_defaults_to_content_length_across_interfaces(tmp_path: Path) -> None:
+    """P2 #12：{"start": N} 不带 end 一律读到内容末尾——单 read（产品面 + 直调）
+    与 batch spans 三接口行为一致；显式 start>end 拒绝不变。"""
+    tools = make_tools(tmp_path)
+    body = "第一段完整保留。" + "第二段从这里开始，直到结尾为止。"
+    mid = _write(tools, "start-only-span", body)
+    start = body.index("第二段")
+
+    single = tools.memory("read", {"memory_id": mid, "span": {"start": start}})
+    assert single.get("ok"), single
+    window = single["data"]["memory"]["content"]
+    assert window == body[start:]
+
+    direct = tools.memory_get(memory_id=mid, span={"start": start})
+    assert direct.get("ok"), direct
+    assert direct["data"]["memory"]["content"] == window
+
+    batch = _batch_read(
+        tools, memory_ids=[mid], content_mode="full",
+        spans={str(mid): {"start": start}},
+    )
+    assert batch.get("ok"), batch
+    assert batch["data"]["results"][0]["memory"]["content"] == window
+
+    # explicit start>end still rejected (single read), past-end still refuses
+    bad = tools.memory("read", {"memory_id": mid, "span": {"start": 5, "end": 2}})
+    assert not bad.get("ok")
+    assert "0 <= start < end" in str(bad["data"].get("error"))
+    past_end = tools.memory("read", {"memory_id": mid, "span": {"start": len(body) + 5}})
+    assert not past_end.get("ok")
+    assert "past the end" in str(past_end["data"].get("error"))

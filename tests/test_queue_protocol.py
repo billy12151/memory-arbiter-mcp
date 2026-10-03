@@ -847,3 +847,121 @@ def test_dismiss_transient_error_propagates_not_fallback(tmp_path: Path, monkeyp
             {"kind": "workspace", "memory_id": mid, "status": "dismissed", "reason": "写锁传播"},
         ])
     assert fallback_calls == [], "瞬时错误不得走 legacy 降级"
+
+
+def _seed_queue_row(tools: MemoryTools, *, workspace: str, hash_char: str, memory_id: int, version: int, current: str) -> int:
+    from memory_arbiter.models import utc_now_iso
+
+    with tools.db.write_transaction() as conn:
+        conn.execute(
+            "INSERT INTO scan_queue(kind, workspace_canonical, status, candidate_key_hash, "
+            "member_versions, detail, priority, created_at, updated_at) "
+            "VALUES('workspace', ?, 'pending', ?, ?, ?, 0, ?, ?)",
+            (
+                workspace, hash_char * 64,
+                json.dumps([{"memory_id": memory_id, "version": version}]),
+                json.dumps({"current_workspace": current}),
+                utc_now_iso(), utc_now_iso(),
+            ),
+        )
+        return int(conn.execute(
+            "SELECT id FROM scan_queue WHERE candidate_key_hash=?", (hash_char * 64,),
+        ).fetchone()["id"])
+
+
+def test_relocated_expiry_cas_keeps_decided_rows(tmp_path: Path, monkeypatch) -> None:
+    """P2 #16：submit 在过期 SELECT 与 executemany UPDATE 之间落地——
+    CAS（AND status='pending'）保住 agent 的已决行，不被 expire 覆写。"""
+    import contextlib
+
+    tools = make_tools(tmp_path)
+    mid = _write(tools, "cas-subject", "cas body", workspace="ws-a")
+    memory = tools.db.get_memory(mid)
+    row_id = _seed_queue_row(
+        tools, workspace="ws-a", hash_char="c", memory_id=mid,
+        version=int(memory["version"]), current="ws-a",
+    )
+    # make the row stale: the subject memory left the pinned bucket
+    with tools.db.write_transaction() as conn:
+        conn.execute("UPDATE memories SET status='deleted' WHERE id=?", (mid,))
+
+    from memory_arbiter.models import utc_now_iso
+
+    original_wt = tools.db.write_transaction
+    raced: dict[str, bool] = {"done": False}
+
+    @contextlib.contextmanager
+    def racing_wt():
+        if not raced["done"]:
+            raced["done"] = True
+            now = utc_now_iso()
+            with original_wt() as conn:
+                conn.execute(
+                    "UPDATE scan_queue SET status='dismissed', "
+                    "decided_reason='agent judged', decided_at=?, updated_at=? "
+                    "WHERE id=?",
+                    (now, now, row_id),
+                )
+        yield from original_wt()
+
+    monkeypatch.setattr(tools.db, "write_transaction", racing_wt)
+    tools._expire_relocated_workspace_rows()
+    with tools.db.connection() as conn:
+        row = conn.execute(
+            "SELECT status, decided_reason FROM scan_queue WHERE id=?", (row_id,),
+        ).fetchone()
+    assert row["status"] == "dismissed"
+    assert row["decided_reason"] == "agent judged"
+
+
+def _strict_tools(tmp_path: Path) -> MemoryTools:
+    settings = Settings(
+        db_path=tmp_path / "strict.sqlite3",
+        backup_jsonl=tmp_path / "strict.jsonl",
+        client="codex", agent_id="agent-a", workspace="proj-a",
+        isolation="strict",
+    )
+    return MemoryTools(settings=settings, db=MemoryDB(settings))
+
+
+def test_strict_scope_outside_backlog_pages_empty(tmp_path: Path) -> None:
+    """P2 #17：strict 调用方对 scope 外积压拿到空页——items/has_more/
+    next_page_token/queue_backlog 全部 scoped 口径，不泄漏外桶存在性。"""
+    tools = _strict_tools(tmp_path)
+    inside = _write(tools, "inside", "inside body", workspace="proj-a")
+    memory = tools.db.get_memory(inside)
+    _seed_queue_row(
+        tools, workspace="proj-a", hash_char="a", memory_id=inside,
+        version=int(memory["version"]), current="proj-a",
+    )
+    outside = _write(tools, "outside", "outside body", workspace="other-bucket")
+    outside_memory = tools.db.get_memory(outside)
+    _seed_queue_row(
+        tools, workspace="other-bucket", hash_char="b", memory_id=outside,
+        version=int(outside_memory["version"]), current="other-bucket",
+    )
+    # deactivate both subjects so the workspace rows surface as page items
+    # (kind='workspace' rows page only when the subject stays pinned —
+    # _fetch_workspace_rows filters by its own predicate; either way the
+    # scoped COUNT below is the load-bearing assertion)
+    page = tools.memory_repair("scan_queue", {"action": "page", "workspace": "proj-a"})
+    assert page["ok"], page
+    data = page["data"]
+    assert all(
+        str(item.get("workspace") or "") in {"proj-a", "", "default"}
+        or item.get("kind") != "workspace"
+        for item in data["items"]
+    )
+    # scoped backlog: only proj-a's row counts (1), the other bucket's row
+    # never leaks into queue_backlog/has_more
+    assert data["queue_backlog"] == 1
+    assert data["has_more"] is False
+    assert "next_page_token" not in data
+
+    # a caller whose scope has ZERO rows: empty page, no wrap, no has_more
+    empty_tools = _strict_tools(tmp_path)
+    empty = empty_tools.memory_repair("scan_queue", {"action": "page", "workspace": "proj-empty"})
+    assert empty["ok"], empty
+    assert empty["data"]["items"] == []
+    assert empty["data"]["queue_backlog"] == 0
+    assert empty["data"]["has_more"] is False

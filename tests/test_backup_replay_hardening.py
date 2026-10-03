@@ -67,3 +67,22 @@ def test_replay_postprocess_is_instance_bound(tmp_path: Path) -> None:
     )
     assert isinstance(status, str) and isinstance(stages, dict)
     assert error_code is None and warnings == []
+
+
+def test_unreadable_backup_path_is_structured_not_bare(tmp_path: Path) -> None:
+    """P2 #18：backup 路径不可读（目录/权限）不再裸抛 OSError——inspect
+    转 ValueError，产品面 _forward 落结构化 ok=False。"""
+    from memory_arbiter.tools import MemoryTools
+
+    directory = tmp_path / "backup-dir"
+    directory.mkdir()
+    settings = Settings(
+        db_path=tmp_path / "memory.db",
+        backup_jsonl=directory,  # exists() is True, open("rb") raises IsADirectoryError
+        client="t",
+        agent_id="t",
+    )
+    tools = MemoryTools(settings=settings, db=MemoryDB(settings))
+    result = tools.memory_repair("replay_backup", {"dry_run": True})
+    assert result["ok"] is False
+    assert "backup replay file unavailable" in str(result["data"])

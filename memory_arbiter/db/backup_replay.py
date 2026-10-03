@@ -78,7 +78,14 @@ class BackupReplayStore:
         offset = max(0, int(offset))
         if not self.path.exists():
             return {"entries": [], "invalid_entries": [], "total": 0, "importable": 0, "already_replayed": 0, "conflicts": 0, "invalid": 0, "offset": offset, "next_offset": None, "has_more": False}
-        fh = self.path.open("rb")
+        # P2 #18: an unreadable backup path (directory, permissions, vanished
+        # between exists() and open) must degrade to a structured ValueError —
+        # the product surface's _forward catches it; a bare OSError would
+        # crash the tool call.
+        try:
+            fh = self.path.open("rb")
+        except OSError as exc:
+            raise ValueError(f"backup replay file unavailable: {exc}") from exc
         has_more = False
         line_number = 0
         try:
@@ -87,6 +94,8 @@ class BackupReplayStore:
                 fcntl.flock(fh.fileno(), fcntl.LOCK_SH)
             except ImportError:  # pragma: no cover
                 fcntl = None  # type: ignore[assignment]
+            except OSError as exc:
+                raise ValueError(f"backup replay file unavailable: {exc}") from exc
             while True:
                 raw_line, oversized = self._read_bounded_line(fh)
                 if not raw_line:

@@ -75,7 +75,6 @@ class QueueProtocol:
 
     def page(self, *, page_size: int = DEFAULT_PAGE_SIZE, page_token: int = 0, caller: Any = None) -> dict[str, Any]:
         self.db.internal_conflicts.expire_stale()
-        self._caller = caller
         scope = caller.scope_canonicals() if caller is not None and caller.isolation == "strict" else None
         page_size = max(1, min(int(page_size or DEFAULT_PAGE_SIZE), MAX_PAGE_SIZE))
         page_token = max(0, int(page_token or 0))
@@ -88,7 +87,7 @@ class QueueProtocol:
         for row in self._fetch_workspace_rows(page_token, scope):
             if len(items) >= page_size:
                 break
-            if not self._row_visible(row):
+            if not self._row_visible(row, caller):
                 continue
             items.append(self._workspace_item(row, meta_cache))
             # The cursor advances through workspace rows too: a page whose
@@ -111,7 +110,7 @@ class QueueProtocol:
             ):
                 if len(items) >= page_size:
                     break
-                if not self._member_visible(int(group["memory_id"])):
+                if not self._member_visible(int(group["memory_id"]), caller):
                     continue
                 items.append(self._internal_memory_item(group, meta_cache))
         if len(items) < page_size:
@@ -123,7 +122,7 @@ class QueueProtocol:
                     # the undisplayed group between pages forever (adversarial
                     # review repro #3).
                     break
-                if not all(self._row_visible(edge) for edge in group["pairs"]):
+                if not all(self._row_visible(edge, caller) for edge in group["pairs"]):
                     # Fail closed: hide the whole component from a caller who
                     # cannot read every member (matches conflict_detail).
                     continue
@@ -137,9 +136,13 @@ class QueueProtocol:
                 else:
                     items.append(self._group_item(group, meta_cache))
                     last_id = max(last_id, group["last_queue_id"])
-        remaining = self.db.scan_queue_backlog() + len(
-            self.db.internal_conflicts.list_pending(limit=10**6)
-        )
+        # P2 #17: remaining is the CALLER-SCOPED backlog. A strict caller must
+        # neither learn other buckets' pending counts (queue_backlog leaks
+        # existence) nor wrap/continue paging on rows it can never see — the
+        # scan_queue segment reuses the same workspace_canonical scope SQL as
+        # _fetch_conflict_rows; the internal segment applies the same scope by
+        # JOINing memories (one SQL, same pending predicate as list_pending).
+        remaining = self._scoped_backlog(scope)
         if not items and page_token > 0 and remaining > 0:
             # Cursor wrap-around: the pass advanced past every row but some
             # backlog remains (rows the caller skipped or failed to judge).
@@ -173,8 +176,8 @@ class QueueProtocol:
                 "(vote gate waived, audited, reported to the user — use sparingly)."
             ),
         }
-        # has_more: any backlog beyond what this page displayed — the queue
-        # backlog itself is authoritative (workspace/internal rows live in
+        # has_more: any SCOPED backlog beyond what this page displayed — the
+        # scoped backlog is authoritative (workspace/internal rows live in
         # separate tables and may not all fit this page).
         has_more = remaining > len(items[:page_size])
         if has_more:
@@ -192,6 +195,41 @@ class QueueProtocol:
 
         joined = ":".join(sorted(str(pair["candidate_key_hash"]) for pair in pairs))
         return hashlib.sha256(joined.encode()).hexdigest()[:16]
+
+    def _scoped_backlog(self, scope: Any = None) -> int:
+        """P2 #17: pending backlog in the caller's scope.
+
+        scope=None (none/weak callers) keeps the global caliber. Strict scope:
+        the scan_queue segment counts pending rows through the same
+        workspace_canonical scope SQL as _fetch_conflict_rows; the internal
+        segment JOINs memories and applies the identical pending predicate as
+        list_pending (version-current + active) plus the same scope — one SQL
+        each.
+        """
+        if scope is None:
+            return self.db.scan_queue_backlog() + len(
+                self.db.internal_conflicts.list_pending(limit=10**6)
+            )
+        try:
+            with self.db.connection() as conn:
+                queue_scope_sql, queue_params = self._scope_sql("workspace_canonical", scope)
+                queue_count = int(conn.execute(
+                    "SELECT COUNT(*) FROM scan_queue WHERE status='pending'"
+                    + (f" AND {queue_scope_sql}" if queue_scope_sql else ""),
+                    tuple(queue_params),
+                ).fetchone()[0])
+                mem_scope_sql, mem_params = self._scope_sql("m.workspace_canonical", scope)
+                internal_count = int(conn.execute(
+                    "SELECT COUNT(*) FROM internal_conflicts i "
+                    "JOIN memories m ON m.id=i.memory_id "
+                    "WHERE i.status='pending' AND m.version=i.memory_version "
+                    "AND m.status='active'"
+                    + (f" AND {mem_scope_sql}" if mem_scope_sql else ""),
+                    tuple(mem_params),
+                ).fetchone()[0])
+            return queue_count + internal_count
+        except Exception:
+            return 0
 
     def _fetch_conflict_rows(self, after_id: int, scope: Any = None) -> list[dict[str, Any]]:
         if not self.db.db_available:
@@ -274,17 +312,18 @@ class QueueProtocol:
             ),
         )
 
-    def _member_visible(self, memory_id: int) -> bool:
+    def _member_visible(self, memory_id: int, caller: Any = None) -> bool:
         """Strict-isolation fail-closed check (adversarial review #2): a
         member the caller cannot read takes its whole item off the page and
-        blocks its dispositions."""
-        if self._caller is None or self._caller.isolation != "strict":
+        blocks its dispositions. P2 #15: the caller is threaded through as a
+        parameter (no shared self._caller field left between page/submit)."""
+        if caller is None or caller.isolation != "strict":
             return True
-        return self._tools._get_memory_visible(int(memory_id), self._caller) is not None
+        return self._tools._get_memory_visible(int(memory_id), caller) is not None
 
-    def _row_visible(self, row: dict[str, Any]) -> bool:
+    def _row_visible(self, row: dict[str, Any], caller: Any = None) -> bool:
         return all(
-            self._member_visible(int(member["memory_id"]))
+            self._member_visible(int(member["memory_id"]), caller)
             for member in (row.get("member_versions") or [])
             if member.get("memory_id") is not None
         )
@@ -469,10 +508,9 @@ class QueueProtocol:
             return {"ok": False, "error": "decisions must be a non-empty list"}
         if len(decisions) > 200:
             return {"ok": False, "error": "at most 200 decisions per submission"}
-        self._caller = caller
         results: list[dict[str, Any]] = []
         for index, raw in enumerate(decisions):
-            results.append(self._submit_one(index, raw))
+            results.append(self._submit_one(index, raw, caller))
         handled = {"confirmed", "dismissed", "resolved", "skipped", "moved",
                    "protected_bucket_hint", "multi_family_hint",
                    # Terminal-for-this-decision states: the server did the
@@ -485,15 +523,17 @@ class QueueProtocol:
         return {
             "ok": ok,
             "results": results,
-            # 0.16.4 live-judgment review: same backlog semantics as page()
-            # (scan_queue rows + internal pending) — a mixed submission that
-            # just cleared internal rows must not report an unchanged number.
+            # 0.16.4 live-judgment review: backlog semantics — a mixed
+            # submission that just cleared internal rows must not report an
+            # unchanged number. Global caliber (P2 #17 scoped the PAGE's
+            # numbers; submit's caller mix makes a per-caller count here
+            # ambiguous, so it stays library-wide).
             "queue_backlog": self.db.scan_queue_backlog() + len(
                 self.db.internal_conflicts.list_pending(limit=10**6)
             ),
         }
 
-    def _submit_one(self, index: int, raw: Any) -> dict[str, Any]:
+    def _submit_one(self, index: int, raw: Any, caller: Any = None) -> dict[str, Any]:
         if not isinstance(raw, dict):
             return {"index": index, "outcome": "invalid_input", "error": "decision must be an object"}
         status = str(raw.get("status") or "").strip().lower()
@@ -512,7 +552,7 @@ class QueueProtocol:
             # Same fail-closed visibility rule as the memory-level channel:
             # no dispositions on rows whose memory the caller cannot read.
             row_memory = self.db.internal_conflicts.memory_id_of(int(internal_id))
-            if row_memory is None or not self._member_visible(row_memory):
+            if row_memory is None or not self._member_visible(row_memory, caller):
                 return {"index": index, "outcome": "not_found",
                         "error": "internal row not visible to this caller"}
             outcome = self.db.internal_conflicts.decide(
@@ -532,7 +572,7 @@ class QueueProtocol:
             if status not in {"dismissed", "resolved"}:
                 return {"index": index, "outcome": "invalid_input",
                         "error": "internal_memory decisions accept status dismissed|resolved"}
-            if not self._member_visible(memory_id):
+            if not self._member_visible(memory_id, caller):
                 # Same fail-closed visibility rule as the per-row channel.
                 return {"index": index, "outcome": "not_found", "memory_id": memory_id}
             pair_count = self.db.internal_conflicts.pending_pair_count(memory_id)
@@ -572,12 +612,12 @@ class QueueProtocol:
                     "error": "status must be confirmed|dismissed"}
         group_token = raw.get("group_token")
         if group_token and not raw.get("candidate_key_hash"):
-            return self._submit_group(index, str(group_token), status, reason, raw)
+            return self._submit_group(index, str(group_token), status, reason, raw, caller=caller)
         candidate_hash = str(raw.get("candidate_key_hash") or "")
         if len(candidate_hash) != 64:
             return {"index": index, "outcome": "invalid_input",
                     "error": "candidate_key_hash must be the 64-char hash from the queue page"}
-        return self._decide_row(index, candidate_hash, status, reason, raw)
+        return self._decide_row(index, candidate_hash, status, reason, raw, caller=caller)
 
     def _submit_workspace(
         self, index: int, status: str, reason: str, raw: dict[str, Any],
@@ -863,7 +903,7 @@ class QueueProtocol:
 
     def _submit_group(
         self, index: int, group_token: str, status: str, reason: str,
-        raw: dict[str, Any],
+        raw: dict[str, Any], *, caller: Any = None,
     ) -> dict[str, Any]:
         """Group-level dismissal (§6⑥): one entry suppresses every pair of
         the group. Confirms stay per-pair (each pair's slot/values differ)."""
@@ -925,7 +965,7 @@ class QueueProtocol:
         if not targets:
             return {"index": index, "outcome": "not_found", "group_token": group_token}
         results = [
-            self._decide_row(f"{index}.{i}", row["candidate_key_hash"], "dismissed", reason, {})
+            self._decide_row(f"{index}.{i}", row["candidate_key_hash"], "dismissed", reason, {}, caller=caller)
             for i, row in enumerate(targets)
         ]
         return {
@@ -935,7 +975,7 @@ class QueueProtocol:
 
     def _decide_row(
         self, index: Any, candidate_hash: str, status: str, reason: str,
-        raw: dict[str, Any],
+        raw: dict[str, Any], *, caller: Any = None,
     ) -> dict[str, Any]:
         row = self._queue_row(candidate_hash)
         if row is None:
@@ -946,7 +986,7 @@ class QueueProtocol:
                     "candidate_key_hash": candidate_hash}
         probe = dict(row)
         probe["member_versions"] = row["member_versions"] or []
-        if not self._row_visible(probe):
+        if not self._row_visible(probe, caller):
             # Fail closed under strict isolation: no dispositions on rows the
             # caller cannot fully read.
             return {"index": index, "outcome": "not_found",

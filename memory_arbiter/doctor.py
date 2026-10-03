@@ -342,16 +342,27 @@ def _c_conflicts_backlog(ctx: _DoctorCtx) -> Finding:
 
 def _c_semantic_judge_model(ctx: _DoctorCtx) -> Finding | None:
     """0.17.1: the judge is the mDeBERTa checkpoint. Checks, in order:
-    configured-but-missing checkpoint file, dependency availability (torch /
-    transformers — the ``mdeberta`` extra), the parent↔child label-protocol
-    echo when the backend is instantiated (pins the shared protocol constants
-    against a tampered/drifting child — the checkpoint's own class order has
-    no disk-side validation; verify LABELS against a re-trained ckpt
-    manually), and crash-breaker state. An unset ckpt means the
-    user opted out of write-time arbitration (not this check's business — the
-    degraded banner covers it)."""
+    enabled-without-ckpt (info — the silent-misconfig breaker, P2 #20),
+    configured-but-missing checkpoint file, the tokenizer/config model_dir
+    directory, dependency availability (torch / transformers — the
+    ``mdeberta`` extra), and the configured summary. Crash-breaker /
+    last-error visibility needs the live backend instance, which doctor has
+    no reference to (ctx carries conn+settings only). An unset ckpt with
+    semantic_conflict.enabled=false is an opt-out, not this check's business
+    (the degraded banner covers it)."""
     ckpt = ctx.settings.semantic_conflict_mdeberta_ckpt
     if ckpt is None:
+        if bool(getattr(ctx.settings, "semantic_conflict_enabled", False)):
+            # P2 #20: enabled without a checkpoint used to pass silently —
+            # the user believes arbitration is on while nothing runs.
+            return _finding(
+                "semantic.judge_model", True,
+                "semantic_conflict.enabled=true but mdeberta_ckpt is not "
+                "configured — write-time conflict arbitration will not run; "
+                "set semantic_conflict.mdeberta_ckpt (or disable "
+                "semantic_conflict.enabled)",
+                evidence={"enabled": True, "ckpt": None},
+            )
         return None
     if not ckpt.exists():
         return _finding(
@@ -360,6 +371,18 @@ def _c_semantic_judge_model(ctx: _DoctorCtx) -> Finding | None:
             "arbitration is disabled; download mdeberta-v4m_dual_v1.pt and set "
             "semantic_conflict.mdeberta_ckpt",
             evidence={"ckpt": str(ckpt)},
+        )
+    model_dir = ctx.settings.semantic_conflict_mdeberta_model_dir
+    if model_dir is not None and not Path(model_dir).is_dir():
+        # P2 #20: a configured model_dir that is not a directory means the
+        # tokenizer/config load inside the judge will fail at first use —
+        # surface it now instead of at write time.
+        return _finding(
+            "semantic.judge_model", False,
+            f"mdeberta model_dir is not a directory: {model_dir} — judge load "
+            "will fail; point semantic_conflict.mdeberta_model_dir at the "
+            "tokenizer/config directory",
+            evidence={"ckpt": str(ckpt), "model_dir": str(model_dir)},
         )
     try:
         import torch  # noqa: F401
@@ -380,7 +403,7 @@ def _c_semantic_judge_model(ctx: _DoctorCtx) -> Finding | None:
         f"mdeberta judge configured: {ckpt.name}",
         evidence={
             "ckpt": str(ckpt),
-            "model_dir": str(ctx.settings.semantic_conflict_mdeberta_model_dir or ""),
+            "model_dir": str(model_dir or ""),
             "notice_min_prob": ctx.settings.semantic_conflict_mdeberta_notice_min_prob,
             "batch_size": (
                 int(ctx.settings.semantic_conflict_mdeberta_batch)
