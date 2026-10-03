@@ -210,11 +210,24 @@ class ScanPipeline:
             for memory_id in ids:
                 if time.monotonic() - started > budget or processed >= max_memories:
                     break
-                outcome = self._process_memory(
-                    memory_id,
-                    suppression=suppression,
-                    neighbor_k=neighbor_k,
-                )
+                # 疑似#11（owner 2026-10-04 拍板）：单条隔离——一条稳定抛
+                # 异常的"毒记忆"不得永久卡死扫描循环（无它则每轮 kick 都
+                # 死在同一 id，后面的记忆永远扫不到）。失败条不 mark_scanned
+                # （水位不动，下轮重试）、不 processed（不抢预算）、日志可见。
+                try:
+                    outcome = self._process_memory(
+                        memory_id,
+                        suppression=suppression,
+                        neighbor_k=neighbor_k,
+                    )
+                except Exception:
+                    import logging
+
+                    logging.getLogger(__name__).exception(
+                        "scan kick: memory %s failed; skipping (watermark not advanced)",
+                        memory_id,
+                    )
+                    continue
                 version = outcome["version"]
                 if version is not None:
                     self.db.mark_scanned(memory_id, version)

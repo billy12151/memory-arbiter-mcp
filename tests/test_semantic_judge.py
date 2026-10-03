@@ -34,8 +34,8 @@ def _fake_child_target(conn, config):  # pragma: no cover - runs in child proces
             conn.send({
                 "ok": True,
                 "result": {
-                    "loaded": True, "labels": labels, "mechs": config["mechs"],
-                    "model_version": f"mdeberta-v4m:{config['sha8']}",
+                    "loaded": True, "labels": labels, "mechs": config.get("mechs", []),
+                    "model_version": f"mdeberta:{config['sha8']}",
                 },
             })
         while True:
@@ -100,7 +100,7 @@ def test_judge_pairs_batch_shapes_verdicts(tmp_path: Path) -> None:
         assert v.label == "conflict"
         assert set(v.probs) == set(SEMANTIC_MDEBERTA_LABELS)
         assert v.mechanism == "numeric_value"
-        assert v.model_version.startswith("mdeberta-v4m:")
+        assert v.model_version.startswith("mdeberta:")
         assert v.error is None
 
 

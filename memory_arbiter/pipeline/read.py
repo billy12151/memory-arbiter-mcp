@@ -165,7 +165,10 @@ def _unit_aligned_hits(
     content = str(memory.get("content") or "")
     hit_spans: list[dict[str, Any]] = [
         {
-            "text": str(row["text"]),
+            # 疑似#6（owner 2026-10-04 拍板：text=原文切片）：find 侧一致口径
+            # ——agent 按偏移回读原文得到的就是这段；行级化折叠文本（表格行
+            # 折叠形态）不再作为 text 返回。
+            "text": content[int(row["start_offset"]):int(row["end_offset"])],
             "start_offset": int(row["start_offset"]),
             "end_offset": int(row["end_offset"]),
             "unit_index": int(row["unit_index"]),

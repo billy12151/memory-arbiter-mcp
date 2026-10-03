@@ -566,8 +566,12 @@ class EvidencePipeline:
                         left, right, left_text, right_text, decision,
                         # 值=行文本（§3.4 快照原文形态，D1 双通道放行）；
                         # [:400] 与 A-cross 组装同构——超 _MAX_FIELD_CHARS
-                        # 的长行会让 escalate 在 intake 重新堵死
-                        left_text[:32], left_text[:400], right_text[:400],
+                        # 的长行会让 escalate 在 intake 重新堵死。
+                        # slot 方言统一（疑似#4，owner 2026-10-04 拍板）：
+                        # 与 A-cross 同用 12-hex pair anchor（可复现/定长/
+                        # 不泄内容；展示层已有 hex→左引文头的转换）
+                        _pair_diff_anchor(left_text, right_text),
+                        left_text[:400], right_text[:400],
                         reason=f"backlog_judged:{verdict.label}",
                         severity="normal" if outcome == "notice" else "info",
                         model_signal=_JudgePairView.signal(verdict),

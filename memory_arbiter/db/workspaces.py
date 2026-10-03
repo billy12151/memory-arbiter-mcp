@@ -1229,7 +1229,10 @@ class WorkspaceStore:
                 if sha_collision is not None:
                     return 0, [sha_collision]
                 cur = conn.execute(
-                    "UPDATE memories SET workspace_canonical = ? "
+                    # 疑似#9（owner 2026-10-04 拍板：换桶后要扫新桶冲突）：
+                    # rename 与 migrate 统一清 scan_watermark——被重指派到
+                    # 新桶的行须对新桶的既有内容做一轮冲突扫描。
+                    "UPDATE memories SET workspace_canonical = ?, scan_watermark = NULL "
                     "WHERE COALESCE(NULLIF(workspace_canonical, ''), workspace) = ?",
                     (new, old),
                 )

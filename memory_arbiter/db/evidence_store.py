@@ -486,7 +486,11 @@ class EvidenceStore:
     ) -> list[dict[str, Any]]:
         """KNN over row vectors (P2-2.4) — the conflict channel's candidate
         source. Identical rowid-IN pre-filter contract as EvidenceStore.knn
-        (k applies to the filtered set); candidates are short sentences or
+        (k applies to the filtered set — re-verified 2026-10-04 via EXPLAIN
+        QUERY PLAN + behavior probe on the current sqlite-vec: the IN list is
+        pushed into the vec0 index constraint `[...]`, filtered top-k differs
+        from unfiltered top-k; the plain JOIN form IS post-filter, never use
+        it); candidates are short sentences or
         header-folded table rows, so the mDeBERTa judge always sees clean
         short text. Default k=5 mirrors the write-time unit window
         (evidence.py).
