@@ -259,6 +259,12 @@ SEMANTIC_MAX_ROWS = 256
 # drain 后的 landed 向量——job_conn 快照对同相位发布必然不可见，不走 DB
 # KNN）。每行取最相似 k 邻居，n×k 对封顶（256 行 1280 对 vs n² 32640）。
 SEMANTIC_INTERNAL_SELF_KNN_K = 5
+# B3（owner 2026-10-03 拍板）：超长表格段豁免——单个表格段（kind=table_row
+# 且 row_index 连续）行数超过该值即整体不存行向量、不做内外冲突检测（各数
+# 各的：夹散文断段，段各自计数）。超长表=记录/台账，检测意义低而嵌入成本
+# ~10ms/行（6 万行≈10 分钟嵌入+180MB 向量垃圾，且污染 KNN 空间）。该表
+# 无行级召回（hits 不能命中表内行），摘要级召回不受影响。
+SEMANTIC_TABLE_ROW_EXEMPT = 100
 # 0.17.0 P2-3.4: candidate pair_score weights (order-only, never a verdict).
 # Base is the C4 subject/tags overlap; value features outrank topic
 # similarity because 98% of same-topic pairs are continuations, not

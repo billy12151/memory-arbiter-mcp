@@ -165,6 +165,53 @@ def _job_fair_deadline(semantic_worker: "SemanticConflictWorker", publish_done_a
     return wall
 
 
+
+def _giant_table_indexes(segments: "list[Any]") -> "set[int]":
+    """B3（owner 2026-10-03 拍板，方案 B3）：超长表格段的行索引集合。
+
+    段=kind=table_row 且 row_index 连续（rowseg 的 table_block 语义：夹散文
+    即断段、各数各的）；段行数 > SEMANTIC_TABLE_ROW_EXEMPT → 该段整体豁免
+    （不建行向量/不嵌入/不发布，不参与内外冲突检测）。subject 行不受影响。
+    供检测相（deterministic phase 的 streaming/batch 过滤点）与 index-only
+    路径（on_write=off / replay postprocess / conflict-apply edits）共用。
+    """
+    from ..constants import SEMANTIC_TABLE_ROW_EXEMPT
+
+    exempted: set[int] = set()
+    run: list[int] = []
+    prev_index: int | None = None
+    for seg in segments:
+        kind = str(getattr(seg, "kind", "sentence"))
+        idx = int(getattr(seg, "row_index", getattr(seg, "unit_index", 0)) or 0)
+        if kind != "table_row":
+            if len(run) > SEMANTIC_TABLE_ROW_EXEMPT:
+                exempted.update(run)
+            run = []
+            prev_index = None
+            continue
+        if run and idx == prev_index + 1:
+            run.append(idx)
+        else:
+            if len(run) > SEMANTIC_TABLE_ROW_EXEMPT:
+                exempted.update(run)
+            run = [idx]
+        prev_index = idx
+    if len(run) > SEMANTIC_TABLE_ROW_EXEMPT:
+        exempted.update(run)
+    return exempted
+
+
+def _filter_exempted_segments(segments: "list[Any]") -> "tuple[list[Any], int]":
+    indexes = _giant_table_indexes(segments)
+    if not indexes:
+        return list(segments), 0
+    kept = [
+        seg for seg in segments
+        if int(getattr(seg, "row_index", getattr(seg, "unit_index", 0)) or 0) not in indexes
+    ]
+    return kept, len(indexes)
+
+
 class _JudgeBatch:
     """0.17.1 (owner 拍板: 攒批进本版): collect judge inputs through a phase's
     gates first (closure / version drift / budget / deadline — the pre-judge
@@ -768,6 +815,10 @@ class EvidencePipeline:
         from ..rowseg import segment_rows
         phase_started = time.monotonic()
         segments = segment_rows(str(record.get("subject") or ""), content)
+        # B3：index-only 路径同样豁免超长表格段（与检测相共用 helper）——
+        # on_write=off / replay postprocess / conflict-apply edits 不得成为
+        # 巨表嵌入的后门。
+        segments, _exempted = _filter_exempted_segments(segments)
         results = embedder.embed_texts([segment.text for segment in segments], prefix=EMBED_PREFIX_STS)
         if time.monotonic() - phase_started > SEMANTIC_EMBED_PHASE_TIMEOUT_MS / 1000.0:
             # The llama call itself cannot be interrupted mid-flight; the cap
@@ -794,9 +845,13 @@ class EvidencePipeline:
                 and vec_state.get("target_space_id") == embedder.embedding_space_id
             ):
                 self.db.maybe_complete_space_rebuild(embedder.embedding_space_id)
-            return {"status": "indexed", "index_only": True,
-                    "row_count": int(published.get("row_count") or len(segments)),
-                    "notices_created": 0}
+            receipt = {"status": "indexed", "index_only": True,
+                       "row_count": int(published.get("row_count") or len(segments)),
+                       "notices_created": 0}
+            if _exempted:
+                # B3：豁免可见不静默（index-only 路径与检测相同口径）
+                receipt["table_rows_exempted"] = int(_exempted)
+            return receipt
         return {"status": "incomplete", "reason": f"publish_{published.get('outcome')}",
                 "index_only": True, "notices_created": 0}
 
@@ -1284,6 +1339,28 @@ class EvidencePipeline:
         # C7: kind rides the view so consumers can skip the subject row
         # (index participant, never a pair originator — C3 A+ guard).
         _SegView = namedtuple("_SegView", "text start_offset end_offset unit_index kind")
+        # B3 表格段豁免（owner 2026-10-03 拍板，方案 B3）：单一过滤点盖两条
+        # 路径——streaming 滤 pending_segments（不嵌入不发布不建 memory_row）；
+        # batch 滤读回行（新规则前入库的老表不再参与检测）。公共 helper 与
+        # index-only 路径共用（_giant_table_indexes）。
+        _exempted_total = 0
+        if pending_segments:
+            pending_segments, _n = _filter_exempted_segments(pending_segments)
+            _exempted_total += _n
+        elif row_vectors:
+            _kept_segs, _n = _filter_exempted_segments([seg for seg, _e in row_vectors])
+            if _n:
+                _kept_idx = {
+                    int(getattr(k, "row_index", getattr(k, "unit_index", 0)) or 0)
+                    for k in _kept_segs
+                }
+                row_vectors = [
+                    (seg, emb) for seg, emb in row_vectors
+                    if int(getattr(seg, "row_index", getattr(seg, "unit_index", 0)) or 0) in _kept_idx
+                ]
+                _exempted_total += _n
+        if _exempted_total:
+            ctx["table_rows_exempted"] = ctx.get("table_rows_exempted", 0) + _exempted_total
         paired: list[tuple[Any, Any]] = list(row_vectors) or [
             (seg, None) for seg in pending_segments
         ]
@@ -2180,6 +2257,9 @@ class EvidencePipeline:
         if ctx["rows_mode"]:
             result["rows_mode"] = True
             result["rows_examined"] = int(ctx["units_examined"])
+        if ctx.get("table_rows_exempted"):
+            # B3 豁免可见不静默
+            result["table_rows_exempted"] = int(ctx["table_rows_exempted"])
         if ctx.get("_internal_knn_ok") is False:
             # B2 fail-open 可见：无 numpy → 内部自查整体跳过（非静默）
             result["internal_skipped_no_numpy"] = True

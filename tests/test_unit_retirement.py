@@ -124,9 +124,9 @@ def test_streaming_publishes_full_rowset_under_detection_cap(tmp_path: Path) -> 
     monkeypatcher.setattr(constants, "SEMANTIC_INTERNAL_MAX_ROWS", 8)  # function-local import
     try:
         tools = tv.make_tools(tmp_path)
-        big = "| 服务 | 值 |\n| --- | --- |\n" + "".join(
-            f"| svc-{i:03d} | {i} |\n" for i in range(300)
-        )
+        # B3（owner 2026-10-03 拍板）后 300 行表格整体豁免不建行——本钉的
+        # 不变式是「检测帽不砍发布集」，对散文行同样成立，改用 300 句散文。
+        big = "\n".join(f"服务 svc-{i:03d} 的值为 {i}。" for i in range(300))
         w = tools.memory_write(content=big, subject="big table", tags=[])["data"]
         assert tools.wait_semantic_worker_drained(timeout=30)
     finally:
@@ -135,7 +135,7 @@ def test_streaming_publishes_full_rowset_under_detection_cap(tmp_path: Path) -> 
         total = conn.execute(
             "SELECT COUNT(*) FROM memory_row WHERE memory_id=?", (w["id"],)
         ).fetchone()[0]
-    # subject row + 300 table rows — every row published, cap or no cap.
+    # subject row + 300 prose rows — every row published, cap or no cap.
     assert total == 301, total
 
 

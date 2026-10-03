@@ -129,3 +129,76 @@ def test_no_numpy_marks_receipt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     receipt = tools._process_semantic_conflict_job(new["id"], tv._job_snapshot(tools, new["id"]))
     assert receipt.get("internal_skipped_no_numpy") is True
     assert receipt.get("internal_conflicts", 0) == 0
+
+
+def _table_content(rows: int) -> str:
+    lines = ["| 配置项 | 数值 |", "| --- | --- |"]
+    lines += [f"| 超时阈值{i} | {1000 + i}ms |" for i in range(rows)]
+    return "\n".join(lines)
+
+
+def _memory_row_count(tools, memory_id: int) -> int:
+    with tools.db.connection() as conn:
+        return conn.execute(
+            "SELECT count(*) FROM memory_row WHERE memory_id=?", (memory_id,)
+        ).fetchone()[0]
+
+
+def test_giant_table_exempted_from_row_index(tmp_path: Path) -> None:
+    """B3 行为钉：>100 行表格段不建行向量（仅 subject 行保留）。"""
+    tools = tv.make_tools(tmp_path, semantic_enabled=True)
+    tools.settings.semantic_conflict_on_write = "off"
+    new = tools.memory_write(
+        content=_table_content(120), subject="big table", tags=[], workspace="default",
+    )["data"]
+    assert tools.wait_semantic_worker_drained(timeout=10)
+    assert _memory_row_count(tools, new["id"]) == 1, "超 100 行表格不得建行向量（仅 subject 保留）"
+
+
+def test_mixed_memory_each_table_counts_own(tmp_path: Path) -> None:
+    """混合记忆行为钉：120 行表豁免、散文与小表照常索引（各数各的）。"""
+    tools = tv.make_tools(tmp_path, semantic_enabled=True)
+    tools.settings.semantic_conflict_on_write = "off"
+    content = (
+        _table_content(120)
+        + "\n压测超时阈值为 5000ms。\n压测超时阈值为 3000ms。\n散文三。\n散文四。\n散文五。"
+        + "\n" + _table_content(10)
+    )
+    new = tools.memory_write(content=content, subject="mixed", tags=[], workspace="default")["data"]
+    assert tools.wait_semantic_worker_drained(timeout=10)
+    n = _memory_row_count(tools, new["id"])
+    # subject + 5 散文 + 小表残余（短单元格可能被 ROW_MIN_CHARS 折掉部分）——
+    # 豁免大表后基数 6~15，且绝无 120 大行
+    assert 6 <= n <= 15, f"散文与小表行必须照常索引: {n}"
+
+
+def test_small_table_still_indexed(tmp_path: Path) -> None:
+    """≤100 行表格段照常嵌入（豁免不误伤）。"""
+    tools = tv.make_tools(tmp_path, semantic_enabled=True)
+    tools.settings.semantic_conflict_on_write = "off"
+    new = tools.memory_write(
+        content=_table_content(100), subject="ok table", tags=[], workspace="default",
+    )["data"]
+    assert tools.wait_semantic_worker_drained(timeout=10)
+    assert _memory_row_count(tools, new["id"]) >= 90, "≤100 表格行必须照常索引（短单元格折损余量）"
+
+
+def test_giant_table_filter_pure() -> None:
+    """B3 纯函数钉：段聚合按 row_index 连续、各数各的、阈值边界。"""
+    from memory_arbiter.pipeline.evidence import _filter_exempted_segments
+    from memory_arbiter.rowseg import segment_rows
+
+    # 120 行表 → 120 豁免（subject 保留）
+    segs = segment_rows("s", _table_content(120))
+    kept, n = _filter_exempted_segments(segs)
+    assert n == 120
+    assert all(str(getattr(k, "kind", "")) != "table_row" for k in kept)
+
+    # 100 行表 → 零豁免
+    _k, n100 = _filter_exempted_segments(segment_rows("s", _table_content(100)))
+    assert n100 == 0
+
+    # 夹散文断段各数各的：120 表 + 一句散文 + 80 表 → 只豁免 120 段
+    content = _table_content(120) + "\n中间一句散文注释。\n" + _table_content(80)
+    _k, n_split = _filter_exempted_segments(segment_rows("s", content))
+    assert n_split == 120, f"断段后 80 行段不得豁免: {n_split}"
