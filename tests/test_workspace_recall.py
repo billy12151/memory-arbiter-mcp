@@ -977,7 +977,7 @@ def strict_admission_make_tools(
         # modules that read it at call time.
         monkeypatch.setattr("memory_arbiter.tools.WORKSPACE_RECALL_ADMISSION", False)
         monkeypatch.setattr(
-            "memory_arbiter.pipeline.operations.WORKSPACE_RECALL_ADMISSION", False,
+            "memory_arbiter.pipeline._ops_status.WORKSPACE_RECALL_ADMISSION", False,
         )
     model = tmp_path / "fake.gguf"
     model.write_bytes(b"fake")
