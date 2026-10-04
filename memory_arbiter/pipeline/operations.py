@@ -608,24 +608,32 @@ class OperationsPipeline:
     def memory_rename_workspace_canonical(
         self, old: str, new: str, reason: str | None = None, **_: Any,
     ) -> dict[str, Any]:
-        """Rename a canonical workspace and maintain internal forwarding."""
-        updated, warnings = self.db.rename_workspace_canonical(old, new)
-        if not warnings:
+        """Rename a canonical workspace and maintain internal forwarding.
+
+        A5（0.17.1 修复批）：审计与 ok 以 ``committed``（事务是否越过前置
+        守卫并提交）为准，不再用 ``not warnings``——repoint 警告形态下
+        UPDATE 已提交，旧口径会同时报失败且零审计（实测：库内已改名、
+        响应 renamed=False、审计 0 行；agent 会重试）。
+        """
+        updated, warnings, committed = self.db.rename_workspace_canonical(old, new)
+        if committed:
             # P2 #7: bucket-level reason lands in governance_audit (additive
             # trail; normalize_audit consumers never see these rows).
+            # A5: 无条件落库（已提交即有痕），warnings 一并入 detail。
             self.db.audit.record_governance_action(
                 "rename_workspace",
                 reason,
-                {"old_canonical": old, "new_canonical": new, "memories_updated": updated},
+                {"old_canonical": old, "new_canonical": new,
+                 "memories_updated": updated, "warnings": list(warnings)},
             )
         return self.db.state.response(
             {
-                "renamed": not warnings,
+                "renamed": committed,
                 "old": old,
                 "new": new,
                 "memories_updated": updated,
             },
-            ok=not warnings, extra_warnings=warnings,
+            ok=committed, extra_warnings=warnings,
         )
 
     def memory_migrate_workspace(
@@ -634,11 +642,13 @@ class OperationsPipeline:
         """Merge one workspace into another and maintain internal forwarding.
 
         `from`/`to` are reserved words so they arrive via **payload.
+
+        A5（0.17.1 修复批）：同 rename——``committed`` 判定 ok 与审计。
         """
         from_ws = str(payload.get("from") or "")
         to_ws = str(payload.get("to") or "")
         embedder, ensure_warnings = self._ensure_active_embedder()
-        updated, warnings = self.db.migrate_workspace(
+        updated, warnings, committed = self.db.migrate_workspace(
             from_ws, to_ws, embedder=embedder,
         )
         vector_publish_pending = any("workspace canonical vector publish failed" in warning for warning in warnings)
@@ -646,16 +656,18 @@ class OperationsPipeline:
             warning for warning in warnings
             if "workspace canonical vector publish failed" not in warning
         ]
-        if not operation_warnings:
+        if committed:
             # P2 #7: same governance trail as rename (migration committed;
             # vector-publication degradation is not a migration failure).
+            # A5: 无条件落库（已提交即有痕），warnings 一并入 detail。
             self.db.audit.record_governance_action(
                 "migrate_workspace",
                 reason,
-                {"from": from_ws, "to": to_ws, "memories_updated": updated},
+                {"from": from_ws, "to": to_ws, "memories_updated": updated,
+                 "warnings": list(operation_warnings)},
             )
         data: dict[str, Any] = {
-            "migrated": not operation_warnings,
+            "migrated": committed,
             "from": from_ws,
             "to": to_ws,
             "memories_updated": updated,
@@ -671,7 +683,7 @@ class OperationsPipeline:
         # indexing, not a rollback of the completed workspace migration.
         return self.db.state.response(
             data,
-            ok=not operation_warnings,
+            ok=committed,
             extra_warnings=list(ensure_warnings) + list(warnings),
         )
 

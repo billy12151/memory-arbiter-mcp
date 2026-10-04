@@ -1973,10 +1973,10 @@ def test_rename_refuses_default_in_both_directions(tmp_path, term):
     tools = default_insulation_make_tools(tmp_path)
     _default_insulation_write(tools, "projX memory", "projX")
 
-    updated, warnings = tools.db.rename_workspace_canonical("projX", term)
+    updated, warnings, _committed = tools.db.rename_workspace_canonical("projX", term)
     assert updated == 0
     assert warnings and "reserved" in warnings[0]
-    updated, warnings = tools.db.rename_workspace_canonical(term, "projY")
+    updated, warnings, _committed = tools.db.rename_workspace_canonical(term, "projY")
     assert updated == 0
     assert warnings and "reserved" in warnings[0]
 
@@ -2018,9 +2018,9 @@ def test_removed_pairwise_actions_and_internal_decisions_never_touch_default(tmp
 def test_migrate_refuses_default_in_both_directions(tmp_path):
     tools = default_insulation_make_tools(tmp_path)
     _default_insulation_write(tools, "projX memory", "projX")
-    updated, warnings = tools.db.migrate_workspace("projX", "default")
+    updated, warnings, _committed = tools.db.migrate_workspace("projX", "default")
     assert updated == 0 and warnings
-    updated, warnings = tools.db.migrate_workspace("默认", "projX")
+    updated, warnings, _committed = tools.db.migrate_workspace("默认", "projX")
     assert updated == 0 and warnings
 
 

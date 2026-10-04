@@ -1176,23 +1176,31 @@ class WorkspaceStore:
 
     def rename_workspace_canonical(
         self, old: str, new: str,
-    ) -> tuple[int, list[str]]:
-        """Rename or merge a canonical and keep old-name forwarding stable."""
+    ) -> tuple[int, list[str], bool]:
+        """Rename or merge a canonical and keep old-name forwarding stable.
+
+        A5（0.17.1 修复批）：返回第三元素 ``committed`` —— 事务是否已越过
+        全部前置守卫并提交（含 no-op 与空源桶：它们同样"已处理"）。调用方
+        （operations）据此落治理审计与判定响应 ok：此前以 ``not warnings``
+        推断，repoint 警告形态（UPDATE 已提交）会同时报失败且无审计
+        （产品面实测：库内已改名、响应 renamed=False、审计 0 行）。
+        """
         if not self._db_available or not self.state.sqlite_writable:
-            return 0, ["SQLite write unavailable; rename skipped."]
+            return 0, ["SQLite write unavailable; rename skipped."], False
         old = _coerce_ws(old)
         new = _coerce_ws(new)
         if not old or not new:
-            return 0, ["rename requires non-empty old and new canonical."]
+            return 0, ["rename requires non-empty old and new canonical."], False
         # renaming into or out of default would merge the global pool
         # with one project — refuse in both directions.
         if is_default_workspace_term(old) or is_default_workspace_term(new):
             return 0, [
                 "default is a reserved global pool and cannot be merged in either "
                 "direction; rename requires two non-default workspace names."
-            ]
+            ], False
         if old == new:
-            return 0, []
+            # no-op：无写入但"已处理"（保持既有审计行为：no-op 也落一行）。
+            return 0, [], True
         # Destination orthography: when `new` is a mechanical variant of an
         # already-registered canonical other than `old`, rename into the
         # registered spelling. The verbatim branch would otherwise
@@ -1213,7 +1221,7 @@ class WorkspaceStore:
                 return 0, [
                     "default is a reserved global pool and cannot be merged in either "
                     "direction; rename requires two non-default workspace names."
-                ]
+                ], False
         now = utc_now_iso()
         try:
             # Serialize against migrate/normalize with the same advisory flock
@@ -1221,13 +1229,13 @@ class WorkspaceStore:
             with database_startup_lock(self.settings.db_path), self.write_transaction() as conn:
                 competing = self._competing_move_warning_on_conn(conn, old, new)
                 if competing is not None:
-                    return 0, competing
+                    return 0, competing, False
                 collision = self._conflict_slot_collision_warning_on_conn(conn, old, new)
                 if collision is not None:
-                    return 0, collision
+                    return 0, collision, False
                 sha_collision = self._content_sha_collision_warning_on_conn(conn, new, from_ws=old)
                 if sha_collision is not None:
-                    return 0, [sha_collision]
+                    return 0, [sha_collision], False
                 cur = conn.execute(
                     # 疑似#9（owner 2026-10-04 拍板：换桶后要扫新桶冲突）：
                     # rename 与 migrate 统一清 scan_watermark——被重指派到
@@ -1280,7 +1288,7 @@ class WorkspaceStore:
                         "DELETE FROM workspace_aliases WHERE alias_workspace=? AND canonical=?",
                         (new_key, new),
                     )
-                    return updated, repoint_warnings
+                    return updated, repoint_warnings, True
                 repoint_warnings = self._repoint_workspace_targets_on_conn(
                     conn, old, new, exclude_aliases=(fwd_key, new_key),
                 )
@@ -1295,15 +1303,15 @@ class WorkspaceStore:
                     (fwd_key, old),
                 )
                 self._install_workspace_redirect_on_conn(conn, old, new)
-            return updated, repoint_warnings
+            return updated, repoint_warnings, True
         except OSError as exc:
             # The advisory flock itself is unavailable (e.g. <db>.startup.lock
             # is a directory, or the database directory is read-only) — report
             # a structured warning like normalize does instead of letting the
             # OSError escape.
-            return 0, [f"workspace migration lock unavailable: {exc}"]
+            return 0, [f"workspace migration lock unavailable: {exc}"], False
         except sqlite3.Error as exc:
-            return 0, [f"rename_workspace_canonical failed: {exc}"]
+            return 0, [f"rename_workspace_canonical failed: {exc}"], False
 
     @staticmethod
     def _merge_workspace_core_on_conn(
@@ -1313,7 +1321,7 @@ class WorkspaceStore:
         *,
         to_embedding: list[float] | None = None,
         db: "MemoryDB | None" = None,
-    ) -> tuple[int, list[str]]:
+    ) -> tuple[int, list[str], bool]:
         """Merge canonical ``from_ws`` into ``to_ws`` on an open write connection.
 
         Full merge suite shared by ``migrate_workspace`` and
@@ -1325,6 +1333,11 @@ class WorkspaceStore:
         loser→winner redirect. The caller holds the write transaction (and the
         startup flock); guards such as default-insulation or the competing-move
         check stay with the caller.
+
+        A5（0.17.1 修复批）：第三元素 ``committed``——本函数自己的两道前置
+        守卫（slot/sha 冲突）也在 UPDATE 之前 return，故它们必须报
+        committed=False（此前调用方以 not warnings 推断，这两条恰好一致；
+        A5 改为显式返回，语义不再依赖警告文案）。
         """
         warnings: list[str] = []
         # Guard shared with rename: a slot collision would abort the bulk
@@ -1332,12 +1345,12 @@ class WorkspaceStore:
         # would fabricate a triage decision — refuse instead.
         collision = WorkspaceStore._conflict_slot_collision_warning_on_conn(conn, from_ws, to_ws)
         if collision is not None:
-            return 0, collision
+            return 0, collision, False
         sha_collision = WorkspaceStore._content_sha_collision_warning_on_conn(
             conn, to_ws, from_ws=from_ws,
         )
         if sha_collision is not None:
-            return 0, [sha_collision]
+            return 0, [sha_collision], False
         alias_key = _normalize_alias_key(from_ws)
         to_key = _normalize_alias_key(to_ws)
         cur = conn.execute(
@@ -1413,27 +1426,32 @@ class WorkspaceStore:
             (alias_key, from_ws),
         )
         WorkspaceStore._install_workspace_redirect_on_conn(conn, from_ws, to_ws)
-        return updated, warnings
+        return updated, warnings, True
 
     def migrate_workspace(
         self, from_ws: str, to_ws: str, *, embedder: Any = None,
-    ) -> tuple[int, list[str]]:
-        """Merge one canonical into another and keep old-name forwarding stable."""
+    ) -> tuple[int, list[str], bool]:
+        """Merge one canonical into another and keep old-name forwarding stable.
+
+        A5（0.17.1 修复批）：第三元素 ``committed`` 同 rename——事务已越过
+        前置守卫并提交（含 no-op/自折叠；空源桶同样合法 committed=True，
+        它仍会删 loser canonical 行并装 redirect）。
+        """
         if not self._db_available or not self.state.sqlite_writable:
-            return 0, ["SQLite write unavailable; migrate skipped."]
+            return 0, ["SQLite write unavailable; migrate skipped."], False
         from_ws = _coerce_ws(from_ws)
         to_ws = _coerce_ws(to_ws)
         if not from_ws or not to_ws:
-            return 0, ["migrate requires non-empty from and to workspace."]
+            return 0, ["migrate requires non-empty from and to workspace."], False
         # migrate is a merge-into path like rename; default stays
         # reserved in both directions.
         if is_default_workspace_term(from_ws) or is_default_workspace_term(to_ws):
             return 0, [
                 "default is a reserved global pool and cannot be merged in either "
                 "direction; migrate requires two non-default workspace names."
-            ]
+            ], False
         if from_ws == to_ws:
-            return 0, []
+            return 0, [], True
         # Destination orthography: when the destination is a mechanical variant
         # of an already-registered canonical, merge into the registered
         # spelling. Re-pointing memories to the verbatim variant while the
@@ -1452,12 +1470,12 @@ class WorkspaceStore:
                 return 0, [
                     "default is a reserved global pool and cannot be merged in either "
                     "direction; migrate requires two non-default workspace names."
-                ]
+                ], False
             if from_ws == to_ws:
                 # migrate('AgentLane', 'agent-lane') folds the destination back
                 # onto the source: a self-merge no-op (executing it would
                 # delete the winner canonical row).
-                return 0, []
+                return 0, [], True
         # Embedding for the destination canonical, computed outside the txn.
         to_embedding = None
         if embedder is not None and self.state.sqlite_vec_available:
@@ -1472,17 +1490,17 @@ class WorkspaceStore:
             with database_startup_lock(self.settings.db_path), self.write_transaction() as conn:
                 competing = self._competing_move_warning_on_conn(conn, from_ws, to_ws)
                 if competing is not None:
-                    return 0, competing
-                updated, publish_warnings = self._merge_workspace_core_on_conn(
+                    return 0, competing, False
+                updated, publish_warnings, merged = self._merge_workspace_core_on_conn(
                     conn, from_ws, to_ws, to_embedding=to_embedding, db=self._db,
                 )
-            return updated, publish_warnings
+            return updated, publish_warnings, merged
         except OSError as exc:
             # Same advisory-flock failure mode as rename/normalize: report a
             # structured warning instead of letting the OSError escape.
-            return 0, [f"workspace migration lock unavailable: {exc}"]
+            return 0, [f"workspace migration lock unavailable: {exc}"], False
         except sqlite3.Error as exc:
-            return 0, [f"migrate_workspace failed: {exc}"]
+            return 0, [f"migrate_workspace failed: {exc}"], False
 
     def normalize_workspace_canonicals(self, *, dry_run: bool = True) -> dict[str, Any]:
         """Fold registered spelling variants of one canonical into its first-seen row.
@@ -1708,7 +1726,7 @@ class WorkspaceStore:
                 )
             for loser in losers:
                 if execute:
-                    updated, merge_warnings = self._merge_workspace_core_on_conn(
+                    updated, merge_warnings, _merged = self._merge_workspace_core_on_conn(
                         conn, loser, winner, db=self._db,
                     )
                     result["warnings"].extend(merge_warnings)

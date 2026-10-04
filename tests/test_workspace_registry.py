@@ -408,7 +408,7 @@ def test_migrate_folds_destination_onto_registered_mechanical_twin(tmp_path: Pat
     winner_memory = write(tools, "AgentLane", "winner fact")
     first = write(tools, "old-ws", "old fact one")
     second = write(tools, "old-ws", "old fact two")
-    updated, warnings = tools.db.workspaces.migrate_workspace("old-ws", "agent-lane")
+    updated, warnings, _committed = tools.db.workspaces.migrate_workspace("old-ws", "agent-lane")
     assert warnings == []
     assert updated == 2
     # Every memory lands on the registered spelling; the verbatim variant is
@@ -427,7 +427,7 @@ def test_migrate_onto_own_mechanical_twin_is_noop(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     register(tools, "AgentLane")
     memory_id = write(tools, "AgentLane", "winner fact")
-    updated, warnings = tools.db.workspaces.migrate_workspace("AgentLane", "agent-lane")
+    updated, warnings, _committed = tools.db.workspaces.migrate_workspace("AgentLane", "agent-lane")
     assert (updated, warnings) == (0, [])
     # The winner row and its data are intact; no variant registered, no rows.
     assert canonical_names(tools) == ["AgentLane"]
@@ -460,7 +460,7 @@ def test_migrate_into_target_with_existing_vector_keeps_it(tmp_path: Path) -> No
     assert target_row is not None and target_row["vector_id"] is not None
 
     write(tools, "source-ws", "old fact")
-    updated, warnings = tools.db.workspaces.migrate_workspace(
+    updated, warnings, _committed = tools.db.workspaces.migrate_workspace(
         "source-ws", "target-ws", embedder=Embedder(),
     )
     assert updated == 1
@@ -479,7 +479,7 @@ def test_rename_folds_destination_onto_registered_mechanical_twin(tmp_path: Path
     winner_memory = write(tools, "AgentLane", "winner fact")
     first = write(tools, "old-ws", "old fact one")
     second = write(tools, "old-ws", "old fact two")
-    updated, warnings = tools.db.workspaces.rename_workspace_canonical("old-ws", "agent-lane")
+    updated, warnings, _committed = tools.db.workspaces.rename_workspace_canonical("old-ws", "agent-lane")
     assert warnings == []
     assert updated == 2
     canonicals = memory_canonicals(tools)
@@ -498,7 +498,7 @@ def test_rename_onto_own_mechanical_twin_stays_a_spelling_rename(tmp_path: Path)
     # case-only rename contract).
     tools = make_tools(tmp_path)
     memory_id = write(tools, "ProjectX")
-    updated, warnings = tools.db.workspaces.rename_workspace_canonical("ProjectX", "projectx")
+    updated, warnings, _committed = tools.db.workspaces.rename_workspace_canonical("ProjectX", "projectx")
     assert warnings == []
     assert updated == 1
     assert canonical_names(tools) == ["projectx"]
@@ -641,13 +641,13 @@ def test_rename_and_migrate_report_unavailable_startup_lock(tmp_path: Path) -> N
     lock_path = Path(str(tools.settings.db_path) + ".startup.lock")
     lock_path.unlink()  # MemoryDB startup created the regular lock file
     lock_path.mkdir()
-    renamed, rename_warnings = tools.db.workspaces.rename_workspace_canonical(
+    renamed, rename_warnings, _rc = tools.db.workspaces.rename_workspace_canonical(
         "old-ws", "agent-lane",
     )
     assert renamed == 0
     assert len(rename_warnings) == 1
     assert "workspace migration lock unavailable" in rename_warnings[0]
-    migrated, migrate_warnings = tools.db.workspaces.migrate_workspace(
+    migrated, migrate_warnings, _mc = tools.db.workspaces.migrate_workspace(
         "old-ws", "agent-lane",
     )
     assert migrated == 0
@@ -2290,7 +2290,7 @@ def test_migrate_drops_twin_contradicting_rejection_with_warning(tmp_path):
     register(t, "OldProj", "agent-lane")
     # 跨身份合法 rejected（agent_lane ↛ OldProj，G 允许创建）
     _insert_legacy_rejected_row(t, "agent_lane", "OldProj")
-    updated, warnings = db.workspaces.migrate_workspace("OldProj", "agent-lane")
+    updated, warnings, _committed = db.workspaces.migrate_workspace("OldProj", "agent-lane")
     assert updated >= 0
     assert any("dropped while repointing" in w and "spelling variant" in w for w in warnings), warnings
     # 行已丢弃（不再存在会咬合的孪生 rejected），折叠语义恢复
@@ -2299,7 +2299,7 @@ def test_migrate_drops_twin_contradicting_rejection_with_warning(tmp_path):
     assert r["canonical"] == "agent-lane"
     # 非孪生 rejected 行照常跟随迁移
     _insert_legacy_rejected_row(t, "unrelated", "agent-lane")
-    _u2, w2 = db.workspaces.migrate_workspace("agent-lane", "MemoryBank")
+    _u2, w2, _c2 = db.workspaces.migrate_workspace("agent-lane", "MemoryBank")
     assert not any("dropped while repointing" in w for w in w2), w2
     with db.connection() as conn:
         rows = [

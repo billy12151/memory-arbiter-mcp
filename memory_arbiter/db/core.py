@@ -373,12 +373,12 @@ class MemoryDB:
 
     def rename_workspace_canonical(
         self, old: str, new: str,
-    ) -> tuple[int, list[str]]:
+    ) -> tuple[int, list[str], bool]:
         return self.workspaces.rename_workspace_canonical(old, new)
 
     def migrate_workspace(
         self, from_ws: str, to_ws: str, *, embedder: Any = None,
-    ) -> tuple[int, list[str]]:
+    ) -> tuple[int, list[str], bool]:
         return self.workspaces.migrate_workspace(from_ws, to_ws, embedder=embedder)
 
     def prepare_workspace_canonical_embedding(
