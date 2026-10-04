@@ -770,6 +770,49 @@ def _c_config_warnings(ctx: _DoctorCtx) -> Finding | None:
     return _finding("config.warnings", False, "; ".join(ctx.settings.config_warnings))
 
 
+def _c_scan_poison(ctx: _DoctorCtx) -> Finding | None:
+    """A4（0.17.1 修复批）：达上界的毒记忆可见（R3 指出方案 §A4-b/T5 未实现）。
+
+    失败条不推进水位（覆盖不完整），此前只有 kick 回执的 ``poison_skipped``
+    可见——没有主动巡检面。读轮状态 ``scan_pipeline_state.poison_failures``
+    （跨 kick 累计，R3/R4 建议随轮状态而非 migration_state per-id 键）。
+    无失败时返回 None（不新增 finding）。
+    """
+    import json as _json
+
+    try:
+        row = ctx.conn.execute(
+            "SELECT value FROM migration_state WHERE key='scan_pipeline_state'"
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None or not row[0]:
+        return None
+    try:
+        state = _json.loads(str(row[0]))
+    except (TypeError, ValueError):
+        return None
+    failures = state.get("poison_failures") if isinstance(state, dict) else None
+    if not isinstance(failures, dict) or not failures:
+        return None
+    from .constants import SCAN_POISON_MAX_FAILURES as threshold
+    skipped = sorted(
+        int(mid) for mid, count in failures.items()
+        if int(count) >= threshold
+    )
+    if not skipped:
+        return None
+    return _finding(
+        "scan.poison", False,
+        f"{len(skipped)} memory(ies) failed scanning {threshold}+ times "
+        f"(watermark not advanced, coverage incomplete): "
+        + ", ".join(f"#{mid}" for mid in skipped[:10])
+        + (" …" if len(skipped) > 10 else "")
+        + " — fix the data or move/retire the row; the scan round stays incomplete until then",
+        evidence={"poison_skipped": skipped, "failures": failures},
+    )
+
+
 def _c_additive_incomplete(ctx: _DoctorCtx) -> Finding | None:
     """B3（0.17.1 修复批）：additive 的 vec 表 deferred 可见。
 
@@ -833,6 +876,7 @@ _CHECKS: tuple[_Check, ...] = (
     # B3（0.17.1 修复批）：追加在末尾——干净库不出现（None），不影响
     # console_static 的 findings.slice(0, 6) 与既有 golden 顺序。
     _c_additive_incomplete,
+    _c_scan_poison,
 )
 
 

@@ -158,6 +158,13 @@ class WorkspaceStore:
         if not embedding:
             return
 
+        # A9 补漏：保护桶变体不得在此注册（该函数是 boot/backfill 路径上的
+        # 注册点，R3 对码实证遗漏——它会在 canonical 未注册时 INSERT 一行）。
+        from ..twin_redirect import protected_bucket_variant
+
+        if protected_bucket_variant(canonical):
+            return
+
         try:
             with self.write_transaction() as conn:
                 conn.execute(
@@ -1877,8 +1884,7 @@ class WorkspaceStore:
         precomputed_embedding: list[float] | None = None,
     ) -> tuple[bool, list[str]]:
         canonical = _coerce_ws(canonical)
-        if not canonical:
-            return False, ["canonical must be a non-empty workspace string."]
+        if not canonical:            return False, ["canonical must be a non-empty workspace string."]
         current = conn.execute(
             "SELECT COALESCE(NULLIF(workspace_canonical,''),workspace) AS bucket "
             "FROM memories WHERE id = ?",
@@ -1900,6 +1906,16 @@ class WorkspaceStore:
                 conn, [int(memory_id)],
                 reason=f"canonical reassignment -> {canonical!r}",
             )
+        # A9 补漏（R3 对码实证）：搬运路径（set canonical / move by id）此前
+        # 无保护桶守卫——以 twin 身份走 move 即可把变体注册进 canonical 表，
+        # 绕过写路径的 insert_memory 守卫。
+        from ..twin_redirect import protected_bucket_variant
+
+        if protected_bucket_variant(canonical):
+            return False, [
+                f"workspace {canonical!r} is a protected-bucket spelling variant "
+                "and cannot be assigned; use the canonical name"
+            ]
         cur = conn.execute(
             "UPDATE memories SET workspace_canonical = ?, "
             "scan_watermark = CASE WHEN "
@@ -1967,6 +1983,16 @@ class WorkspaceStore:
         workspace = _coerce_ws(workspace)
         if not workspace or (is_default_workspace_term(workspace) and not allow_default):
             return False, ["move destination must be a non-default workspace string."]
+        # A9 补漏（R3 对码实证）：搬运路径此前无保护桶守卫——以 twin 身份
+        # 走 move 即可把变体注册进 canonical 表，绕过写路径的 insert_memory
+        # 守卫（R3 实测 ok=True + canon rows 含 mema_twin）。
+        from ..twin_redirect import protected_bucket_variant
+
+        if protected_bucket_variant(workspace):
+            return False, [
+                f"workspace {workspace!r} is a protected-bucket spelling variant "
+                "and cannot be a move destination; use the canonical name"
+            ]
         if current_bucket is None:
             row = conn.execute(
                 "SELECT COALESCE(NULLIF(workspace_canonical,''),workspace) AS bucket "

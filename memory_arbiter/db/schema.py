@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     from .core import MemoryDB
 
 from ..db_generation import CURRENT_SCHEMA_GENERATION
+from ..models import utc_now_iso
 
 
 class SchemaStore:
@@ -352,6 +353,8 @@ class SchemaStore:
                 self.state.sqlite_writable = False
                 self.state.mode = "jsonl_backup"
                 self.state.jsonl_backup_active = True
+                # B5 补齐（R3/R4 指出）：只读探测失败形态同步记时间戳。
+                self.state.jsonl_backup_last_used_at = utc_now_iso()
                 self.state.warn(
                     f"SQLite opened read-only or write probe failed: {exc}. "
                     "Writes will use JSONL backup when possible."

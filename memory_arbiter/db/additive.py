@@ -372,7 +372,16 @@ def ensure_additive_structures(conn: sqlite3.Connection) -> list[str]:
         if not governance_existed:
             applied.append("governance_audit")
 
-    _run_additive_segment(conn, "ddl", applied, _tables)
+    # B2-2 修订（R3/R4 对抗双轮实证）：本段**不进 SAVEPOINT**——
+    # executescript() 会先 COMMIT（隐式），把外层 savepoint 释放掉：实测
+    # RELEASE / ROLLBACK TO 均报 "no such savepoint"，于是每次启动都记出
+    # 假失败 ddl:failed(no such savepoint)，并把真实错误信息掩盖成症状
+    # （R3/R4 独立复现）。诚实的形态：本段无隔离，但全部 DDL 皆
+    # IF NOT EXISTS，重跑幂等；异常仍收敛为单段失败标记（后续段照常）。
+    try:
+        _tables()
+    except sqlite3.Error as exc:
+        applied.append(f"ddl:failed({exc})")
 
     def _migrations_a() -> None:
         migrated = _migrate_legacy_candidates(conn)

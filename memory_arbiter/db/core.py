@@ -290,6 +290,9 @@ class MemoryDB:
         self.state.sqlite_writable = False
         self.state.mode = "jsonl_backup"
         self.state.jsonl_backup_active = True
+        # B5 补齐（R3/R4 指出）：另两个置位点同步记时间戳，否则只读库降级
+        # 形态下 jsonl_backup_active=True 而 last_used_at=None（观测字段解释不了）。
+        self.state.jsonl_backup_last_used_at = utc_now_iso()
         self.state.warn(
             f"SQLite unavailable or not writable: {last_error or 'unknown initialization error'}. "
             "Using JSONL append-only backup when possible."
