@@ -12,6 +12,10 @@ class DegradeState:
     fts5_available: bool = False
     sqlite_writable: bool = True
     jsonl_backup_active: bool = False
+    # B5（0.17.1 优化批）：降级写入的观测时间戳。jsonl_backup_active 是
+    # 单向闩（置 True 恒伴 sqlite_writable=False，全仓无复位点），故不改
+    # 其语义，只补"最后一次用 JSONL 是什么时候"（status 输出可见）。
+    jsonl_backup_last_used_at: str | None = None
     notice_provider: Callable[[], list[dict[str, Any]]] | None = None
 
     @property

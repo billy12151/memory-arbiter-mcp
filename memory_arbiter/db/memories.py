@@ -320,6 +320,11 @@ class MemoriesStore:
         finally:
             os.close(fd)
         self.state.jsonl_backup_active = True
+        # B5（0.17.1 优化批）：记录最后一次降级写入时间（观测字段；不改
+        # jsonl_backup_active 的单向闩语义）。
+        from ..models import utc_now_iso
+
+        self.state.jsonl_backup_last_used_at = utc_now_iso()
 
     @staticmethod
     def _fetch_memory(conn: sqlite3.Connection, memory_id: int) -> dict[str, Any] | None:

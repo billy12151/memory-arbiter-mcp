@@ -676,12 +676,20 @@ def _c_tags_over_limit(ctx: _DoctorCtx) -> Finding:
     # 0.16.0 §6⑮: tag-discipline backlog — pre-0.16.0 rows over the total cap
     # are NOT retro-truncated (reads unaffected); doctor lists them for a
     # manual cleanup pass (remove_tags) instead.
+    #
+    # B4（0.17.1 优化批）：SQL 侧先按 json_array_length 预筛（此前全表取
+    # tags != '[]' 行 + 逐行 json.loads，30k 行实测 ~0.26s）。语义等价：
+    # 坏 JSON 现实现本就 continue 跳过（json_valid 排除之）；json_array_length
+    # 对坏 JSON 直接抛错（OR 不短路），故必须 AND 形式，不能用
+    # `NOT json_valid(...) OR ...` 的备选（实测 malformed JSON 抛错）。
     from .constants import MAX_MEMORY_TOTAL_TAGS as _TAG_CAP
 
     try:
         over: list[dict[str, int]] = []
         for row in ctx.conn.execute(
-            "SELECT id, tags FROM memories WHERE status!='deleted' AND tags != '[]'"
+            "SELECT id, tags FROM memories WHERE status!='deleted' "
+            "AND json_valid(tags) AND json_array_length(tags) > ?",
+            (_TAG_CAP,),
         ).fetchall():
             try:
                 parsed = json.loads(str(row["tags"]))

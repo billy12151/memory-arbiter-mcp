@@ -2285,6 +2285,8 @@ class OperationsPipeline:
                 "fts5_available": self.db.state.fts5_available,
                 "sqlite_writable": self.db.state.sqlite_writable,
                 "jsonl_backup_active": self.db.state.jsonl_backup_active,
+                # B5（0.17.1 优化批）：最后一次降级写入时间（观测；缺省 null）
+                "jsonl_backup_last_used_at": self.db.state.jsonl_backup_last_used_at,
                 "client": self.current_client(),
                 "agent_id": self.current_agent_id(),
                 "workspace": self.settings.workspace,
