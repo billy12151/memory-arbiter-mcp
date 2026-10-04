@@ -514,6 +514,13 @@ class ConflictStore:
             # A delivered notice may already own this exact frozen event
             # snapshot. Promote that row instead of creating a parallel formal
             # conflict or replacing its immutable member/value evidence.
+            #
+            # A2（0.17.1 修复批）：promote 必须**同时结清 notice 投递态**——
+            # 此前只置 status='open'，行仍带 notice_delivery_status='delivered'
+            # → 它继续出现在 notice list(open) 里，且 notice dismiss 会把它改
+            # 写回 not_a_conflict（正式冲突组被 notice 通道静默撤回，绕过
+            # judge/apply 治理链，产品面端到端复现）。与 escalate 三处同口径
+            # （'resolved' + escalated/promoted 前缀的 resolution reason）。
             if status == "open" and slot_hash is not None:
                 notice_row = conn.execute(
                     "SELECT * FROM conflicts WHERE workspace_canonical=? AND slot_key_hash=? "
@@ -531,10 +538,12 @@ class ConflictStore:
                     if frozen_members != normalized_members or frozen_groups != groups:
                         return {"outcome": "snapshot_mismatch", "conflict_id": frozen["id"]}
                     cur = conn.execute(
-                        "UPDATE conflicts SET status='open',revision=revision+1,conflict_point=?,"
+                        "UPDATE conflicts SET status='open',notice_delivery_status='resolved',"
+                        "notice_resolution_reason=?,revision=revision+1,conflict_point=?,"
                         "detection_reason=?,source=?,detector_version=?,prompt_version=?,refreshed_at=? "
                         "WHERE id=? AND status='candidate' AND revision=?",
-                        (conflict_point, detection_reason, source, detector_version, prompt_version,
+                        (f"promoted_to_conflict: {detection_reason}",
+                         conflict_point, detection_reason, source, detector_version, prompt_version,
                          now, frozen["id"], frozen["revision"]),
                     )
                     if cur.rowcount != 1:
