@@ -901,17 +901,20 @@ class ProductSurfaces:
             # C2（owner 2026-10-03）：选桶发现接口。strict 调用者先过 denied 门
             # （无 canonical=denied 优先于空集，对齐全库口径），再看 admitted 集；
             # none/weak 全量。
+            #
+            # A8（0.17.1 修复批）：admitted 进 SQL（keyword-only 显式传递，
+            # validation 白名单保证 payload 无法注入）——此前 LIMIT 先于此处
+            # 事后过滤：limit=1 时自有桶被更晚更新的外来桶挤出窗口（实测
+            # 返回 []），且 count 被重算为过滤后长度。现在 count 即 SQL 行数。
             caller = self._caller_workspace(payload.get("workspace"))
             denied = self._strict_acl_unavailable(caller)
             if denied is not None:
                 return denied
-            result = self._tools.memory_list_workspaces(**payload)
-            if caller.isolation == "strict" and caller.admitted:
-                admitted = set(caller.admitted)
-                data = result.get("data") or {}
-                kept = [b for b in (data.get("workspaces") or []) if b.get("canonical") in admitted]
-                result["data"] = {**data, "count": len(kept), "workspaces": kept}
-            return result
+            if caller.isolation == "strict":
+                return self._tools.memory_list_workspaces(
+                    **payload, admitted=set(caller.admitted),
+                )
+            return self._tools.memory_list_workspaces(**payload)
         return self._invalid_product_call("memory_review", f"unknown view: {view}", view)
 
     def _memory_govern(self, action: str = "help", data: dict[str, Any] | None = None, **_: Any) -> dict[str, Any]:

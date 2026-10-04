@@ -2759,17 +2759,38 @@ class OperationsPipeline:
         return self.db.state.response(result, ok=result.get("outcome") == "applying", extra_warnings=list(caller.warnings))
 
 
-    def memory_list_workspaces(self, limit: int = 50, workspace: str | None = None, **_: Any) -> dict[str, Any]:
+    def memory_list_workspaces(
+        self,
+        limit: int = 50,
+        workspace: str | None = None,
+        *,
+        admitted: "frozenset[str] | set[str] | None" = None,
+        **_: Any,
+    ) -> dict[str, Any]:
         """C2（owner 2026-10-03 拍板）：已有桶列表——agent 选桶前的发现接口。
 
         单 SQL 聚合（owner SQL 单查询纪律）：canonical×active/pending 计数×
-        最近写入 + 别名数并查。strict 调用者经 surfaces 层 admitted 集过滤
-        （denied 优先于空集，对齐全库口径）；排序最近写入倒序。
+        最近写入 + 别名数并查。排序最近写入倒序。
+
+        A8（0.17.1 修复批）：strict 调用者的 admitted 集**进 SQL**（此前
+        LIMIT 先于 surfaces 的事后过滤：limit=1 时自有桶被更晚更新的外来桶
+        挤出窗口，实测返回空列表；count 还被重算成过滤后长度）。调用方
+        （surfaces）只对 strict 传 admitted；none/weak 保持全量。count 现在
+        就是 SQL 返回行数（= 本次可见桶数）。
         """
         limit = max(1, min(int(limit or 50), 200))
+        scope_sql = ""
+        scope_params: list[Any] = []
+        if admitted is not None:
+            if not admitted:
+                return self.db.state.response(
+                    {"view": "workspaces", "count": 0, "workspaces": []}
+                )
+            scope_sql, scope_params = workspace_scope_sql("c.name", sorted(admitted))
+            scope_sql = f"WHERE {scope_sql}"
         with self.db.connection() as conn:
             rows = conn.execute(
-                """
+                f"""
                 SELECT c.name AS canonical,
                        COALESCE(a.active_count, 0) AS active_count,
                        COALESCE(p.pending_count, 0) AS pending_count,
@@ -2790,10 +2811,11 @@ class OperationsPipeline:
                     SELECT canonical, COUNT(*) AS alias_count
                     FROM workspace_aliases GROUP BY canonical
                 ) al ON al.canonical = c.name
+                {scope_sql}
                 ORDER BY last_write_at DESC, c.name ASC
                 LIMIT ?
                 """,
-                (limit,),
+                (*scope_params, limit),
             ).fetchall()
         buckets = []
         for row in rows:

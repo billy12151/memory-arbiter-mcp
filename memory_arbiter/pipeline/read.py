@@ -194,7 +194,11 @@ def _unit_aligned_hits(
                 entry["matched"] = True
             for row in neighbour_rows:
                 hit_spans.append({
-                    "text": str(row["text"]),
+                    # A7（0.17.1 修复批）：邻句同样用原文切片——命中行已改
+                    # content[s:e]，邻句仍用 row["text"]（rowseg 折叠文本，
+                    # 表格行/跨行句差异最大），同一响应内两种口径且违反
+                    # "read span returns exactly that text" 的文档承诺。
+                    "text": content[int(row["start_offset"]):int(row["end_offset"])],
                     "start_offset": int(row["start_offset"]),
                     "end_offset": int(row["end_offset"]),
                     "unit_index": int(row["unit_index"]),
