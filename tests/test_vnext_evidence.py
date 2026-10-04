@@ -2672,8 +2672,8 @@ def test_idle_worker_job_budget_does_not_cap_inflight_qwen(tmp_path: Path, monke
     tools.settings.semantic_conflict_on_write = "off"
     # Job/min-pair budgets froze into constants (0.15.0); shrink them through
     # the module attributes the evidence pipeline reads.
-    monkeypatch.setattr("memory_arbiter.pipeline.evidence.SEMANTIC_JOB_TIMEOUT_MS", 10)
-    monkeypatch.setattr("memory_arbiter.pipeline.evidence.SEMANTIC_MIN_PAIR_BUDGET_MS", 5)
+    monkeypatch.setattr("memory_arbiter.pipeline._evidence_helpers.SEMANTIC_JOB_TIMEOUT_MS", 10)
+    monkeypatch.setattr("memory_arbiter.pipeline._evidence_phases.SEMANTIC_MIN_PAIR_BUDGET_MS", 5)
     metadata = {"entity": "svc", "scope": "production"}
     peer = tools.memory_write(content="database is mysql 8 and 16", subject="a", tags=[], metadata=metadata)["data"]
     new = tools.memory_write(content="database is sqlite 3 and 4", subject="b", tags=[], metadata=metadata)["data"]
@@ -2714,8 +2714,8 @@ def test_backlog_job_budget_stops_before_next_pair_not_during_inference(tmp_path
     """A queued job enables fairness, but the current pair gets its full hard timeout."""
     tools = make_tools(tmp_path)
     tools.settings.semantic_conflict_on_write = "off"
-    monkeypatch.setattr("memory_arbiter.pipeline.evidence.SEMANTIC_JOB_TIMEOUT_MS", 40)
-    monkeypatch.setattr("memory_arbiter.pipeline.evidence.SEMANTIC_MIN_PAIR_BUDGET_MS", 5)
+    monkeypatch.setattr("memory_arbiter.pipeline._evidence_helpers.SEMANTIC_JOB_TIMEOUT_MS", 40)
+    monkeypatch.setattr("memory_arbiter.pipeline._evidence_phases.SEMANTIC_MIN_PAIR_BUDGET_MS", 5)
     metadata = {"entity": "svc", "scope": "production"}
     peer_values = ("mysql", "postgres")
     peers = [

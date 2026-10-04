@@ -291,7 +291,7 @@ def test_over_cap_memory_reports_rows_capped(tmp_path: Path, monkeypatch: pytest
     memory_id = _write_many_units(tools, 8)
 
     # 0.17.0 P2-3.1：行级模式帽=SEMANTIC_MAX_ROWS、原因=rows_capped
-    monkeypatch.setattr("memory_arbiter.pipeline.evidence.SEMANTIC_MAX_ROWS", 3)
+    monkeypatch.setattr("memory_arbiter.pipeline._evidence_phases.SEMANTIC_MAX_ROWS", 3)
 
     result = tools._process_semantic_conflict_job(memory_id, _job_snapshot(tools, memory_id))
 
@@ -356,7 +356,7 @@ def test_units_cap_attributed_first_when_both_causes_hold(tmp_path: Path, monkey
         return []
 
     monkeypatch.setattr(tools.db, "row_knn", fake_knn)
-    monkeypatch.setattr("memory_arbiter.pipeline.evidence.SEMANTIC_MAX_ROWS", 3)
+    monkeypatch.setattr("memory_arbiter.pipeline._evidence_phases.SEMANTIC_MAX_ROWS", 3)
     monkeypatch.setattr("memory_arbiter.pipeline.evidence.time.monotonic", lambda: clock["now"])
     monkeypatch.setattr(
         tools._semantic_worker, "pending_job_deadline", lambda timeout: fairness_deadline,

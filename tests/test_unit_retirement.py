@@ -120,7 +120,8 @@ def test_streaming_publishes_full_rowset_under_detection_cap(tmp_path: Path) -> 
     # this invariant.
     monkeypatcher = pytest.MonkeyPatch()
     import memory_arbiter.pipeline.evidence as ev_mod
-    monkeypatcher.setattr(ev_mod, "SEMANTIC_MAX_ROWS", 8)  # module-level import
+    import memory_arbiter.pipeline._evidence_phases as ev_phases
+    monkeypatcher.setattr(ev_phases, "SEMANTIC_MAX_ROWS", 8)  # 读取点随迁 _evidence_phases
     monkeypatcher.setattr(constants, "SEMANTIC_INTERNAL_MAX_ROWS", 8)  # function-local import
     try:
         tools = tv.make_tools(tmp_path)

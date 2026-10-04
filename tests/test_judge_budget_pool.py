@@ -241,7 +241,8 @@ def test_pool_exhaustion_internal_tail_vanishes_cross_backlogs(tmp_path, monkeyp
     )
     # 总池压到 1：internal keeper 吃掉唯一席位（判成），cross 对池耗尽 →
     # pairs_examined_capped + backlog。
-    monkeypatch.setattr(ev, "_JobJudgeBudget", lambda total=500: _JobJudgeBudget(total=1))
+    import memory_arbiter.pipeline._evidence_phases as evp  # noqa: E402
+    monkeypatch.setattr(evp, "_JobJudgeBudget", lambda total=500: _JobJudgeBudget(total=1))
 
     receipt = tools._process_semantic_conflict_job(new["id"], tv._job_snapshot(tools, new["id"]))
 
@@ -292,7 +293,8 @@ def test_pathological_internal_storm_bounded_by_pool(tmp_path, monkeypatch) -> N
     assert tools.wait_semantic_worker_drained(timeout=5)
     _Recorder.reset()
     monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: _Recorder)
-    monkeypatch.setattr(ev, "_JobJudgeBudget", lambda total=500: _JobJudgeBudget(total=20))
+    import memory_arbiter.pipeline._evidence_phases as evp  # noqa: E402
+    monkeypatch.setattr(evp, "_JobJudgeBudget", lambda total=500: _JobJudgeBudget(total=20))
 
     receipt = tools._process_semantic_conflict_job(new["id"], tv._job_snapshot(tools, new["id"]))
 
@@ -379,7 +381,8 @@ def test_internal_storm_cannot_starve_cross(tmp_path, monkeypatch) -> None:
     )
     # 总池 2：internal 份额 ⌈2/2⌉=1，cross 保底 1。own 双行数值句 = 1 个
     # internal keeper + 1 个 cross 对——两侧都能判。
-    monkeypatch.setattr(ev, "_JobJudgeBudget", lambda total=500: _JobJudgeBudget(total=2))
+    import memory_arbiter.pipeline._evidence_phases as evp  # noqa: E402
+    monkeypatch.setattr(evp, "_JobJudgeBudget", lambda total=500: _JobJudgeBudget(total=2))
 
     receipt = tools._process_semantic_conflict_job(new["id"], tv._job_snapshot(tools, new["id"]))
 
