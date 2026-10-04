@@ -287,6 +287,14 @@ class BackupReplayStore:
                     self._db.settings.isolation == "strict"
                     and record.status == "pending"
                 ):
+                    # A9（0.17.1 修复批）：历史行回放不得注册保护桶变体。
+                    from ..twin_redirect import protected_bucket_variant
+
+                    if protected_bucket_variant(canonical):
+                        raise ValueError(
+                            f"workspace {canonical!r} is a protected-bucket spelling "
+                            "variant and cannot be registered during replay"
+                        )
                     conn.execute(
                         "INSERT OR IGNORE INTO workspace_canonicals(name, created_at) VALUES (?, ?)",
                         (canonical, utc_now_iso()),

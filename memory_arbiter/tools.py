@@ -1829,6 +1829,14 @@ class MemoryTools:
                 # movement — the linked-df fingerprint cannot see it.
                 self.db.invalidate_linked_df_cache()
                 if from_ws and not is_default_workspace_term(from_ws):
+                    # A9（0.17.1 修复批）：回滚同样不得注册保护桶变体。
+                    from .twin_redirect import protected_bucket_variant
+
+                    if protected_bucket_variant(from_ws):
+                        raise ValueError(
+                            f"workspace {from_ws!r} is a protected-bucket spelling "
+                            "variant and cannot be registered"
+                        )
                     conn.execute(
                         "INSERT OR IGNORE INTO workspace_canonicals(name, created_at) VALUES (?, ?)",
                         (from_ws, utc_now_iso()),

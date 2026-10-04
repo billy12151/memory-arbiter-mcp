@@ -185,6 +185,19 @@ class MemoriesStore:
         # Register only the final canonical, atomically with the memory row. The
         # resolver/model runs before this transaction and must never register the
         # raw near-miss workspace (which would leave a phantom canonical).
+        #
+        # A9（0.17.1 修复批）：拒绝注册保护桶的机械等价变体（mema_twin /
+        # mematwin / Mema-Twin…）——变体一旦注册，解析器的 1b 折叠会把保护桶
+        # 原名折到变体拼写，twin 本体写入即落进攻击者桶（实测可读出 persona）。
+        # 精确原名（mema-twin）不受影响。
+        if register_workspace_canonical:
+            from ..twin_redirect import protected_bucket_variant
+
+            if protected_bucket_variant(canonical):
+                raise ValueError(
+                    f"workspace {canonical!r} is a protected-bucket spelling variant "
+                    "and cannot be registered; use the canonical name"
+                )
         with self.write_transaction() as conn:
             if register_workspace_canonical:
                 conn.execute(

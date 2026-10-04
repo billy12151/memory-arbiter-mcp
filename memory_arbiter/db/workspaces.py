@@ -819,6 +819,15 @@ class WorkspaceStore:
             (key, canonical, status, now),
         )
         if status == "confirmed":
+            # A9（0.17.1 修复批）：别名确认同样不得注册保护桶变体——毒行
+            # 落地后精确命中保护键、劫持 twin 本体写入（P1-3 同族）。
+            from ..twin_redirect import protected_bucket_variant
+
+            if protected_bucket_variant(canonical):
+                return False, [
+                    f"workspace {canonical!r} is a protected-bucket spelling variant "
+                    "and cannot be confirmed; use the canonical name"
+                ]
             conn.execute(
                 "INSERT OR IGNORE INTO workspace_canonicals(name,created_at) VALUES(?,?)",
                 (canonical, now),
@@ -1201,6 +1210,16 @@ class WorkspaceStore:
         if old == new:
             # no-op：无写入但"已处理"（保持既有审计行为：no-op 也落一行）。
             return 0, [], True
+        # A9（0.17.1 修复批）：目标名不得是保护桶的机械等价变体——否则
+        # rename 会把保护桶拼写注册进攻击者桶（实测 rename→mematwin 成功，
+        # 随后 twin 本体写入被折进攻击者桶）。
+        from ..twin_redirect import protected_bucket_variant
+
+        if protected_bucket_variant(new):
+            return 0, [
+                f"workspace {new!r} is a protected-bucket spelling variant and "
+                "cannot be a rename target; use the canonical name"
+            ], False
         # Destination orthography: when `new` is a mechanical variant of an
         # already-registered canonical other than `old`, rename into the
         # registered spelling. The verbatim branch would otherwise
@@ -1340,6 +1359,16 @@ class WorkspaceStore:
         A5 改为显式返回，语义不再依赖警告文案）。
         """
         warnings: list[str] = []
+        # A9（0.17.1 修复批）：注册目标不得是保护桶变体——本函数是
+        # migrate 与 normalize 两条路径的公共注册点（后者绕过 migrate 的
+        # 入口检查），故在此兜底（拒绝而非静默跳过：调用方以 warnings 归因）。
+        from ..twin_redirect import protected_bucket_variant
+
+        if protected_bucket_variant(to_ws):
+            return 0, [
+                f"workspace {to_ws!r} is a protected-bucket spelling variant and "
+                "cannot be a merge target; use the canonical name"
+            ], False
         # Guard shared with rename: a slot collision would abort the bulk
         # conflict re-point mid-transaction, and auto-resolving either side
         # would fabricate a triage decision — refuse instead.
@@ -1452,6 +1481,14 @@ class WorkspaceStore:
             ], False
         if from_ws == to_ws:
             return 0, [], True
+        # A9（0.17.1 修复批）：同 rename——目标名不得是保护桶变体。
+        from ..twin_redirect import protected_bucket_variant
+
+        if protected_bucket_variant(to_ws):
+            return 0, [
+                f"workspace {to_ws!r} is a protected-bucket spelling variant and "
+                "cannot be a migrate target; use the canonical name"
+            ], False
         # Destination orthography: when the destination is a mechanical variant
         # of an already-registered canonical, merge into the registered
         # spelling. Re-pointing memories to the verbatim variant while the
