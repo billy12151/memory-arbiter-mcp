@@ -5,6 +5,16 @@ Versions follow semantic versioning.
 
 ## [0.17.1 追加] — 未发版（claim 对比通道退役 + 判定输入上下文化，owner 2026-09-28 拍板）
 
+### Refactor (大文件拆分批——纯移动零行为变化，2026-10-04)
+
+方案 v2 与两轮 review 记录：`ZCodeProject/docs/mema-file-split-plan-2026-10-04.md`（R1 对码 + R2 对抗回写，R3/R4 施工后 review 见方案回写区）。
+
+- 15 个 >1000 行文件全部拆到 ≤1045（仅 `_ops_content.py` 1045，其余 ≤909；方案帽 1000/硬帽 1500）。
+- 拆分形态三类：**模式 A** 纯函数搬家+`as` 别名 re-export（additive_ddl/search_text/scoring/extras/_read_hits/_evidence_helpers/judge/scan_admission/vnext_probe/final/ws_keys/_queue_consts/doctor_checks/types 等）；**模式 B** mixin 共享 `self`（db 四 store+core 委托墙+operations 五 mixin+read/scan/evidence/tools/surfaces/queue mixin）；**断环叶子**（共享 helper 下沉独立模块）。
+- **保活面零变化**：测试 import 面（含 `search._TAGS_SCORE_CAP`/`doctor.load_confirmed_workspaces`/`queue_protocol.GROUP_HASHES_CAP` 等）全部经 re-export；实例 patch 面（`_ensure_semantic_backend` 等 30+）经 mixin 方法名不变。
+- **patch 缝迁移两类**：随读取点迁走并改测试字符串（`WORKSPACE_RECALL_ADMISSION`→`_ops_status` 1 处；evidence 三常量+`_JobJudgeBudget` 10 处）；读取点留守零测试改动（`QUERY_RECALL_SCORE_FLOOR`/`WORKSPACE_MATCH_DISTANCE`/`ASSEMBLY_WINDOW`/`SCAN_DUPLICATES_*`/`CONFLICT_DETECTOR_VERSION` kick 侧/`compute_summary_votes`/`compare_memories`/vnext `build`/`_fingerprint_on_connection` 等）。
+- 每 commit 全量 2774 passed + mypy 13 基线 + ruff 1 基线；8 commit（314387a…a7b0967）。
+
 ### Fixed + Changed (修复批与优化提升，2026-10-04)
 
 方案与两轮 review 记录：`ZCodeProject/docs/mema-0171-fix-batch-and-optimization-plan-2026-10-04.md`（v2，R1 对码 + R2 对抗回写）。
