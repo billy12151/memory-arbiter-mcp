@@ -1,0 +1,151 @@
+<mxfile host="app.diagrams.net" agent="mema-docs" version="24.7.8">
+  <diagram name="可收敛的共用召回层" id="shared-recall">
+    <mxGraphModel dx="1000" dy="700" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1650" pageHeight="1250" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="t" value="mema「可收敛的共用召回层」对比图&#10;——四条链路在候选召回环节的共用部分与必须保持独立的部分" style="text;html=1;fontSize=16;fontStyle=1;align=left;" vertex="1" parent="1">
+          <mxGeometry x="20" y="10" width="760" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="laneA" value="A. 查询召回&#10;search.py _wide_recall（调用方：find / search）" style="swimlane;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;fontStyle=1;horizontal=0;startSize=56;" vertex="1" parent="1">
+          <mxGeometry x="20" y="90" width="380" height="430" as="geometry" />
+        </mxCell>
+        <mxCell id="a1" value="输入：query 向量" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="laneA">
+          <mxGeometry x="90" y="70" width="200" height="34" as="geometry" />
+        </mxCell>
+        <mxCell id="a2" value="表：evidence 向量表&#10;入口：db.evidence_knn&#10;k = 池上限 × 8（默认 50×8 = 400）&#10;按工作区与父级状态过滤" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="laneA">
+          <mxGeometry x="60" y="124" width="260" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="a3" value="按记忆聚合：最佳单元分 + 0.08×支撑单元数" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="laneA">
+          <mxGeometry x="60" y="214" width="260" height="34" as="geometry" />
+        </mxCell>
+        <mxCell id="a4" value="RRF 融合 → 软重排&#10;→ 相关性下限过滤（8.1）&#10;→ 分页返回" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="laneA">
+          <mxGeometry x="60" y="268" width="260" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="a5" value="向量索引不可用 → 跳过该通道，只留词法通道&#10;（查询有词法兜底）" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" vertex="1" parent="laneA">
+          <mxGeometry x="60" y="348" width="260" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="laneB" value="B. 写入时相似检测&#10;pipeline/write.py _duplicate_hint_candidate_rows" style="swimlane;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;fontStyle=1;horizontal=0;startSize=56;" vertex="1" parent="1">
+          <mxGeometry x="430" y="90" width="380" height="430" as="geometry" />
+        </mxCell>
+        <mxCell id="b1" value="输入：本条的 subject + 排序后 tags 向量" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=11;" vertex="1" parent="laneB">
+          <mxGeometry x="90" y="70" width="220" height="34" as="geometry" />
+        </mxCell>
+        <mxCell id="b2" value="表：subject_tags 向量表&#10;入口：db.subject_tags_knn&#10;k = 10&#10;按同工作区过滤、排除自身" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=11;" vertex="1" parent="laneB">
+          <mxGeometry x="60" y="124" width="260" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="b3" value="直接取最近邻行（不做记忆级聚合）" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=11;" vertex="1" parent="laneB">
+          <mxGeometry x="60" y="214" width="260" height="34" as="geometry" />
+        </mxCell>
+        <mxCell id="b4" value="第一道门：主题相似度 ≥ 0.8&#10;第二道门：正文字符重合 ≥ 0.4&#10;最多保留 2 条提示" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=11;" vertex="1" parent="laneB">
+          <mxGeometry x="60" y="268" width="260" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="b5" value="向量不可用 → 降级为扫描同工作区&#10;活跃记忆的 subject/tags 行（上限 500）" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" vertex="1" parent="laneB">
+          <mxGeometry x="60" y="348" width="260" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="laneC" value="C. 写入时冲突检测&#10;pipeline/evidence.py process_conflicts" style="swimlane;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;fontStyle=1;horizontal=0;startSize=56;" vertex="1" parent="1">
+          <mxGeometry x="840" y="90" width="380" height="430" as="geometry" />
+        </mxCell>
+        <mxCell id="c1" value="输入：本条正文的每个证据单元向量" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="laneC">
+          <mxGeometry x="90" y="70" width="240" height="34" as="geometry" />
+        </mxCell>
+        <mxCell id="c2" value="表：evidence 向量表&#10;入口：db.evidence_knn&#10;k = 5（每个单元各查一次）&#10;同工作区、排除自身、只要正文类单元" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="laneC">
+          <mxGeometry x="60" y="124" width="260" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="c3" value="直接逐邻居处理（不做记忆级聚合）" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="laneC">
+          <mxGeometry x="60" y="214" width="260" height="34" as="geometry" />
+        </mxCell>
+        <mxCell id="c4" value="局部规则判定 → 演进域排除 → 来源元数据校验&#10;→ 差异分类为「清晰」→ 每个邻居只留最近一条&#10;→ 小模型判定或确定性直连" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="laneC">
+          <mxGeometry x="60" y="268" width="260" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="c5" value="向量不可用 → 不跑冲突判定（等下一轮），&#10;只完成证据索引" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" vertex="1" parent="laneC">
+          <mxGeometry x="60" y="348" width="260" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="laneD" value="D. 冲突扫描&#10;scan_pipeline.py _process_memory" style="swimlane;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;fontStyle=1;horizontal=0;startSize=56;" vertex="1" parent="1">
+          <mxGeometry x="1250" y="90" width="380" height="430" as="geometry" />
+        </mxCell>
+        <mxCell id="d1" value="输入：本条正文的每个证据单元向量" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="laneD">
+          <mxGeometry x="90" y="70" width="240" height="34" as="geometry" />
+        </mxCell>
+        <mxCell id="d2" value="表：evidence 向量表&#10;入口：db.evidence.knn&#10;k = 10 + 1（每个单元各查一次）&#10;同工作区、排除自身、只要正文类单元" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="laneD">
+          <mxGeometry x="60" y="124" width="260" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="d3" value="直接逐邻居处理（不做记忆级聚合）" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="laneD">
+          <mxGeometry x="60" y="214" width="260" height="34" as="geometry" />
+        </mxCell>
+        <mxCell id="d4" value="同 C 的确定性过滤链 → 只留正文类前 3 名&#10;机器可判 → 差异分类「清晰」记机器清除&#10;→ 其余进待办队列" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="laneD">
+          <mxGeometry x="60" y="268" width="260" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="d5" value="向量空间状态异常 → 整轮扫描直接报错&#10;（不进入扫描）" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" vertex="1" parent="laneD">
+          <mxGeometry x="60" y="348" width="260" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="sharedTitle" value="▼ 可收敛的共用层（四条链路都依赖的召回基础设施）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=13;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="60" y="560" width="440" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="s1" value="向量近邻检索底层（sqlite-vec）&#10;——evidence_store.py knn(201) 与 memories.py subject_tags_knn(535)：&#10;同一套“全局窗口 + 过滤后扩窗”逻辑（窗口按 4 倍起取、不足则翻倍直到满足数量或扫完全域），&#10;同一套工作区/排除自身的过滤参数形态" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=11;align=left;" vertex="1" parent="1">
+          <mxGeometry x="60" y="620" width="470" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="s2" value="过滤条件的构造与拼装&#10;——工作区规范化（canonical 优先、空则回退原值）、排除自身、父级状态过滤：&#10;evidence knn 的 workspace_scope_sql / workspace_exclusion_sql 与&#10;subject_tags_knn 的 _SUBJECT_TAGS_WS_CLAUSE 是同一思路的两份手写实现" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=11;align=left;" vertex="1" parent="1">
+          <mxGeometry x="60" y="710" width="470" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="s3" value="排除自身 + 同工作区 + 只看 active&#10;——四条链路在这一步的意图完全一致：&#10;不让本条记录“自己查到自己”，也不把别的空间的记录拉进来" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=11;align=left;" vertex="1" parent="1">
+          <mxGeometry x="60" y="800" width="470" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="keepTitle" value="▼ 必须保持独立的部分（收敛会破坏语义或隔离）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=13;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="600" y="560" width="440" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="k1" value="向量表不能合并：&#10;subject_tags 向量（主题/标签级）与 evidence 向量（正文单元级）粒度不同；&#10;相似检测要“主题像不像”，冲突检测与扫描要“同一槽位值变没变”，&#10;查询要“证据命中聚合到记忆”——三种语义目标，表与索引策略都不同" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#b85450;fontSize=11;align=left;" vertex="1" parent="1">
+          <mxGeometry x="600" y="620" width="470" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="k2" value="判定链不能合并：&#10;相似检测是纯确定性双门（0.8/0.4），同步、只提示、fail-open；&#10;冲突检测与扫描要调用本地小模型、管预算、落提示/待办，异步、fail-closed&#10;——执行时机、失败语义、对写入的影响完全不同" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#b85450;fontSize=11;align=left;" vertex="1" parent="1">
+          <mxGeometry x="600" y="710" width="470" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="k3" value="聚合方式不能合并：&#10;查询要把多个证据命中折算成一条记忆分（最佳 + 0.08×支撑）；&#10;相似/冲突/扫描都是逐邻居直出，不聚合&#10;——合并会让冲突侧多付一层无意义的聚合开销" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#b85450;fontSize=11;align=left;" vertex="1" parent="1">
+          <mxGeometry x="600" y="800" width="470" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="noteTitle" value="结论" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1140" y="560" width="300" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="noteBody" value="把「向量近邻检索的底层实现」和「过滤条件拼装」收成一个公共函数是安全的：四条链路在这两处的逻辑一致，收掉能消掉两份手写实现、避免一处改了一处漏改。&#10;但「判定链」必须各自独立：相似检测是轻量提醒，冲突检测/扫描是重型判定，把它们合到一处会同时破坏异步隔离与 fail-open / fail-closed 的边界。&#10;一句话：召回层可以共用，判定层必须分开。" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=12;align=left;" vertex="1" parent="1">
+          <mxGeometry x="1140" y="620" width="470" height="140" as="geometry" />
+        </mxCell>
+        <mxCell id="eA2" style="html=1;endArrow=block;" edge="1" parent="1" source="a1" target="a2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="eA3" style="html=1;endArrow=block;" edge="1" parent="1" source="a2" target="a3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="eA4" style="html=1;endArrow=block;" edge="1" parent="1" source="a3" target="a4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="eB1" style="html=1;endArrow=block;" edge="1" parent="1" source="b1" target="b2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="eB2" style="html=1;endArrow=block;" edge="1" parent="1" source="b2" target="b3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="eB3" style="html=1;endArrow=block;" edge="1" parent="1" source="b3" target="b4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="eC1" style="html=1;endArrow=block;" edge="1" parent="1" source="c1" target="c2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="eC2" style="html=1;endArrow=block;" edge="1" parent="1" source="c2" target="c3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="eC3" style="html=1;endArrow=block;" edge="1" parent="1" source="c3" target="c4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="eD1" style="html=1;endArrow=block;" edge="1" parent="1" source="d1" target="d2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="eD2" style="html=1;endArrow=block;" edge="1" parent="1" source="d2" target="d3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="eD3" style="html=1;endArrow=block;" edge="1" parent="1" source="d3" target="d4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

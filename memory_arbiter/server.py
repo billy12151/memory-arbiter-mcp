@@ -397,7 +397,7 @@ def build_runtime() -> ServerBundle:
 
     @app.tool()
     def memory_review(view: str = "help", data: dict[str, Any] | None = None) -> Any:
-        """Read-only inspection: overview, doctor, conflicts, conflict_detail, history, expired, audit, entities, help.
+        """Read-only inspection: overview, doctor, conflicts, conflict_detail, history, expired, audit, entities, workspaces, help.
 
         Use memory_review(view="help") for accepted fields. Inspect conflict_detail
         before judging a conflict so its members, value groups, revision, and apply

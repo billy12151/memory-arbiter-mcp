@@ -5,6 +5,27 @@ Versions follow semantic versioning.
 
 ## [0.17.1 追加] — 未发版（claim 对比通道退役 + 判定输入上下文化，owner 2026-09-28 拍板）
 
+### Fixed + Changed (修复批与优化提升，2026-10-04)
+
+方案与两轮 review 记录：`ZCodeProject/docs/mema-0171-fix-batch-and-optimization-plan-2026-10-04.md`（v2，R1 对码 + R2 对抗回写）。
+
+- **A1** 深 offset 向量通道静默消失：recall 的 evidence 通道 `k=pool_cap×16`，`limit=100` 时 `offset≥156` 即超 sqlite-vec 的 4096 硬上限 → 查询报错被 `except sqlite3.Error` 吞成空结果（实测 155→100 条 / 156→0 条，无 warning）。新增常量 `VEC0_MAX_K=4096`，`row_knn` 与 `memory_summary_knn` 两处 clamp + stderr 留痕。
+- **A6** batch_find 响应字节预算此前是死代码：预算读 `entry["memory"]`，而 find 页条目是扁平形状 → 360KB 全放行；hits 页的 `hit_spans[].text` 也不计预算（实测未升级全文的 hits 页 509KB 放行）。改扁平取值 + 计入 hit_spans；降级保留 hit_spans 并加 `hit_spans_truncated_by_budget` 标记。
+- **A2** promote 未清 notice 投递态：`record_conflict(status=open)` 命中 notice 快照升组后，行仍带 `delivered` → 继续出现在 `notice list(open)`，且 `notice dismiss` 会把它改写回 `not_a_conflict`（正式冲突组被 notice 通道静默撤回，绕过 judge/apply 治理链）。升组 UPDATE 补 `notice_delivery_status='resolved'` + resolution reason。
+- **A4** 毒记忆破坏扫描完整性不变量：完成门"空页即 complete=True 且不复位"，非尾位毒记忆被跳过后轮次仍宣称完成并清掉 `conflict_scan_required`（实测门被清而该记忆从未被扫描）；尾位毒记忆单 kick 同 id 热重试 253 次。改为**本轮回卷**（空页且仍有 pending 时 `last_id=0` 补扫，取代"靠谎报完成触发下轮重开"的隐式自愈）+ 失败条本轮排除 + 跨 kick 计数落轮状态（`SCAN_POISON_MAX_FAILURES=5`，回执 `poison_skipped` 可见）。
+- **A10** kick 封套 `ok` 反转：被拒的 kick（如 `neighbor_k="abc"`）返回顶层 `ok=True` + `data.ok=False` + 多一层信封（agent 按通用 ok 契约误读为成功）。信封形状识别后原样透传；`time_budget_s="nan"` 不再静默压成 1.0s。
+- **A5** governance_audit 掉行 + 响应与事实相反：rename/migrate 在 repoint 警告形态下**已提交**，却因 `not warnings` 判定报 `ok=False/renamed=False` 且零审计（实测库内已改名、审计 0 行）。`rename_workspace_canonical`/`migrate_workspace`/`_merge_workspace_core_on_conn` 返回值增 `committed` 第三元素；审计改为已提交即落库（warnings 入 detail），`ok`/`renamed`/`migrated` 以 `committed` 为准（no-op 与空源桶保持既有审计行为）。
+- **A3** B3 超长表格段豁免三处后门：豁免只接了检测相与 index-only，漏 `index_memory`（升级路径，vnext 每记忆调用）、boot backfill、扫描腿（直读 `scan_rows`）——实测 120 行表经 `index_memory` 复活 119 行、一次 kick 落地 `internal_conflicts=7021`。三处接入同一 helper；**全豁免形态（空 subject + 全表）改为不 publish**（`publish_rows([],[])` 会清空行并把记忆留在 `missing_row_vector_rows` 选集里，造成每次启动重 embed 的死循环）。
+- **A7** read 邻句 `hit_spans.text` 与 span 回读不一致：命中行已用原文切片，邻句仍为折叠文本（表格行/跨行句差异最大，违反"read span returns exactly that text"）。邻句同用 `content[s:e]`。
+- **A8** workspaces 视图 LIMIT 先于 ACL：strict `limit=1` 时自有桶被更晚更新的外来桶挤出窗口（实测返回空列表），`count` 被重算谎报。`admitted` 进 SQL（复用 `workspace_scope_sql`）；`count` 即 SQL 行数。
+- **A9** twin 保护桶机械变体劫持：改道判定只做 casefold+strip，而解析器折叠还去 `_\-\s` —— 攻击者先注册 `mema_twin` 即可让 twin 本体写入落进攻击者桶（实测可读出 persona）；治理路径（rename→mematwin）同样可注册变体。判定键统一为机械键 + 注册 choke point 拒绝保护桶变体（写路径/rename/migrate/merge/别名确认/rollback/backup replay）。
+- **B2** additive 通道：unit vec 虚表 DROP 无 deferred 分支（影子被 sweep 后报 `SQL logic error` → 逃出 → core 吞掉整个 additive → 其后所有步骤每次启动永久跳过）；段级隔离改为 **SAVEPOINT** 回滚（段内 DML 与其 guard 键同段同事务，不留"半完成 + 已标 guard"状态）；deferred 状态持久化到单 JSON 字典键 `vec_drop_deferred`。
+- **B3** doctor 新 finding `additive.deferred_drops`（vec 表 deferred 可见；干净库不出现）。
+- **B4** doctor tags 预筛（`json_valid AND json_array_length > CAP`；语义与逐行 `json.loads` 等价，坏 JSON 本就被跳过）。
+- **B5** 新观测字段 `jsonl_backup_last_used_at`（`jsonl_backup_active` 的单向闩语义不变）。
+- **语义变化提示**：A4（轮次完成门更保守：毒记忆存在时 `complete=false`、门不清）、A5（`ok`/`renamed`/`migrated` 以"已提交"为准）、A6（hits 页新增 `hit_spans_truncated_by_budget` 标记与超预算降级）、A10（被拒 kick 顶层 `ok=false`）——消费方请按新口径适配。
+- **文档**：INTEGRATION 两文件配置键数 19→21 且样例对齐 `examples/*.json`；`memory_review` docstring 补 `workspaces` 视图；govern help 示例补必传 `workspace`。
+
 ### Changed (全量修复批 + 向量自查 + workspace 必传，2026-10-04)
 
 方案 v4（两轮方案 review 回写）：`ZCodeProject/docs/mema-full-fix-batch-and-selfknn-plan-2026-10-03.md`；实施后两轮 review 记录见 mema。

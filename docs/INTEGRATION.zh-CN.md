@@ -18,7 +18,7 @@ stdio 是默认传输。要让多个本地客户端共享一个社区版进程�
 
 ## 配置面
 
-0.15.0 起**配置只认文件**：所有用户可调项都在 `~/.config/memory-arbiter/config.json`（或 `MEMORY_ARBITER_CONFIG` 启动上下文变量指向的文件）。完整配置面共 19 键：
+0.15.0 起**配置只认文件**：所有用户可调项都在 `~/.config/memory-arbiter/config.json`（或 `MEMORY_ARBITER_CONFIG` 启动上下文变量指向的文件）。完整配置面共 21 键（0.17.1：claims.required / semantic_conflict.model_path / n_gpu_layers 退役，新增四个 semantic_conflict.mdeberta_* 键）：
 
 ```json
 {
@@ -28,7 +28,7 @@ stdio 是默认传输。要让多个本地客户端共享一个社区版进程�
   "update_check": {"enabled": true},
   "include_size": true,
   "embedding": {"model_path": "…", "auto_query": true, "auto_write": true},
-  "semantic_conflict": {"enabled": true, "model_path": "…", "on_write": "async", "n_gpu_layers": -1, "notice_sync_wait_ms": 3000},
+  "semantic_conflict": {"enabled": true, "mdeberta_ckpt": "…", "mdeberta_model_dir": "…", "mdeberta_batch": 16, "mdeberta_notice_min_prob": 0.8, "on_write": "async", "notice_sync_wait_ms": 3000},
   "mcp": {"transport": "stdio", "http": {"host": "127.0.0.1", "port": 8000}}
 }
 ```
