@@ -27,9 +27,13 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from typing import TYPE_CHECKING
 
 from ..models import utc_now_iso
 from .conflict_backlog import conflict_backlog_ddl
+
+if TYPE_CHECKING:
+    from typing import Callable
 
 # migration_state guard key: the candidate-row migration runs exactly once.
 _MIGRATION_KEY = "scan_queue_candidate_migration_v1"
@@ -233,6 +237,50 @@ def has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
     )
 
 
+def _run_additive_segment(
+    conn: sqlite3.Connection, label: str, applied: list[str],
+    fn: "Callable[[], None]",
+) -> bool:
+    """B2-2（0.17.1 修复批）：段级隔离——单段失败回滚该段并继续后续段。
+
+    此前任一步 sqlite3.Error 逃出 ensure_additive_structures → core 吞掉
+    整个 additive（其后所有步骤每次启动永久跳过，实测 unit 通道即此形态）。
+
+    实现用 **SAVEPOINT**（而非 conn.rollback()——那会把先前段尚未提交的
+    DML 一并回滚：Python sqlite3 默认 isolation_level='' 下 DDL 自动提交
+    而 DML 挂在隐式事务上，实测先前段落的 deferred 账本会被后续段的
+    rollback 抹掉）。SAVEPOINT 只回滚本段：失败段内的 DML 与其
+    migration_state guard 键同段同事务，回滚后不留"半完成 + 已标 guard"
+    状态（R2 对抗审查的核心约束），下轮可安全重试。
+
+    DDL 在 SQLite 中同样受 SAVEPOINT 约束（无独立 DDL 事务），故本段
+    建表失败会被回滚；全部 DDL 皆 IF NOT EXISTS，重跑幂等。
+    """
+    savepoint = "additive_seg"
+    try:
+        conn.execute(f"SAVEPOINT {savepoint}")
+    except sqlite3.Error:
+        # 连接不支持 SAVEPOINT（极旧 SQLite）：退化为直接执行（无隔离）
+        try:
+            fn()
+            return True
+        except sqlite3.Error as exc:
+            applied.append(f"{label}:failed({exc})")
+            return False
+    try:
+        fn()
+        conn.execute(f"RELEASE {savepoint}")
+        return True
+    except sqlite3.Error as exc:
+        try:
+            conn.execute(f"ROLLBACK TO {savepoint}")
+            conn.execute(f"RELEASE {savepoint}")
+        except sqlite3.Error:
+            pass
+        applied.append(f"{label}:failed({exc})")
+        return False
+
+
 def ensure_additive_structures(conn: sqlite3.Connection) -> list[str]:
     """Create any missing 0.16.0 structures; returns the applied change list.
 
@@ -241,126 +289,231 @@ def ensure_additive_structures(conn: sqlite3.Connection) -> list[str]:
     by a ``migration_state`` key written in the same transaction. The caller
     owns the connection; changes are committed here so partial startup state
     never persists.
+
+    B2-2（0.17.1 修复批）：段级隔离——每段独立 try/except（见
+    ``_run_additive_segment``），单段失败只回滚该段并记
+    ``{label}:failed(...)``，后续段照常执行（此前一步失败会让其后所有
+    步骤永久跳过）。段划分按真实执行顺序。
     """
     applied: list[str] = []
-    if not has_column(conn, "memories", "scan_watermark"):
-        conn.execute("ALTER TABLE memories ADD COLUMN scan_watermark INTEGER")
-        applied.append("memories.scan_watermark")
-    # 0.17.0 P2-6.2: slow-lane rotation clock — "least recently scanned"
-    # picks anchors by wall time, independent of version bumps.
-    if not has_column(conn, "memories", "last_scanned_at"):
-        conn.execute("ALTER TABLE memories ADD COLUMN last_scanned_at TEXT")
-        applied.append("memories.last_scanned_at")
-    scan_queue_existed = bool(conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='scan_queue'"
-    ).fetchone())
-    conn.executescript(scan_queue_ddl())
-    if not has_column(conn, "scan_queue", "priority"):
-        conn.execute("ALTER TABLE scan_queue ADD COLUMN priority REAL NOT NULL DEFAULT 0")
-        applied.append("scan_queue.priority")
-    if not scan_queue_existed:
-        applied.append("scan_queue")
-    internal_existed = bool(conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='internal_conflicts'"
-    ).fetchone())
-    conn.executescript(internal_conflicts_ddl())
-    if not internal_existed:
-        applied.append("internal_conflicts")
-    audit_existed = bool(conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='normalize_audit'"
-    ).fetchone())
-    conn.executescript(normalize_audit_ddl())
-    if not audit_existed:
-        applied.append("normalize_audit")
-    # 0.17.0 Part 2: row-level conflict store + write-time backlog + claims.
-    for name, ddl in (
-        ("memory_row", memory_row_ddl()),
-        ("conflict_backlog", conflict_backlog_ddl()),
-    ):
-        existed = bool(conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
-        ).fetchone())
-        conn.executescript(ddl)
-        if not existed:
-            applied.append(name)
+
+    def _columns() -> None:
+        if not has_column(conn, "memories", "scan_watermark"):
+            conn.execute("ALTER TABLE memories ADD COLUMN scan_watermark INTEGER")
+            applied.append("memories.scan_watermark")
+        # 0.17.0 P2-6.2: slow-lane rotation clock — "least recently scanned"
+        # picks anchors by wall time, independent of version bumps.
+        if not has_column(conn, "memories", "last_scanned_at"):
+            conn.execute("ALTER TABLE memories ADD COLUMN last_scanned_at TEXT")
+            applied.append("memories.last_scanned_at")
+
+    _run_additive_segment(conn, "columns", applied, _columns)
+
     # 0.17.1（owner 2026-09-29 拍板）：claims 数据层全退——表连带 DROP。
     # 幂等：不存在的库无操作；存量库连数据一并清除（检测线已零读取，
     # 数据无消费方）。sqlite-vec 0.1.x DROP 虚拟主表不连带清影子表，
     # memory_claim_vec_% 需显式 sweep（对齐 rebuild_vec_tables 口径），
     # 否则跑过 claims 通道的存量库升级后影子表成永久孤儿。
-    _retire_claims_tables(conn, applied)
+    _run_additive_segment(
+        conn, "claims_retirement", applied,
+        lambda: _retire_claims_tables(conn, applied),
+    )
 
-    # 0.17.1 workspace dismiss 持久化：决策记录独立于 scan_queue 工作台——
-    # 启动 purge / 检测器换代整表 DELETE 释放行身份后，dismiss 仍然存活。
-    dismissals_existed = bool(conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='workspace_dismissals'"
-    ).fetchone())
-    conn.executescript(workspace_dismissals_ddl())
-    if not dismissals_existed:
-        applied.append("workspace_dismissals")
+    def _tables() -> None:
+        scan_queue_existed = bool(conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='scan_queue'"
+        ).fetchone())
+        conn.executescript(scan_queue_ddl())
+        if not has_column(conn, "scan_queue", "priority"):
+            conn.execute("ALTER TABLE scan_queue ADD COLUMN priority REAL NOT NULL DEFAULT 0")
+            applied.append("scan_queue.priority")
+        if not scan_queue_existed:
+            applied.append("scan_queue")
+        internal_existed = bool(conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='internal_conflicts'"
+        ).fetchone())
+        conn.executescript(internal_conflicts_ddl())
+        if not internal_existed:
+            applied.append("internal_conflicts")
+        audit_existed = bool(conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='normalize_audit'"
+        ).fetchone())
+        conn.executescript(normalize_audit_ddl())
+        if not audit_existed:
+            applied.append("normalize_audit")
+        # 0.17.0 Part 2: row-level conflict store + write-time backlog + claims.
+        for name, ddl in (
+            ("memory_row", memory_row_ddl()),
+            ("conflict_backlog", conflict_backlog_ddl()),
+        ):
+            existed = bool(conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+            ).fetchone())
+            conn.executescript(ddl)
+            if not existed:
+                applied.append(name)
 
-    # 0.17.1 P2 #7: governance_audit — bucket-level action trail (rename/
-    # migrate/confirm_pending reasons). No memory_id/status columns, so the
-    # normalize_audit consumers (rollback_auto_move, doctor) are untouched.
-    governance_existed = bool(conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='governance_audit'"
-    ).fetchone())
-    conn.executescript(governance_audit_ddl())
-    if not governance_existed:
-        applied.append("governance_audit")
-    migrated = _migrate_legacy_candidates(conn)
-    if migrated:
-        applied.append(f"candidate_rows_migrated({migrated})")
-    cleaned = _cleanup_first_round_artifacts(conn)
-    if cleaned:
-        applied.append(cleaned)
-    swept = _sweep_queued_numeric_rows(conn)
-    if swept:
-        applied.append(swept)
-    rerouted = _migrate_twin_bucket_residents(conn)
-    if rerouted:
-        applied.append(rerouted)
-    cleared = _clearance_migrate_check_route_pairs(conn)
-    if cleared:
-        applied.append(cleared)
-    purged = _purge_terminal_queue_rows(conn)
-    if purged:
-        applied.append(purged)
-    quieted = _dismiss_internal_noise_rows(conn)
-    if quieted:
-        applied.append(quieted)
-    evolution_voided = _void_evolution_queue_rows(conn)
-    if evolution_voided:
-        applied.append(evolution_voided)
-    sha_dedupe = _add_content_sha_dedupe(conn)
-    if sha_dedupe:
-        applied.append(sha_dedupe)
-    status_ingest_idx = _add_memories_status_ingest_index(conn)
-    if status_ingest_idx:
-        applied.append(status_ingest_idx)
-    overflow_retired = _retire_conflicts_overflow(conn)
-    if overflow_retired:
-        applied.append(overflow_retired)
-    notice_keys = _backfill_notice_dedupe_keys(conn)
-    if notice_keys:
-        applied.append(notice_keys)
-    subject_rows = _rebuild_memory_row_store(conn)
-    if subject_rows:
-        applied.append(subject_rows)
-    retired = _retire_unit_tables(conn)
-    if retired:
-        applied.append(retired)
-    metadata_purged = _purge_retired_metadata_keys(conn)
-    if metadata_purged:
-        applied.append(metadata_purged)
+        # 0.17.1 workspace dismiss 持久化：决策记录独立于 scan_queue 工作台——
+        # 启动 purge / 检测器换代整表 DELETE 释放行身份后，dismiss 仍然存活。
+        dismissals_existed = bool(conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='workspace_dismissals'"
+        ).fetchone())
+        conn.executescript(workspace_dismissals_ddl())
+        if not dismissals_existed:
+            applied.append("workspace_dismissals")
+
+        # 0.17.1 P2 #7: governance_audit — bucket-level action trail (rename/
+        # migrate/confirm_pending reasons). No memory_id/status columns, so the
+        # normalize_audit consumers (rollback_auto_move, doctor) are untouched.
+        governance_existed = bool(conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='governance_audit'"
+        ).fetchone())
+        conn.executescript(governance_audit_ddl())
+        if not governance_existed:
+            applied.append("governance_audit")
+
+    _run_additive_segment(conn, "ddl", applied, _tables)
+
+    def _migrations_a() -> None:
+        migrated = _migrate_legacy_candidates(conn)
+        if migrated:
+            applied.append(f"candidate_rows_migrated({migrated})")
+        cleaned = _cleanup_first_round_artifacts(conn)
+        if cleaned:
+            applied.append(cleaned)
+        swept = _sweep_queued_numeric_rows(conn)
+        if swept:
+            applied.append(swept)
+        rerouted = _migrate_twin_bucket_residents(conn)
+        if rerouted:
+            applied.append(rerouted)
+        cleared = _clearance_migrate_check_route_pairs(conn)
+        if cleared:
+            applied.append(cleared)
+
+    _run_additive_segment(conn, "migrations_a", applied, _migrations_a)
+
+    def _migrations_b() -> None:
+        purged = _purge_terminal_queue_rows(conn)
+        if purged:
+            applied.append(purged)
+        quieted = _dismiss_internal_noise_rows(conn)
+        if quieted:
+            applied.append(quieted)
+        evolution_voided = _void_evolution_queue_rows(conn)
+        if evolution_voided:
+            applied.append(evolution_voided)
+        sha_dedupe = _add_content_sha_dedupe(conn)
+        if sha_dedupe:
+            applied.append(sha_dedupe)
+        status_ingest_idx = _add_memories_status_ingest_index(conn)
+        if status_ingest_idx:
+            applied.append(status_ingest_idx)
+        overflow_retired = _retire_conflicts_overflow(conn)
+        if overflow_retired:
+            applied.append(overflow_retired)
+        notice_keys = _backfill_notice_dedupe_keys(conn)
+        if notice_keys:
+            applied.append(notice_keys)
+        subject_rows = _rebuild_memory_row_store(conn)
+        if subject_rows:
+            applied.append(subject_rows)
+
+    _run_additive_segment(conn, "migrations_b", applied, _migrations_b)
+
+    def _unit_retirement() -> None:
+        retired = _retire_unit_tables(conn, applied)
+        if retired:
+            applied.append(retired)
+
+    _run_additive_segment(conn, "unit_retirement", applied, _unit_retirement)
+
+    def _purge() -> None:
+        metadata_purged = _purge_retired_metadata_keys(conn)
+        if metadata_purged:
+            applied.append(metadata_purged)
+
+    _run_additive_segment(conn, "metadata_purge", applied, _purge)
+
     conn.commit()
     return applied
 
 
 _UNIT_RETIREMENT_KEY = "unit_vector_tables_retired_v1"
+# B2-3（0.17.1 修复批）：vec 虚表 DROP 的 deferred 账本（单键 JSON 字典，
+# 值 = {table: first_deferred_at}）。doctor 的 additive.deferred_drops 读它。
+_VEC_DEFERRED_KEY = "vec_drop_deferred"
 
 
-def _retire_unit_tables(conn: sqlite3.Connection) -> str:
+def _drop_vec_table_deferred(
+    conn: sqlite3.Connection, table: str, applied: list[str],
+    *, label: str | None = None,
+) -> bool:
+    """B2-1（0.17.1 修复批）：DROP 一个 vec0 虚表；模块未注册 → deferred。
+
+    返回 True 表示"本轮已 deferred"（调用方必须跳过其影子 sweep 与 guard
+    键写入，下轮重试）。口径与 claims 退役（_retire_claims_tables）一致，
+    两处共用本 helper。``label`` 用于回执文案（claims 通道保留历史前缀
+    ``claims_vec_drop_deferred``，unit 通道用 ``vec_drop_deferred``）。
+
+    "no such module" = sqlite-vec 未加载（未装 extra / 未配模型）：本轮
+    DROP 必失败，且影子表必须保留——否则恢复轮（模块就位）的 DROP 会因
+    xDestroy 找不到影子表报 "SQL logic error"（不含 no-such-module，不被
+    此处接住）→ 永久跳过。其他 sqlite3.Error 照旧 re-raise（真实故障不
+    得被吞）。
+    """
+    existed = bool(conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+    ).fetchone())
+    if not existed:
+        return False
+    try:
+        conn.execute(f"DROP TABLE {table}")
+    except sqlite3.OperationalError as exc:
+        if "no such module" not in str(exc):
+            raise
+        applied.append(f"{label or 'vec_drop_deferred'}({table})")
+        # B2-3（0.17.1 修复批）：deferred 持久化——单个 JSON 字典键（不用
+        # per-table 键：memory_status 全量回显 migration_state，无界增长）。
+        # 值 = {table: first_deferred_at}；恢复轮 DROP 成功后移除对应表项。
+        try:
+            row = conn.execute(
+                "SELECT value FROM migration_state WHERE key=?", (_VEC_DEFERRED_KEY,)
+            ).fetchone()
+            current = json.loads(row[0]) if row and row[0] else {}
+            if not isinstance(current, dict):
+                current = {}
+            current.setdefault(table, utc_now_iso())
+            conn.execute(
+                "INSERT OR REPLACE INTO migration_state(key,value) VALUES (?,?)",
+                (_VEC_DEFERRED_KEY, json.dumps(current, ensure_ascii=False)),
+            )
+        except sqlite3.Error:
+            pass
+        return True
+    # 成功 DROP：清掉该表的 deferred 记录（若存在）
+    try:
+        row = conn.execute(
+            "SELECT value FROM migration_state WHERE key=?", (_VEC_DEFERRED_KEY,)
+        ).fetchone()
+        current = json.loads(row[0]) if row and row[0] else {}
+        if isinstance(current, dict) and table in current:
+            current.pop(table, None)
+            if current:
+                conn.execute(
+                    "INSERT OR REPLACE INTO migration_state(key,value) VALUES (?,?)",
+                    (_VEC_DEFERRED_KEY, json.dumps(current, ensure_ascii=False)),
+                )
+            else:
+                conn.execute("DELETE FROM migration_state WHERE key=?", (_VEC_DEFERRED_KEY,))
+    except sqlite3.Error:
+        pass
+    return False
+
+
+def _retire_unit_tables(
+    conn: sqlite3.Connection, applied: "list[str] | None" = None,
+) -> str:
     """C6: guarded DROP of memory_evidence + memory_evidence_vec.
 
     The guard is ONE SQL answer (never two coverage numbers subtracted in
@@ -369,7 +522,12 @@ def _retire_unit_tables(conn: sqlite3.Connection) -> str:
     covers the library the migration skips and retries on the next boot —
     never delete-then-backfill. migration_state key prevents re-entry after
     the tables are gone.
+
+    B2-1（0.17.1 修复批）：vec 虚表 DROP 走 _drop_vec_table_deferred——
+    deferred 时本函数返回 ""（不写 guard 键，下轮重试）且影子表保留；
+    applied 用于回执（缺省 None 时内部临时列表，行为等价）。
     """
+    applied = applied if applied is not None else []
     try:
         already = conn.execute(
             "SELECT value FROM migration_state WHERE key=?", (_UNIT_RETIREMENT_KEY,)
@@ -405,7 +563,14 @@ def _retire_unit_tables(conn: sqlite3.Connection) -> str:
         if blocking is not None:
             return ""  # row coverage incomplete — retry next boot
     if "memory_evidence_vec" in tables:
-        conn.execute("DROP TABLE memory_evidence_vec")
+        # B2-1（0.17.1 修复批）：unit vec 虚表同 claims 口径——模块未注册时
+        # DROP 报 "no such module" → 本轮 deferred（跳过 DROP 与 guard 键写入，
+        # 下轮重试）。此前的裸 DROP 在"影子表已被 rebuild_vec_tables sweep、
+        # 虚表本体残留"的形态下报 "SQL logic error"（不含 no-such-module）
+        # → 逃出本函数 → core 吞掉整个 additive → 其后所有步骤每次启动
+        # 永久跳过（实测三步沙盒闭环）。
+        if _drop_vec_table_deferred(conn, "memory_evidence_vec", applied):
+            return ""  # 本轮不写 guard 键：装 vec 后的首次启动继续退役
     if "memory_evidence" in tables:
         conn.execute("DROP TABLE memory_evidence")
     try:
@@ -821,11 +986,12 @@ def _retire_claims_tables(conn: sqlite3.Connection, applied: list[str]) -> None:
     """0.17.1 claims 数据层退役（P1-1 修复，2026-10-03 方案 A1）。
 
     DROP 循环里 vec0 虚拟表在模块未注册的连接上报 "no such module" → 记
-    deferred 跳过。影子表 sweep **仅当没有 vec 表 deferred 时执行**——
-    deferred 轮若把影子表清光，恢复轮（模块就位）的 DROP 会因 xDestroy
-    找不到影子表报 "SQL logic error"（不含 no-such-module）→ re-raise →
-    additive 收尾对该库每次启动失败回滚，未来加列通道永久死亡。
-    deferred 轮影子表保留，恢复轮 DROP 成功后 sweep 照常清。
+    deferred 跳过（B2-1：与 unit 通道共用 _drop_vec_table_deferred）。影子表
+    sweep **仅当没有 vec 表 deferred 时执行**——deferred 轮若把影子表清光，
+    恢复轮（模块就位）的 DROP 会因 xDestroy 找不到影子表报 "SQL logic
+    error"（不含 no-such-module）→ re-raise → additive 收尾对该库每次启动
+    失败回滚，未来加列通道永久死亡。deferred 轮影子表保留，恢复轮 DROP
+    成功后 sweep 照常清。
     """
     dropped: list[str] = []
     vec_drop_pending = False
@@ -833,19 +999,12 @@ def _retire_claims_tables(conn: sqlite3.Connection, applied: list[str]) -> None:
         existed = bool(conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
         ).fetchone())
+        if _drop_vec_table_deferred(
+            conn, table, applied, label="claims_vec_drop_deferred",
+        ):
+            vec_drop_pending = True
+            continue
         if existed:
-            try:
-                conn.execute(f"DROP TABLE {table}")
-            except sqlite3.OperationalError as exc:
-                # vec0 虚拟表的 DROP 需要模块注册：未装 sqlite-vec extra 的
-                # 库上报 "no such module: vec0"。本轮跳过 vec 表与影子表
-                # sweep（普通表照清），不阻塞 additive 收尾；装 vec 后的
-                # 首次启动再清（影子表保留是恢复轮 DROP 可重试的前提）。
-                if "no such module" not in str(exc):
-                    raise
-                applied.append(f"claims_vec_drop_deferred({table})")
-                vec_drop_pending = True
-                continue
             dropped.append(table)
     if vec_drop_pending:
         return

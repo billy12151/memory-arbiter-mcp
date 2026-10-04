@@ -762,6 +762,41 @@ def _c_config_warnings(ctx: _DoctorCtx) -> Finding | None:
     return _finding("config.warnings", False, "; ".join(ctx.settings.config_warnings))
 
 
+def _c_additive_incomplete(ctx: _DoctorCtx) -> Finding | None:
+    """B3（0.17.1 修复批）：additive 的 vec 表 deferred 可见。
+
+    此前 vec 虚表 DROP 被 deferred（模块未加载）只落一条启动 warning，
+    findings 与 console 都看不到；而该状态的后果是"退役通道卡住 + 每次
+    启动重试"（若影子表被误清则永久跳过，见 B2-1）。读 B2-3 的
+    ``vec_drop_deferred`` 字典键；干净库返回 None（不新增 finding）。
+    """
+    import json as _json
+
+    try:
+        row = ctx.conn.execute(
+            "SELECT value FROM migration_state WHERE key='vec_drop_deferred'"
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None or not row[0]:
+        return None
+    try:
+        deferred = _json.loads(str(row[0]))
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(deferred, dict) or not deferred:
+        return None
+    detail = "; ".join(
+        f"{table} (deferred since {stamp})" for table, stamp in sorted(deferred.items())
+    )
+    return _finding(
+        "additive.deferred_drops", False,
+        "vec0 tables could not be dropped yet (sqlite-vec module not loaded at "
+        f"some boot); they will be cleared once the module is available: {detail}",
+        evidence={"deferred": deferred},
+    )
+
+
 # Order is observable twice over: console_static renders findings.slice(0, 6),
 # and a check that reads state a previous one could have changed depends on
 # staying where it is. Reordering this tuple changes product output.
@@ -787,6 +822,9 @@ _CHECKS: tuple[_Check, ...] = (
     _c_semantic_judge_model,
     _c_config_warnings,
     _c_row_vector_coverage,
+    # B3（0.17.1 修复批）：追加在末尾——干净库不出现（None），不影响
+    # console_static 的 findings.slice(0, 6) 与既有 golden 顺序。
+    _c_additive_incomplete,
 )
 
 
