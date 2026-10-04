@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import gc
-import hashlib
 import json
 import os
 import shutil
@@ -13,15 +12,12 @@ import sys
 import uuid
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from .config import Settings
 from .constants import (
     EMBED_PREFIX_STS,
     EMBEDDING_DEFAULT_DIM,
-    EMBEDDING_MAX_SECTION_CHARS,
-    EMBEDDING_N_CTX,
-    EMBEDDING_RESERVED_TOKENS,
     is_default_workspace_term,
 )
 from .db import MemoryDB
@@ -32,11 +28,6 @@ from .db_generation import (
     detect_database_generation,
 )
 from .db.meta import ACTIVE_DIM_META_KEY, active_dim_on_connection
-from .embedder import (
-    EMBEDDING_PIPELINE_VERSION,
-    compute_embedding_space_id,
-    compute_model_digest,
-)
 from .evidence import local_text_units
 from .db.meta import active_scan_boundary_on_connection, canonical_scan_boundary
 from .tools import MemoryTools
@@ -54,140 +45,25 @@ FULL_REBUILD_COPY_TABLES = tuple(
 DESTRUCTIVELY_REBUILT_TABLES = (
     "conflicts", "conflict_judgments", "semantic_notices", "workspace_alias_events",
 )
+from .vnext_probe import (  # noqa: F401
+    _table_exists as _table_exists,
+    _configured_embedding_space_id as _configured_embedding_space_id,
+    _source_vec_state as _source_vec_state,
+    _source_active_dim as _source_active_dim,
+    _counts_on_connection as _counts_on_connection,
+    _counts as _counts,
+    _destructive_counts as _destructive_counts,
+    _fingerprint_on_connection as _fingerprint_on_connection,
+    _fingerprint as _fingerprint,
+)
+from .vnext_final import final_sync as final_sync
+
 _BUILDING_SCHEMA_GENERATION = f"{CURRENT_SCHEMA_GENERATION}:building"
 _OBSOLETE_SUCCESS_RECEIPTS = (
     "row_counts_match", "evidence_coverage", "failed_count", "source_stable",
     "workspace_vector_failures", "destructive_tables_empty",
     "target_space_ready", "cursor_memory_id", "evidence_rebuild_space_id",
 )
-
-
-def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
-    return conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
-    ).fetchone() is not None
-
-
-def _configured_embedding_space_id(settings: Settings | None, active_dim: int | None) -> str | None:
-    """Compute the configured space identity without loading the GGUF runtime.
-
-    The embedding dimension is a per-library fact (``active_dim`` from the
-    source database). Without it there is nothing trustworthy to derive an
-    identity from — return None rather than guessing with a default, so a
-    missing dim can never write a wrong space_id into the target.
-    """
-    if settings is None or active_dim is None or settings.embedding_model_path is None:
-        return None
-    model_path = settings.embedding_model_path.expanduser()
-    if not model_path.is_file():
-        return None
-    try:
-        digest = compute_model_digest(str(model_path))
-    except OSError:
-        return None
-    return compute_embedding_space_id(
-        digest,
-        active_dim,
-        EMBEDDING_PIPELINE_VERSION,
-        {
-            "n_ctx": EMBEDDING_N_CTX,
-            "reserved_tokens": EMBEDDING_RESERVED_TOKENS,
-            "max_section_chars": EMBEDDING_MAX_SECTION_CHARS,
-        },
-    )
-
-
-def _source_vec_state(path: Path) -> dict[str, str]:
-    try:
-        with contextlib.closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as conn:
-            if not _table_exists(conn, "_vec_index_meta"):
-                return {}
-            return {
-                str(row[0]): str(row[1])
-                for row in conn.execute("SELECT key,value FROM _vec_index_meta")
-            }
-    except sqlite3.Error:
-        return {}
-
-
-def _source_active_dim(path: Path) -> int | None:
-    """Read-only active dim of the source library (meta key, else vec0 SQL)."""
-    try:
-        with contextlib.closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as conn:
-            return active_dim_on_connection(conn)
-    except sqlite3.Error:
-        return None
-
-
-def _counts_on_connection(conn: sqlite3.Connection) -> dict[str, int]:
-    return {
-        table: int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
-        if _table_exists(conn, table) else 0
-        for table in PRESERVED_TABLES
-    }
-
-
-def _counts(path: Path) -> dict[str, int]:
-    with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
-        return _counts_on_connection(conn)
-
-
-def _destructive_counts(path: Path) -> dict[str, int]:
-    with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
-        return {
-            table: int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
-            if _table_exists(conn, table) else 0
-            for table in DESTRUCTIVELY_REBUILT_TABLES
-        }
-
-
-def _fingerprint_on_connection(conn: sqlite3.Connection) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for table, order_by in (
-        ("memories", "id"),
-        ("memory_history", "id"),
-        ("memory_row", "id"),
-        ("workspace_canonicals", "id"),
-        ("workspace_aliases", "alias_workspace,canonical"),
-        ("backup_replay_log", "replay_key"),
-    ):
-        digest = hashlib.sha256()
-        count = 0
-        if _table_exists(conn, table):
-            if table == "memory_row":
-                # 0.17.0 C6: the derived-store fingerprint follows the rows
-                # (the old unit fingerprint watched a table that is now
-                # empty — a coverage blind spot found in review).
-                rows = conn.execute(
-                    """SELECT memory_id,memory_version,content_hash,row_index,kind,
-                              text,start_offset,end_offset
-                       FROM memory_row ORDER BY memory_id,row_index"""
-                )
-            elif table == "workspace_aliases":
-                rows = conn.execute(
-                    "SELECT alias_workspace,canonical,status,updated_at "
-                    "FROM workspace_aliases ORDER BY alias_workspace,canonical"
-                )
-            else:
-                rows = conn.execute(f"SELECT * FROM {table} ORDER BY {order_by}")
-            for row in rows:
-                count += 1
-                digest.update(
-                    json.dumps(dict(row), ensure_ascii=False, sort_keys=True).encode()
-                )
-                digest.update(b"\n")
-        result[f"{table}_count"] = count
-        result[f"{table}_digest"] = digest.hexdigest()
-    return result
-
-
-def _fingerprint(path: Path) -> dict[str, Any]:
-    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-    conn.row_factory = sqlite3.Row
-    try:
-        return _fingerprint_on_connection(conn)
-    finally:
-        conn.close()
 
 
 def inspect(source: Path, target: Path, settings: Settings | None = None) -> dict[str, Any]:
@@ -933,162 +809,6 @@ def build(source: Path, target: Path, settings: Settings, *, resume: bool = Fals
         "switch_ready": switch_ready,
         "next_step": "freeze writes and run --final-sync before switching db_path" if complete else "fix failures and rerun with --resume",
     }
-
-
-def final_sync(
-    source: Path,
-    target: Path,
-    settings: Settings,
-    *,
-    progress: bool = True,
-    publish_callback: Callable[[], dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    """Build verified staging and atomically replace the side-by-side target."""
-    if target.exists() and not _target_owned_by_source(target, source):
-        return {
-            "ok": False,
-            "error": "existing_target_not_owned_by_source",
-            "source": str(source),
-            "target": str(target),
-        }
-    staging = target.with_name(target.name + ".finalizing")
-    if staging.exists():
-        if not _target_owned_by_source(staging, source):
-            return {
-                "ok": False,
-                "error": "existing_staging_not_owned_by_source",
-                "source": str(source),
-                "staging": str(staging),
-            }
-        staging.unlink()
-    _remove_sidecars(staging)
-    # Fail fast on an active source writer (B-D4): without this probe a
-    # wedged old writer is only caught by the post-build fingerprint gate
-    # below, after a full staging rebuild. The short busy_timeout keeps the
-    # probe cheap; BEGIN EXCLUSIVE doubles as the write probe.
-    if source.exists():
-        probe = sqlite3.connect(source, timeout=1)
-        try:
-            probe.execute("PRAGMA busy_timeout=1000")
-            probe.execute("BEGIN EXCLUSIVE")
-            probe.execute("ROLLBACK")
-        except sqlite3.OperationalError:
-            return {
-                "ok": False,
-                "error": "source_has_active_writer",
-                "source": str(source),
-                "target": str(target),
-                "next_step": (
-                    "stop all writers on the source database and rerun the "
-                    "final sync; no staging rebuild has started"
-                ),
-            }
-        finally:
-            probe.close()
-    result = build(source, staging, settings, progress=progress)
-    if not result.get("ok"):
-        result["staging"] = str(staging)
-        return result
-    if not result.get("switch_ready"):
-        result.update({
-            "ok": False,
-            "error": "staging_not_switch_ready",
-            "staging": str(staging),
-        })
-        return result
-    # Hold an EXCLUSIVE transaction on the source from final verification
-    # through target publication and, when supplied by the upgrade wrapper,
-    # the config switch. This deterministically excludes an already-open old
-    # writer from landing a commit in the verification-to-switch gap.
-    source_lock = sqlite3.connect(source, timeout=5)
-    source_lock.row_factory = sqlite3.Row
-    try:
-        source_lock.execute("PRAGMA busy_timeout=5000")
-        source_lock.execute("BEGIN EXCLUSIVE")
-        locked_fingerprint = _fingerprint_on_connection(source_lock)
-        if locked_fingerprint != result.get("source_fingerprint"):
-            source_lock.execute("ROLLBACK")
-            result.update({
-                "ok": False,
-                "error": "source_changed_during_final_sync",
-                "staging": str(staging),
-                "next_step": (
-                    "stop all writers and rerun the final sync; the fully built "
-                    "staging database is kept at the staging path and will be "
-                    "rebuilt on the next run (it roughly doubles disk usage "
-                    "until then)"
-                ),
-            })
-            return result
-        _remove_sidecars(target)
-        os.replace(staging, target)
-        _remove_sidecars(staging)
-        # The staging build's startup-lock sidecar outlives the rename; the
-        # switched-in database does not need one. Remove it here — staging is
-        # already renamed away — so the config-switch failure branch below
-        # cannot leave the orphan lock file behind either.
-        staging_lock = staging.with_name(staging.name + ".startup.lock")
-        if staging_lock.exists():
-            staging_lock.unlink()
-        if publish_callback is not None:
-            try:
-                publish_result = publish_callback()
-            except Exception as exc:
-                # A raising callback used to escape via the BaseException path
-                # with no structured result; converge it into the same failure
-                # branch as a declined switch so operators get the target path.
-                publish_result = {"switched": False, "error": f"publish_callback_raised: {exc}"}
-            if not isinstance(publish_result, dict):
-                # A non-dict return (e.g. None) must not escape as an
-                # AttributeError on .get below with the target already live;
-                # converge it into the same structured failure branch.
-                publish_result = {
-                    "switched": False,
-                    "error": f"publish_callback_returned_invalid: {type(publish_result).__name__}",
-                }
-            result["config"] = publish_result
-            # Strict identity check: only a real boolean True confirms the
-            # switch. A truthy string like "false" must take the failure
-            # branch instead of committing a switch that never happened.
-            if publish_result.get("switched") is not True:
-                source_lock.execute("ROLLBACK")
-                result.update({
-                    "ok": False,
-                    "error": "migration_complete_but_config_switch_failed",
-                    # The target database is already live (os.replace above);
-                    # only the config switch failed. Tell operators exactly
-                    # where the new database is and that a switch is still due.
-                    "target_ready": True,
-                    "needs_config_switch": True,
-                    "target": str(target),
-                    # build() left "freeze writes and run --final-sync before
-                    # switching db_path" in the result, which would send the
-                    # operator through another hours-long rebuild even though
-                    # only the config switch remains. Override it.
-                    "next_step": (
-                        "the target database is already live; only the config "
-                        "switch failed — point db_path at the target manually "
-                        "(or fix the config and retry the switch); no rebuild "
-                        "is needed"
-                    ),
-                })
-                return result
-        source_lock.execute("COMMIT")
-    except BaseException:
-        if source_lock.in_transaction:
-            source_lock.execute("ROLLBACK")
-        raise
-    finally:
-        source_lock.close()
-    result.update({
-        "target": str(target),
-        "final_sync": True,
-        "next_step": (
-            "verify the target in normal use, then switch db_path; "
-            "keep the source for rollback"
-        ),
-    })
-    return result
 
 
 def run_cli(argv: list[str] | None = None) -> int:
