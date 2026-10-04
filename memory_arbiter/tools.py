@@ -7,7 +7,7 @@ from collections import OrderedDict, deque
 from contextvars import ContextVar
 from typing import Any
 
-from .acl import CallerWorkspace, forbidden_payload, memory_public_stub, raw_workspace, visible_memory
+from .acl import CallerWorkspace, forbidden_payload, memory_public_stub, visible_memory
 from .tools_forwards import _ToolsForwards
 from .tools_lifecycle import _ToolsLifecycle
 from .tools_semantic import _ToolsSemantic
@@ -205,8 +205,9 @@ class MemoryTools(_ToolsForwards, _ToolsLifecycle, _ToolsSemantic, _ToolsNotices
 
     def start_update_monitor(self, monitor: UpdateMonitor | None = None) -> None:
         # Product notice delivery is owned by the four outer product wrappers,
-        # not DegradeState.response(): nested responses must never consume it.
-        self.db.state.notice_provider = None
+        # not DegradeState.response() (the old state-level notice_provider
+        # channel was removed 2026-10-05: its only production assignment was
+        # the explicit None below).
         try:
             self._update_monitor = monitor or UpdateMonitor(enabled=self.settings.update_check_enabled)
         except Exception:
@@ -564,15 +565,6 @@ class MemoryTools(_ToolsForwards, _ToolsLifecycle, _ToolsSemantic, _ToolsNotices
         record = self.db.get_memory(int(memory_id))
         return record if self._memory_visible(record, caller) else None
 
-    def _memory_acl_response_fields(self, caller: CallerWorkspace) -> dict[str, Any]:
-        return caller.response_fields() if caller.isolation == "strict" else {}
-
-    def _strict_filter_records(self, records: list[dict[str, Any]], caller: CallerWorkspace) -> list[dict[str, Any]]:
-        if caller.isolation != "strict" or not caller.canonical:
-            return records
-        allowed = {str(a or "").strip() for a in caller.scope_canonicals() if str(a or "").strip()}
-        return [r for r in records if raw_workspace(r) in allowed]
-
     @staticmethod
     def _conflict_next_call(
         conflict: dict[str, Any], workspace: str | None = None,
@@ -679,13 +671,6 @@ class MemoryTools(_ToolsForwards, _ToolsLifecycle, _ToolsSemantic, _ToolsNotices
         if caller.isolation == "strict":
             detail.update(caller.response_fields())
         return detail
-
-    def _conflict_visible(self, conflict_id: int, caller: CallerWorkspace | None = None) -> bool:
-        return self._conflict_detail_for_workspace(conflict_id, caller) is not None
-
-    @staticmethod
-    def _confidence_rank(hint: str | None) -> int:
-        return ConflictSignalPipeline._confidence_rank(hint)
 
     def _attach_conflict_signals(
         self,

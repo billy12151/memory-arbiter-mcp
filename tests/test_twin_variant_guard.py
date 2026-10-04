@@ -150,3 +150,12 @@ def test_confirm_alias_refuses_variant(tmp_path: Path) -> None:
         )
     assert ok is False
     assert any("protected-bucket" in w for w in warnings)
+    # 2026-10-05 审查补强：拒绝必须是「未写入」——本原语对 False 软返回
+    # （事务照常提交），若守卫后置，毒 alias 行已落库，随后 twin 本体经
+    # confirmed-alias 短路被折进 mema_twin 攻击者桶（P1-3 毒化形态）。
+    with tools.db.connection() as conn:
+        rows = list(conn.execute(
+            "SELECT alias_workspace, canonical, status FROM workspace_aliases "
+            "WHERE alias_workspace='proj-a'"
+        ).fetchall())
+    assert rows == []

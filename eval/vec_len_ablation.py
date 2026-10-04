@@ -84,10 +84,9 @@ doc_vecs = {n: embed_cached(row_texts, p, f"doc/{n}") for n, p in DOC.items()}
 q_texts = [q["query"] for q in queries]
 qry_vecs = {n: embed_cached(q_texts, p, f"qry/{n}") for n, p in QRY.items()}
 
-key_arr = np.asarray(row_keys)
 results = {}
-for dn, dp in DOC.items():
-    for qn, qp in QRY.items():
+for dn in DOC:
+    for qn in QRY:
         V = doc_vecs[dn]
         Q = qry_vecs[qn]
         sims = Q @ V.T                       # (nq, nrows)

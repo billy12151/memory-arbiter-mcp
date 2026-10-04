@@ -70,6 +70,18 @@ class _WsRowopsMixin:
     ) -> tuple[bool, list[str]]:
         canonical = _coerce_ws(canonical)
         if not canonical:            return False, ["canonical must be a non-empty workspace string."]
+        # A9 补漏（R3 对码实证）：搬运路径（set canonical / move by id）此前
+        # 无保护桶守卫——以 twin 身份走 move 即可把变体注册进 canonical 表，
+        # 绕过写路径的 insert_memory 守卫。守卫必须在 void_conflicts 之前：
+        # 本原语对 False 软返回（不 raise），事务照常提交，后置检查会把
+        # 旧桶票据作废落库而 UPDATE 未执行——「拒绝」的语义是「未写入」。
+        from ..twin_redirect import protected_bucket_variant
+
+        if protected_bucket_variant(canonical):
+            return False, [
+                f"workspace {canonical!r} is a protected-bucket spelling variant "
+                "and cannot be assigned; use the canonical name"
+            ]
         current = conn.execute(
             "SELECT COALESCE(NULLIF(workspace_canonical,''),workspace) AS bucket "
             "FROM memories WHERE id = ?",
@@ -91,16 +103,6 @@ class _WsRowopsMixin:
                 conn, [int(memory_id)],
                 reason=f"canonical reassignment -> {canonical!r}",
             )
-        # A9 补漏（R3 对码实证）：搬运路径（set canonical / move by id）此前
-        # 无保护桶守卫——以 twin 身份走 move 即可把变体注册进 canonical 表，
-        # 绕过写路径的 insert_memory 守卫。
-        from ..twin_redirect import protected_bucket_variant
-
-        if protected_bucket_variant(canonical):
-            return False, [
-                f"workspace {canonical!r} is a protected-bucket spelling variant "
-                "and cannot be assigned; use the canonical name"
-            ]
         cur = conn.execute(
             "UPDATE memories SET workspace_canonical = ?, "
             "scan_watermark = CASE WHEN "

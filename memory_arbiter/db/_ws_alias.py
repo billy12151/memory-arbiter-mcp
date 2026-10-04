@@ -89,6 +89,19 @@ class _WsAliasMixin:
                 return False, default_refusal
             if key == _normalize_alias_key(canonical):
                 return True, []
+        if status == "confirmed":
+            # A9（0.17.1 修复批）：别名确认同样不得注册保护桶变体——毒行
+            # 落地后精确命中保护键、劫持 twin 本体写入（P1-3 同族）。
+            # 守卫必须在任何写入之前：本原语对 False 软返回（不 raise），
+            # 事务照常提交，后置检查会把毒 alias 行连同 force 分支的
+            # rejected 删除一起落库——「拒绝」的语义是「未写入」。
+            from ..twin_redirect import protected_bucket_variant
+
+            if protected_bucket_variant(canonical):
+                return False, [
+                    f"workspace {canonical!r} is a protected-bucket spelling variant "
+                    "and cannot be confirmed; use the canonical name"
+                ]
         # Rejected-pair check by mechanical key on BOTH sides, not exact
         # string: a ghost spelling variant of the rejected target must not
         # bypass the refusal, and neither may a spelling-variant ALIAS key
@@ -160,15 +173,6 @@ class _WsAliasMixin:
             (key, canonical, status, now),
         )
         if status == "confirmed":
-            # A9（0.17.1 修复批）：别名确认同样不得注册保护桶变体——毒行
-            # 落地后精确命中保护键、劫持 twin 本体写入（P1-3 同族）。
-            from ..twin_redirect import protected_bucket_variant
-
-            if protected_bucket_variant(canonical):
-                return False, [
-                    f"workspace {canonical!r} is a protected-bucket spelling variant "
-                    "and cannot be confirmed; use the canonical name"
-                ]
             conn.execute(
                 "INSERT OR IGNORE INTO workspace_canonicals(name,created_at) VALUES(?,?)",
                 (canonical, now),

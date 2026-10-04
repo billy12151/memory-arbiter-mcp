@@ -19,6 +19,7 @@ import pytest
 import memory_arbiter.pipeline.evidence as ev
 from memory_arbiter.constants import SEMANTIC_INTERNAL_SELF_KNN_K
 import tests.test_vnext_evidence as tv
+from tests.test_vnext_evidence import FakeEmbedder
 
 
 def _drain_internal(tools, memory_id: int) -> tuple[list, dict]:
@@ -52,6 +53,60 @@ def test_similar_rows_pair_dissimilar_do_not(tmp_path: Path) -> None:
     assert not any("load.py" in a or "load.py" in b for a, b in quotes), \
         "异主题行不得进入内部配对（cos floor）"
     assert receipt.get("internal_conflicts", 0) >= 1
+
+
+def test_asymmetric_neighbour_pair_orientation(tmp_path: Path) -> None:
+    """2026-10-05 审查修复：KNN 配对方向与扫描腿约定对齐（unit_index 升序）。
+
+    构造非对称邻域：L0 的 top-5 被 5 个近邻（-5° 同族）占满（L6 不在），
+    L6 的 top-5 含 L0（45°，cos≈0.707 过 floor）。修复前该对由 L6 发现、
+    以 (L6,L0) 方向落库，而扫描腿 _examine_internal 恒以 i<j 探测——
+    exists 必 miss，同一矛盾下一轮 kick 再落 (L0,L6) 一行（UNIQUE 有序
+    键不拦）。修复后写侧归一 unit_a < unit_b，两侧共享同一身份。
+    """
+    import math
+
+    class _AsymEmbedder(FakeEmbedder):
+        near = (math.cos(math.radians(-5)), math.sin(math.radians(-5)))
+        vectors = {}
+
+        @classmethod
+        def embed_text(cls, prefix, body, max_body_chars=None):
+            from memory_arbiter.embedder import EmbedResult
+            v = cls.vectors.get(body.strip()) or [0.0, 1.0]
+            return EmbedResult(list(v), False, len(body), len(body))
+
+    lines = [f"网关超时阈值为 {5000 + i}ms。" for i in range(7)]
+    # L0 独占 0°；L1..L5 同在 -5°（与 L0 cos≈0.996、互相 cos=1）；L6 在 45°
+    _AsymEmbedder.vectors = {
+        lines[0]: (1.0, 0.0),
+        **{lines[i]: _AsymEmbedder.near for i in range(1, 6)},
+        lines[6]: (math.cos(math.radians(45)), math.sin(math.radians(45))),
+    }
+    tools = tv.make_tools(tmp_path, semantic_enabled=True)
+    tools._embedder = _AsymEmbedder()
+    tools.settings.semantic_conflict_on_write = "off"
+    new = tools.memory_write(
+        content="\n".join(lines), subject="asym", tags=[], workspace="default",
+    )["data"]
+    rows, _receipt = _drain_internal(tools, new["id"])
+    assert rows, "非对称邻域至少 L0×L6 一对必须落地"
+    # 核心方向钉：写侧落的每个内部对都与扫描腿 i<j 约定同身份
+    bad = [(r["unit_a"], r["unit_b"]) for r in rows if int(r["unit_a"]) > int(r["unit_b"])]
+    assert not bad, f"KNN 发现方向未归一（扫描腿将以反向再落一行）: {bad}"
+    # L0×L6 对确实存在（且其 quote 方向与身份一致）
+    pair = [
+        r for r in rows
+        if ("5000ms" in (r["quote_a"] or "") and "5006ms" in (r["quote_b"] or ""))
+        or ("5000ms" in (r["quote_b"] or "") and "5006ms" in (r["quote_a"] or ""))
+    ]
+    assert pair, f"L0×L6 对缺失: {[(r['quote_a'], r['quote_b']) for r in rows]}"
+    # 扫描腿口径探测（i<j 有序）必须命中写侧已落的行
+    with tools.db.connection() as conn:
+        hit = tools.db.internal_conflicts.exists_on_conn(
+            conn, int(new["id"]), 1, pair[0]["unit_a"], pair[0]["unit_b"],
+        )
+    assert hit, "扫描腿 exists 探针（i<j 有序键）必须命中写侧落库的身份"
 
 
 def test_knn_k_cap(tmp_path: Path) -> None:

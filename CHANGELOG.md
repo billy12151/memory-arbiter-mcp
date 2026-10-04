@@ -5,6 +5,22 @@ Versions follow semantic versioning.
 
 ## [0.17.1 追加] — 未发版（claim 对比通道退役 + 判定输入上下文化，owner 2026-09-28 拍板）
 
+### Fixed + Removed (全项目设计符合性审查批——6 域并行对照宣称口径 + 死代码专项，2026-10-05)
+
+六域只读审查（判定链路/扫描管线/写入召回/ workspace+DB /入口API面/死代码专项）对照 CHANGELOG 与方案文档逐条实证后的修复与清扫；2778 passed（+4 回归钉）/ mypy 13 基线 / ruff 1 基线。
+
+- **A9 守卫顺序两处（探针实证）**：`_apply_alias_decision_on_conn` 的保护桶守卫在 INSERT **之后**才判——本原语对 False 软返回（事务照常提交），「拒绝」的毒 alias 行照样落库，随后 confirmed-alias 短路把 twin 本体写入折进攻击者桶（回归钉只断言 ok=False 从不看表，绿灯掩盖）。守卫前置到一切写入之前（含 force 分支的 rejected 删除）；`set_memory_workspace_canonical_on_conn` 同型（守卫在 void_conflicts 之后——拒绝时旧桶票据已作废落库而 UPDATE 未执行），一并前置。测试补「毒行不得落库」断言。
+- **normalize 丢 committed 元素（探针实证）**：`normalize_workspace_canonicals` 执行分支把 A5 的 `committed` 第三元素丢给下划线、按 `if merge_warnings` 一律记 `merge_refused`——repoint 对齐守卫在已提交合并上也会带警告返回（丢弃机械同键 rejected 行），于是已发生的合并被报告成被拒：dry-run 报 merged、执行报 refused、库内已合并三方矛盾。改 `merge_warnings and not merged` 才记 refused；新增三方一致性回归钉（spaß/SPASS 构造）。
+- **B2 自查配对方向未归一（探针实证）**：KNN 配对「发现者在前」，非对称邻域下写侧以 (q,p) 落 internal_conflicts，而扫描腿恒 i<j 探测——exists 探针有序键必 miss，同一矛盾下一轮 kick 以 (p,q) 再落一行 pending（UNIQUE 不拦，计数虚高+重复判定）。配对按 unit_index 升序归一（quote/span 跟随交换）；新增非对称邻域回归钉（0°/-5°/45° 向量构造 + 全表 unit_a<unit_b + 扫描腿 exists 交叉命中；变异验证过）。
+- **index-only 全豁免守卫缺口**：`index_rows_in_job` 缺 A3 同款「全豁免不 publish」——`publish_rows([],[])` 谎报 indexed、记忆永久留在 missing_row_vector_rows 选集、每个后续 job 重复空 publish 事务。补 skipped/all_rows_exempted 分支 + 回归钉。
+- **扫描腿豁免计数断链**：`_process_memory` 写进 outcome 的 `table_rows_exempted` 全链无消费（kick 汇总/回执/轮状态都不读），B3「回执可见」宣称在扫描腿落空。接线进轮级账本与回执（`table_rows_exempted_total`，快/慢车道都计）；测试补断言。
+- **poison_skipped 恢复 kick 口径**：只按累计计数筛选，毒记忆修好后的恢复 kick（水位已推进、complete=True）仍报 poison_skipped 自相矛盾。改「本 kick 仍失败且达上界」才报；计数仍落轮状态；回归钉覆盖两个方向。
+- **vec0 upsert 脆弱点**：写路径 inline `INSERT OR REPLACE INTO memory_summary_vec` 依赖「行必不存在」这一未声明前提（vec0 无视 conflict 子句，PK 冲突即 raise 被 except 吞、留陈旧向量）。改 DELETE+INSERT（与 store 层 upsert 惯例一致）。
+- **entity 清除层退役**：`classify_pair` 的 owner-⑪ entity 分支自 metadata.entity 随 G3（0.17.0）退役后生产恒不可达（4 个调用点无一传参）而 docstring 宣称 "free to run"。随数据源一并删除参数与分支，测试改钉签名。
+- **失实文档/帮助面四处**：upgrade_cli conflict_only 文案仍宣称「0.17.0 does rotate it」（与终局拍板「钉 2 不轮换」相反）；`semantic_control_note` 描述已删除的 Qwen 协议字段（n_ctx/prompt_version/pair-v6）——改写为 mDeBERTa 实际字段；config 退役键 `claims` 段零警告（补 "removed in 0.17.1" 软着陆，与 model_path 同款）；examples 配置样例自称 21 键实含 20（补 `mdeberta_model_dir`，现与 config_registry 逐键对齐）。另：semantic_status 降级 note 删已消亡的 `evidence_units_capped` 句；`_wide_recall` docstring 通道⑤表名改 `memory_row_vec`；setup_cli/constants/判定链路过期注释（Qwen 残句、19 键计数、process_conflicts 悬空指向、E10① 措辞）修正。
+- **死代码清扫（vulture + AST + 全仓 grep 逐一实证零引用）**：孤儿方法/变量 20 项（`_publish_missing_workspace_canonical_vector` 一步式 ws 向量 API（生产零调用，4 处测试迁两步 API）、`build_unopenable_report`（已被内联替代）、`_scan_envelope`（双料陈旧：还读已退役的 metadata.entity）、`has_pending_jobs`、`PairGateResult`、`_semantic_control`、`_embedding_text`、`_conflict_visible`、`_memory_acl_response_fields`、`_strict_filter_records`、`_confidence_rank` 对（wrapper⇄实现互为唯一引用）、`_get_conflict_row`、`_labels_fallback`、`strict_ws`/`Isolation.ALL`/`QUEUE_STATUSES`/`_is_cjk_char`/`CallerWorkspace.strict`、`skipped_ids`/`result_version`/`result_hash`/`tags_text`/`metadata_update`/`fallback_notices`/`cleared_garbage` 死累加器、judge child 的 `unexpected` 死变量）；`DegradeState.notice_provider` 通道 + `degraded` property（生产唯一赋值点是主动置 None，通知交付归外层 wrapper，测试改钉 extra_notices 路）；`_TECHNICAL_REASONS` 幽灵键 `judge_invalid_output`（无产生点；集合保留为测试钉面并注明）；tests 4 处死 pop（claims_channel 键已随通道退役）；eval 一次性脚本死变量 6 处；孤儿 import（os/raw_workspace/utc_now_iso/Callable）与双 `import hashlib`（ruff 基线项之外的 F401 归零）。
+- **不动项（owner 域）**：config.py 两个 vestigial 字段（动契约测试计数）、`server.build_server`（team 仓可能引用）、`MemoryStatus` 三个枚举成员（协议文档价值）、`wait_boot_backfills`/`workers.reserve`（测试保活面）、`test_scan_capability_e2e` 的 Qwen 残留路径（挂真实 mDeBERTa ckpt 待定）、probe/一次性脚本与 pairs_claims.jsonl（存档口径）。
+
 ### Refactor (大文件拆分批——纯移动零行为变化，2026-10-04)
 
 方案 v2 与两轮 review 记录：`ZCodeProject/docs/mema-file-split-plan-2026-10-04.md`（R1 对码 + R2 对抗回写，R3/R4 施工后 review 见方案回写区）。

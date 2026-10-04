@@ -629,11 +629,11 @@ class _WsMergeMixin:
                 )
             for loser in losers:
                 if execute:
-                    updated, merge_warnings, _merged = self._merge_workspace_core_on_conn(
+                    updated, merge_warnings, merged = self._merge_workspace_core_on_conn(
                         conn, loser, winner, db=self._db,
                     )
                     result["warnings"].extend(merge_warnings)
-                    if merge_warnings:
+                    if merge_warnings and not merged:
                         # The merge was refused (e.g. active-conflict slot
                         # collision) — report it as skipped-with-reason, not
                         # as a zero-row merge that silently did not happen.
@@ -644,6 +644,12 @@ class _WsMergeMixin:
                             "reason": " ".join(merge_warnings),
                         })
                         continue
+                    # merged=True with warnings (A5 committed semantics, e.g.
+                    # repoint dropped a mechanical-twin rejected row): the
+                    # merge HAPPENED and must be reported as such — falling
+                    # into the refused branch here would report the merged
+                    # group as skipped, contradicting both the dry-run plan
+                    # and the committed library state.
                 else:
                     # Plan honesty: the same read-only collision guard runs
                     # in dry-run so the plan reports a would-be refusal as

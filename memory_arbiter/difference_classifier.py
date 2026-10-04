@@ -256,22 +256,18 @@ def has_value_opposition(a: str, b: str) -> bool:
 
 
 
-def classify_pair(
-    quote_a: "str | None", quote_b: "str | None", *, route: str,
-    entity_a: "str | None" = None, entity_b: "str | None" = None,
-) -> str:
+def classify_pair(quote_a: "str | None", quote_b: "str | None", *, route: str) -> str:
     """Return ``"keep"`` (enqueue for agent judgment) or ``"clear"``
     (machine-cleared, count only, never lands in conflicts).
 
     ``route`` is the check-route reason (``numeric_value_candidate`` or any
-    other check reason, treated as the similarity route). The entity layer
-    (owner ⑪) clears pairs whose BOTH-side metadata.entity values exist and
-    differ — true different-subject pairs; zero hits on the current library,
-    free to run, useful as the library grows.
+    other check reason, treated as the similarity route). The owner-⑪
+    entity layer (different metadata.entity → clear) was removed with its
+    data source: metadata.entity retired in 0.17.0 (G3) and no production
+    caller ever passed the entity parameters after that — the branch was
+    dead code whose docstring claimed it was live.
     """
     if not quote_a or not quote_b:
-        return "clear"
-    if entity_a and entity_b and entity_a.strip() != entity_b.strip():
         return "clear"
     if "numeric_value_candidate" in route:
         return "keep" if name_cosine(quote_a, quote_b) >= DIFFERENCE_COSINE_KEEP else "clear"

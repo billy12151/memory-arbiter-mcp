@@ -23,7 +23,6 @@ from ..models import utc_now_iso
 if TYPE_CHECKING:
     from .core import MemoryDB
 
-QUEUE_STATUSES = ("pending", "confirmed", "dismissed", "voided", "expired")
 QUEUE_KINDS = ("conflict", "internal", "workspace")
 
 

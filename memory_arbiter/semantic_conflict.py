@@ -62,16 +62,6 @@ class EvidenceDecision:
     right_value: str | None = None
 
 
-@dataclass(frozen=True)
-class PairGateResult:
-    state: str
-    reason: str
-    attribute: str | None = None
-    value_a: str | None = None
-    value_b: str | None = None
-    grounded: bool = False
-
-
 class SemanticBackend(Protocol):
     """0.17.1: the judge backend protocol (mDeBERTa). classify_pair/
     suggest_workspace_candidate died with the GGUF engine."""
@@ -566,7 +556,8 @@ def is_cross_evolution(decision: EvidenceDecision) -> bool:
     and the write-time KNN loop — exclude them through THIS single predicate
     so the exclusion logic can never fork into two copies. Same-memory
     internal pairs are NOT affected: the in-memory contradiction duty stays
-    (internal notify goes through the Qwen final review instead, §2).
+    (internal notify goes through the judge's final review instead, §2 —
+    historical naming: "Qwen" in older docs).
     """
     return decision.action == "notify"
 

@@ -18,12 +18,6 @@ class ConflictSignalPipeline:
     def _conflict_next_call(self, *args: Any, **kwargs: Any) -> dict[str, Any] | None:
         return self._tools._conflict_next_call(*args, **kwargs)
 
-    @staticmethod
-    def _confidence_rank(hint: str | None) -> int:
-        # Retained for callers of the old private helper; group signals do not
-        # rank by legacy confidence judgments.
-        return {"high": 3, "medium": 2, "low": 1}.get(hint or "", 0)
-
     def _attach_conflict_signals(
         self, results: list[dict[str, Any]], warnings: list[str],
         precomputed_groups: "list[dict[str, Any]] | None" = None,

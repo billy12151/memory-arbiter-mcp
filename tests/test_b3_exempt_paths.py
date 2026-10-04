@@ -117,6 +117,9 @@ def test_scan_side_exemption_stops_internal_flood(tmp_path: Path) -> None:
             )
     kick = tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 50, "time_budget_s": 30})
     assert kick.get("ok"), kick
+    # 2026-10-05 审查接线：扫描腿豁免计数必须在 kick 回执可见（B3 宣称
+    # 「回执可见」；此前写进 outcome 后全链无消费）
+    assert (kick.get("data") or {}).get("table_rows_exempted_total", 0) >= GIANT - 1
     with tools.db.connection() as conn:
         ic = conn.execute("SELECT COUNT(*) FROM internal_conflicts WHERE memory_id=?", (mid,)).fetchone()[0]
     assert ic == 0, f"扫描腿必须豁免存量巨表（此前落地 7021 条），实际 {ic}"
@@ -131,6 +134,40 @@ def test_mixed_memory_keeps_prose_rows(tmp_path: Path) -> None:
     rows = _rows(tools, mid)
     assert rows.get("table_row", 0) == 0, "巨表段豁免"
     assert rows.get("sentence", 0) >= 1, "散文行照常嵌入"
+
+
+def test_index_only_job_all_exempt_skips_publish(tmp_path: Path) -> None:
+    """2026-10-05 审查修复：index_rows_in_job 补 A3 同款全豁免守卫。
+
+    此前 index-only 路径（on_write=off / replay postprocess / conflict-apply
+    edits）过滤后段集为空时仍走 publish_rows([],[])：回执谎报 indexed=0 行、
+    记忆永久留在 missing_row_vector_rows 选集（already_current 永不命中）、
+    每个后续 job 重复一次空 publish 事务。
+    """
+    tools = make_tools(tmp_path)
+    mid = _write(tools, "tbl", _giant_table())
+    assert tools.wait_semantic_worker_drained(timeout=120)
+    # legacy 空 subject 形态 + 行缺失（模拟 missing 选集成员）
+    with tools.db.write_transaction() as conn:
+        conn.execute("UPDATE memories SET subject='' WHERE id=?", (mid,))
+        conn.execute(
+            "DELETE FROM memory_row_vec WHERE id IN (SELECT id FROM memory_row WHERE memory_id=?)", (mid,),
+        )
+        conn.execute("DELETE FROM memory_row WHERE memory_id=?", (mid,))
+    out = tools._evidence.index_rows_in_job(mid, {"version": 1})
+    assert out.get("status") == "skipped", out
+    assert out.get("reason") == "all_rows_exempted"
+    assert out.get("table_rows_exempted") == GIANT - 1
+    assert out.get("index_only") is True
+    # 修复前形态对照：此构造下返回 indexed/published（publish_rows([],[])
+    # 谎报 0 行成功）；修复后不再进 publish 事务，也不落任何行。
+    assert _rows(tools, mid) == {}
+    with tools.db.connection() as conn:
+        published = conn.execute(
+            "SELECT COUNT(*) FROM memory_row_vec WHERE id IN "
+            "(SELECT id FROM memory_row WHERE memory_id=?)", (mid,),
+        ).fetchone()[0]
+    assert published == 0
 
 
 def test_small_table_still_indexed(tmp_path: Path) -> None:

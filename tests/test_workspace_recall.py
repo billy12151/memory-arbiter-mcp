@@ -1951,10 +1951,9 @@ def test_vector_publish_paths_skip_default_terms(tmp_path):
             )
     result = {"warnings": [], "vector_publish_pending": False}
 
-    store._publish_missing_workspace_canonical_vector("default", embedder, result)
-    assert _canonical_vec_row(tools, "default") is None
-    assert result["vector_publish_pending"] is False
-
+    # 2026-10-05：一步式 _publish_missing_workspace_canonical_vector 已随死代码
+    # 清理移除（生产零调用，写路径自 P2 #9 起走 prepare+publish 两步）；
+    # default 绝缘断言由下方两步 API 覆盖。
     assert store.prepare_missing_workspace_canonical_embedding("默认", embedder) is None
     assert store.prepare_workspace_canonical_embedding("null", embedder) is None
     assert store.publish_workspace_canonical_vector("default", [1.0, 0.0]) == []
@@ -1962,7 +1961,7 @@ def test_vector_publish_paths_skip_default_terms(tmp_path):
         assert _canonical_vec_row(tools, name) is None
 
     # Control: a normal canonical publishes through the same path.
-    store._publish_missing_workspace_canonical_vector("projx", embedder, result)
+    assert store.publish_workspace_canonical_vector("projx", [1.0, 0.0]) == []
     assert _canonical_vec_row(tools, "projx") is not None
 
 

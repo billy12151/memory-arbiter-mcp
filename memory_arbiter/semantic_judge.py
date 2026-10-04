@@ -265,7 +265,7 @@ def _mdeberta_inference_process(conn: Any, config: dict[str, Any]) -> None:
         mech_head = torch.nn.Sequential(
             torch.nn.Dropout(0.1), torch.nn.Linear(hidden, mech_dim),
         )
-        missing, unexpected = base.load_state_dict(
+        missing, _ = base.load_state_dict(
             {k.removeprefix("encoder."): v for k, v in state.items()
              if k.startswith("encoder.")},
             strict=False,
@@ -389,9 +389,9 @@ def _mdeberta_inference_process(conn: Any, config: dict[str, Any]) -> None:
 
 class IsolatedMDeBERTaBackend:
     # 顺序表回落常量（真相锚点=ckpt 声明：训练侧起 _meta_labels/_meta_mechs
-    # 随模型落盘，child 加载时优先采纳声明顺序翻译；旧 ckpt 无声明回落此表
-    # 并对 labels 做声明核对——漂移在加载时响亮失败，运行期永不错位）。
-    _labels_fallback = ("conflict", "no_conflict", "possible_conflict")
+    # 随模型落盘，child 加载时优先采纳声明顺序翻译；旧 ckpt 无声明时 labels
+    # 无需回落——parent 直接注入 SEMANTIC_MDEBERTA_LABELS（config["labels"]），
+    # mechs 才有此回落表）。
     _mechs_fallback = (
         "affirmation_negation", "numeric_value", "numeric_range",
         "quantifier_scope", "obligation_permission", "time_version",

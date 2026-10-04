@@ -341,6 +341,37 @@ def test_normalize_is_idempotent(tmp_path: Path) -> None:
     assert second["skipped"] == []
 
 
+def test_normalize_committed_merge_with_repoint_warning_not_refused(tmp_path: Path) -> None:
+    """2026-10-05 审查修复：normalize 必须消费 A5 的 committed 第三元素。
+
+    repoint 对齐守卫在已提交（committed=True）的合并上也可能带警告返回
+    （丢弃机械同键 rejected 行）——若按 `if merge_warnings` 一律记
+    merge_refused，已发生的合并会被报告成被拒：dry-run 报 merged、执行
+    报 refused、库内已合并，三方互相矛盾。构造：rejected 行 `spaß→SPASS`
+    的别名机械键（casefold 去 _-\\s）与 winner `spass` 相同，但组键
+    （lower）不同 → respected-rejection 检查放行合并，repoint 守卫触发。
+    """
+    tools = make_tools(tmp_path)
+    register(tools, "spass", "SPASS")
+    insert_alias(tools, "spaß", "SPASS", "rejected")
+    memory = write(tools, "SPASS")
+    plan = tools.db.workspaces.normalize_workspace_canonicals(dry_run=True)
+    assert plan["merged"] and not any(
+        s.get("type") == "merge_refused" for s in plan["skipped"]
+    )
+    result = tools.db.workspaces.normalize_workspace_canonicals(dry_run=False)
+    assert result["ok"]
+    # 已提交的合并照常进 merged 清单（警告留在 warnings），不得记 refused。
+    assert result["merged"] == [
+        {"from": "SPASS", "to": "spass", "memories_updated": 1}
+    ]
+    assert not any(s.get("type") == "merge_refused" for s in result["skipped"])
+    assert any("dropped while repointing" in w for w in result["warnings"])
+    # 库内事实与报告一致：记忆已并入 winner。
+    assert memory_canonicals(tools)[memory] == "spass"
+    assert canonical_names(tools) == ["spass"]
+
+
 def test_default_pool_variants_never_merged(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     register(tools, "Default", "default")
@@ -1313,10 +1344,14 @@ def test_negative_decision_filters_real_vector_candidate(tmp_path: Path) -> None
 
     embedder = Embedder()
     # P2 #9: resolve is read-only now — register the fixture canonical
-    # (+vector) through the store's idempotent backfill helper.
-    tools.db.workspaces._publish_missing_workspace_canonical_vector(
-        "Target", embedder, {},
-    )
+    # (+vector) the way the write path does: canonical row first, then the
+    # derived vector via the two-step publish API.
+    with tools.db.write_transaction() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO workspace_canonicals(name,created_at) "
+            "VALUES('Target',datetime('now'))",
+        )
+    tools.db.workspaces.publish_workspace_canonical_vector("Target", [1.0, 0.0])
     decide(tools, "raw", "Target", status="rejected")
     resolved = tools.db.resolve_workspace_canonical("raw", embedder)
     assert resolved["canonical"] != "Target"
@@ -2174,8 +2209,14 @@ def test_direct_rejected_hit_aggregates_sibling_spellings(tmp_path):
             return SimpleNamespace(embedding=[1.0, 0.0])
 
     embedder = Embedder()
+    with t.db.write_transaction() as conn:
+        for target in ("AlphaBucket", "BetaBucket"):
+            conn.execute(
+                "INSERT OR IGNORE INTO workspace_canonicals(name,created_at) "
+                "VALUES(?,datetime('now'))", (target,),
+            )
     for target in ("AlphaBucket", "BetaBucket"):
-        t.db.workspaces._publish_missing_workspace_canonical_vector(target, embedder, {})
+        t.db.workspaces.publish_workspace_canonical_vector(target, [1.0, 0.0])
     ok1, e1 = t.db.workspaces.record_workspace_decision(
         "agent-lane", "AlphaBucket", status="rejected",
     )

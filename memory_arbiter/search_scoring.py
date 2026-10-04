@@ -388,7 +388,6 @@ def _soft_rerank(
             tags_list = _json.loads(tags_raw) if isinstance(tags_raw, str) else tags_raw
         except Exception:
             tags_list = []
-        tags_text = " ".join(str(t) for t in tags_list) if tags_list else ""
         content = rec.get("content") or ""
 
         # Score each surface (subject > tags > content), all capped.

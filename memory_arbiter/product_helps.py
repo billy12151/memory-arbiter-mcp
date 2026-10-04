@@ -259,12 +259,14 @@ _PRODUCT_HELPS: dict[str, Any] = {
             "status", "pause", "resume", "enable", "unload", "disable",
         ],
         "semantic_control_note": (
-            "status reports backend.n_ctx / backend.prompt_version (pair-v6 since "
-            "0.15.11: decoding-level value/attribute caps + one feedback retry; "
-            "pair-v5 in 0.15.8-0.15.10) and the effective notice_sync_wait_ms "
-            "(config key semantic_conflict.notice_sync_wait_ms, default 3000, "
-            "clamp 0-5000; 0 = the write response never waits for the "
-            "post-commit check, for batch ingestion)."
+            "status reports the mDeBERTa judge backend (0.17.1+: ckpt / "
+            "ckpt_sha8 / model_dir / model_version / device / batch_size / "
+            "max_len, breaker state via last_error / restarts / timed_out / "
+            "disabled) and the effective notice_sync_wait_ms (config key "
+            "semantic_conflict.notice_sync_wait_ms, default 3000, clamp "
+            "0-5000; 0 = the write response never waits for the post-commit "
+            "check, for batch ingestion). The legacy Qwen backend fields "
+            "(n_ctx / prompt_version / pair-v*) were removed with the engine."
         ),
     },
 }

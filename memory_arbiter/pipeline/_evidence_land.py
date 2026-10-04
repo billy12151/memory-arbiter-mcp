@@ -568,8 +568,10 @@ class _EvidenceLand:
         else:
             result = {"status": "completed", "outcome": "checked_no_notice", "notices_created": 0}
         if ctx["internal_found"] and "internal_conflicts" not in result:
-            # Internal findings survive a truncated cross-memory loop: they
-            # were landed BEFORE the loop ran (E10① order guarantee).
+            # Internal findings survive a truncated cross-memory loop: in the
+            # merged judge phase they land inside the same phase, after the
+            # internal drain and before the cross loop's landing (E10① order
+            # guarantee carried over from the phase split).
             result["internal_conflicts"] = ctx["internal_found"]
         # 0.16.2 write-time pre-gate visibility (conditional — the unfiltered
         # zero case keeps the exact-shape response contract unchanged):
@@ -625,10 +627,10 @@ class _EvidenceLand:
 
     def conflicts_receipt_tail(self, ctx: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
         """r2s-08: ONE place stamps the receipt tail — judge_budget /
-        pairs_examined / elapsed_ms. The finalize path, the wrapper's
-        truncation-terminal branch, and process_conflicts all ride it (the
-        tail was previously stamped three ways and had already drifted: the
-        terminal branch forgot elapsed, finalize stamped pairs_examined: 0
+        pairs_examined / elapsed_ms. The finalize path and the wrapper's
+        (_process_semantic_conflict_job) truncation-terminal branch ride it
+        (the tail was previously stamped three ways and had already drifted:
+        the terminal branch forgot elapsed, finalize stamped pairs_examined: 0
         unconditionally).
 
         0.17.1 重标合一: the key is ``judge_budget`` — the one-release

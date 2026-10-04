@@ -1,6 +1,5 @@
 """Read-only health checks for the local-text evidence architecture."""
 from __future__ import annotations
-import os
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import asdict
@@ -171,7 +170,3 @@ def doctor_overview_cli(settings: Settings, deep: bool = False) -> OverviewRepor
             return run_all_checks(conn, settings, deep, embedder_probe=_cli_embedder_probe if deep else None)
     except Exception as exc:
         return OverviewReport(utc_now_iso(), Severity.CRITICAL, [Finding("database.open", "database", Severity.CRITICAL, "error", "database.open", str(exc))], {"mode": "unavailable", "total_memories": 0})
-
-
-def build_unopenable_report(settings: Settings, exc: Exception) -> OverviewReport:
-    return OverviewReport(utc_now_iso(), Severity.CRITICAL, [Finding("database.open", "database", Severity.CRITICAL, "error", "database.open", str(exc), {"exists": os.path.exists(settings.db_path)})], {"mode": "unavailable", "total_memories": 0})

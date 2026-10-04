@@ -175,6 +175,42 @@ def test_poison_failures_reach_receipt(tmp_path: Path) -> None:
     assert str(ids[1]) in (state.get("poison_failures") or {})
 
 
+def test_recovered_kick_does_not_report_poison_after_threshold(tmp_path: Path) -> None:
+    """2026-10-05 审查修正：poison_skipped 只报「本 kick 仍失败」的条目。
+
+    修复前按累计计数筛选：毒 6 轮达上界 → 修好 → 恢复 kick 水位已推进、
+    complete=True，回执却仍带 poison_skipped（与完成自相矛盾，agent 会按
+    「仍有未覆盖记忆」处理一个已扫完的轮）。
+    """
+    tools = make_tools(tmp_path)
+    ids = [_write(tools, f"s{i}", f"内容 {i} 债务") for i in range(3)]
+    sp = tools._scan_pipeline
+    orig = sp._process_memory
+
+    def boom(memory_id: int, **kw):
+        if memory_id == ids[1]:
+            raise RuntimeError("poison")
+        return orig(memory_id, **kw)
+
+    sp._process_memory = boom
+    last = None
+    for _ in range(SCAN_POISON_MAX_FAILURES + 1):
+        last = tools.memory_repair(
+            "scan_pipeline", {"action": "kick", "max_memories": 100, "time_budget_s": 3},
+        )
+    # 前置确认：仍在失败时可见（口径不回退）
+    assert ids[1] in ((last.get("data") or {}).get("poison_skipped") or [])
+    sp._process_memory = orig  # 修好
+    r2 = tools.memory_repair("scan_pipeline", {"action": "kick", "max_memories": 100, "time_budget_s": 5})
+    d2 = r2.get("data") or {}
+    assert d2.get("complete") is True
+    assert "poison_skipped" not in d2, (
+        f"恢复 kick（本 kick 无失败）不得报 poison: {d2.get('poison_skipped')}"
+    )
+    # 计数仍落轮状态（历史口径），只是不再进回执
+    assert str(ids[1]) in (_state(tools).get("poison_failures") or {})
+
+
 def test_complete_paths_do_not_regress(tmp_path: Path) -> None:
     """无异常路径：complete 语义不回归（回卷不引入多余轮次）。"""
     tools = make_tools(tmp_path)

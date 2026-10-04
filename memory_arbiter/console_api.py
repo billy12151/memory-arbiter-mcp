@@ -277,28 +277,6 @@ class ConsoleAPI:
             return {"error": f"conflict id {conflict_id} not found", "_http_status": 404}
         return detail
 
-    def _get_conflict_row(self, conflict_id: int) -> dict[str, Any] | None:
-        if not self.tools.db.db_available:
-            return None
-        try:
-            with self.tools.db.connection() as conn:
-                row = conn.execute("SELECT * FROM conflicts WHERE id=?", (int(conflict_id),)).fetchone()
-                if row is None:
-                    return None
-                conflict = {key: row[key] for key in row.keys()}
-                for key in (
-                    "slot_key", "candidate_key", "member_versions", "value_groups",
-                    "apply_summary", "notice_payload", "notice_slot_provenance",
-                ):
-                    if isinstance(conflict.get(key), str):
-                        try:
-                            conflict[key] = json.loads(conflict[key])
-                        except json.JSONDecodeError:
-                            conflict[key] = None
-                return conflict
-        except sqlite3.Error:
-            return None
-
     def memories(
         self,
         query: str = "",

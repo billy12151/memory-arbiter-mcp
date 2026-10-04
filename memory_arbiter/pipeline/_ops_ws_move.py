@@ -87,7 +87,6 @@ class _OpsWsMove:
         # non-empty reason, and the audit trail + user-facing notice below —
         # default must never become a dumping ground by accident.
         default_fallback = self._is_truthy(_.get("default_fallback"))
-        fallback_notices: list[dict[str, Any]] = []
         if default_fallback:
             if not is_default_workspace_term(str(new_workspace or "")):
                 return self.db.state.response({

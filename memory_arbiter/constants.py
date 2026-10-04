@@ -53,23 +53,6 @@ class Isolation:
     WEAK = "weak"
     STRICT = "strict"
 
-    #: Values accepted from config/env; anything else falls back to NONE.
-    ALL = (NONE, WEAK, STRICT)
-
-
-
-
-def strict_ws(level: str, ws_canonical: str | None) -> str | None:
-    """Return ``ws_canonical`` only under strict isolation, else None.
-
-    Folds the repeated ``ws_canonical if (isolation == "strict" and ws_canonical)
-    else None`` idiom that appeared 9× across search.py / tools.py. Under weak or
-    none the caller must NOT hard-filter by workspace, so this returns None.
-    """
-    if level == Isolation.STRICT and ws_canonical:
-        return ws_canonical
-    return None
-
 
 # ---------------------------------------------------------------------------
 # Frozen configuration constants (v0.15.0 config slimming).
@@ -88,7 +71,8 @@ EMBEDDING_MAX_SECTION_CHARS = 3600
 # known (vnext estimates). Never used to accept or reject vectors.
 EMBEDDING_DEFAULT_DIM = 768
 
-# semantic-conflict (Qwen) engine
+# semantic-conflict judge engine (mDeBERTa since 0.17.1; the Qwen/GGUF
+# engine is retired)
 # n_ctx 2048 (0.15.8): 1024 left no headroom — system(178) + frame/metadata
 # (~101) + two 400-char quotes (~460) + the 384-token output budget exceeded
 # the window, so long-prompt pairs had their JSON generation truncated at the
@@ -346,9 +330,6 @@ WRITE_SIMILAR_FALLBACK_SCAN_LIMIT = 500
 SCAN_DUPLICATES_MAX_RESULTS = 200
 SCAN_DUPLICATES_BATCH = 100
 SCAN_DUPLICATES_MAX_PAGES = 200
-
-# workspace normalization Qwen guard (A/B: top-3 beats top-5; over-distance
-# candidates must never reach the model — see tools._suggest_workspace_candidate)
 
 # workspace recall / normalization thresholds (global; NOT per-isolation)
 WORKSPACE_MATCH_DISTANCE = 0.25  # 0.17.0 前缀重标暂缓：sts 下 11 对真实 alias 距离 max 0.4264 超此值，但负例分布未测（0.45 有相似名折叠风险，scan 家族夹具即证）——补负例语料后重标（挂观察）

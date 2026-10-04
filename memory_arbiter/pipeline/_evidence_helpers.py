@@ -19,9 +19,14 @@ if TYPE_CHECKING:
     from ..workers import SemanticConflictWorker
 
 
+# 技术性降级原因清单（测试钉面 test_write_time_notice_e2e 的成员断言用；
+# 运行时分类在 _evidence_land 的四分支映射，无直接消费者——两个清单改任一
+# 处须同步另一处）。judge_invalid_output 已删：判定形状违约在合一后由
+# _make_judge_fn 的 _bad() 降级为 error verdict，分类为 judge_backend_error，
+# 该 reason 无产生点。
 _TECHNICAL_REASONS = {
     "judge_timeout", "judge_unavailable", "judge_backend_error",
-    "judge_invalid_output", "judge_budget_exhausted", "notice_budget_exhausted",
+    "judge_budget_exhausted", "notice_budget_exhausted",
     "rows_capped", "pairs_examined_capped",
     "notice_write_failed",
 }

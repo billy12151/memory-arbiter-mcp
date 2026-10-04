@@ -301,8 +301,6 @@ class _OpsConflicts:
                 else:
                     step.update(status="completed", result_version=int(updated.get("version") or step["expected_version"]),
                                 result_hash=hashlib.sha256(updated_content.encode("utf-8")).hexdigest(), error=None)
-                result_version = int(updated.get("version") or step["expected_version"])
-                result_hash = hashlib.sha256(updated_content.encode("utf-8")).hexdigest()
                 summary: dict[str, Any] = {"plan": plan}
                 prior_history = (conflict.get("apply_summary") or {}).get("history")
                 if prior_history:

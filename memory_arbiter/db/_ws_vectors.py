@@ -11,7 +11,6 @@ from ..constants import (
     is_default_workspace_term,
 )
 from ..degrade import DegradeState
-from ..models import utc_now_iso
 from ..ws_keys import (
     _DEFAULT_TERM_SQL_NOT_IN as _DEFAULT_TERM_SQL_NOT_IN,
     _DEFAULT_TERM_SQL_PARAMS as _DEFAULT_TERM_SQL_PARAMS,
@@ -40,78 +39,6 @@ class _WsVectorsMixin:
         def state(self) -> "DegradeState": ...
         def connection(self) -> "_Any": ...
         def write_transaction(self) -> "_Any": ...
-    def _publish_missing_workspace_canonical_vector(
-        self,
-        canonical: str,
-        embedder: Any,
-        result: dict[str, Any],
-    ) -> None:
-        """Idempotently backfill a missing canonical vector on write paths.
-
-        The existence probe and embedding happen before the short write
-        transaction. The transaction rechecks the vector row so concurrent
-        retries cannot replace an already-published vector.
-        """
-        if not (
-            canonical
-            and not is_default_workspace_term(canonical)
-            and embedder is not None
-            and self.state.sqlite_writable
-            and self.state.sqlite_vec_available
-        ):
-            return
-        try:
-            with self.connection() as conn:
-                row = conn.execute(
-                    "SELECT c.id, v.id AS vector_id "
-                    "FROM workspace_canonicals c "
-                    "LEFT JOIN workspace_canonicals_vec v ON v.id = c.id "
-                    "WHERE c.name = ?",
-                    (canonical,),
-                ).fetchone()
-        except sqlite3.Error:
-            return
-        if row is not None and row["vector_id"] is not None:
-            return
-
-        try:
-            er = embedder.embed_text(prefix=EMBED_PREFIX_STS, body=canonical)
-            embedding = list(er.embedding) if er and er.embedding else None
-        except Exception:
-            embedding = None
-        if not embedding:
-            return
-
-        # A9 补漏：保护桶变体不得在此注册（该函数是 boot/backfill 路径上的
-        # 注册点，R3 对码实证遗漏——它会在 canonical 未注册时 INSERT 一行）。
-        from ..twin_redirect import protected_bucket_variant
-
-        if protected_bucket_variant(canonical):
-            return
-
-        try:
-            with self.write_transaction() as conn:
-                conn.execute(
-                    "INSERT OR IGNORE INTO workspace_canonicals(name, created_at) VALUES (?, ?)",
-                    (canonical, utc_now_iso()),
-                )
-                canonical_row = conn.execute(
-                    "SELECT c.id, v.id AS vector_id "
-                    "FROM workspace_canonicals c "
-                    "LEFT JOIN workspace_canonicals_vec v ON v.id = c.id "
-                    "WHERE c.name = ?",
-                    (canonical,),
-                ).fetchone()
-                if canonical_row is not None and canonical_row["vector_id"] is None:
-                    conn.execute(
-                        "INSERT OR IGNORE INTO workspace_canonicals_vec(id, embedding) VALUES (?, ?)",
-                        (int(canonical_row["id"]), json.dumps(embedding)),
-                    )
-        except sqlite3.Error as exc:
-            result["vector_publish_pending"] = True
-            result["warnings"].append(
-                f"workspace canonical vector publish failed for {canonical!r}; retry a write using this workspace after sqlite-vec and embedding configuration recover: {exc}"
-            )
 
     def prepare_missing_workspace_canonical_embedding(
         self,

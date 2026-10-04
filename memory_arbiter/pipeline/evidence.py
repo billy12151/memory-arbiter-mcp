@@ -76,7 +76,7 @@ class EvidencePipeline(_EvidencePhases, _EvidenceLand):
         Bounded per call (``limit`` entries); new writes always win because
         the caller only invokes this when the job queue is empty and rechecks
         between entries. A stored extraction replays through the deterministic
-        gate without Qwen; a Qwen-less replay with no extraction lands
+        gate without the judge; a judge-less replay with no extraction lands
         nothing (the entry stays pending for a backend-bearing pass — never
         silently completed)."""
         processed = 0
@@ -85,7 +85,6 @@ class EvidencePipeline(_EvidencePhases, _EvidenceLand):
         pool_ids: list[int] = []  # 已入池条目必须进 take_next 排除表——条目 pass2
         # 前不 complete 且 processed 不增，不排除则 while 每轮重取同一头部
         # 条目无限循环（0.17.1 review P0）。
-        skipped_ids: list[int] = []  # pass2 判定失败留队（不 complete）
         backend_holder: dict[str, Any] = {"backend": None}
         while processed < limit:
             entry = self.db.conflict_backlog.take_next(exclude_ids=skipped + pool_ids)
@@ -194,7 +193,7 @@ class EvidencePipeline(_EvidencePhases, _EvidenceLand):
                 outcome = _judge_outcome(verdict, min_prob)
                 if outcome == "error":
                     # 留队重试（owner A-5）：下个 backend-bearing pass 再来
-                    skipped_ids.append(int(entry["id"]))
+                    # （留队靠「不调 complete」实现——entry 不出队即重试）
                     continue
                 left, right = entry["left"], entry["right"]
                 left_text, right_text = entry["left_text"], entry["right_text"]
@@ -472,8 +471,8 @@ class EvidencePipeline(_EvidencePhases, _EvidenceLand):
             # path — existing rows live in the OLD space, so "already current"
             # would strand the flip. Republish unconditionally; the heal at
             # the tail settles ready once the whole index is in the target
-            # space. (The mismatch guard for ordinary detection jobs stays in
-            # process_conflicts.)
+            # space. (The mismatch guard for ordinary detection jobs lives in
+            # _conflicts_deterministic_collect.)
             pass
         elif self.db.evidence.current_row_vectors(int(memory_id), version, row_sha):
             return {"status": "indexed", "reason": "already_current",
@@ -485,6 +484,15 @@ class EvidencePipeline(_EvidencePhases, _EvidenceLand):
         # on_write=off / replay postprocess / conflict-apply edits 不得成为
         # 巨表嵌入的后门。
         segments, _exempted = _filter_exempted_segments(segments)
+        if not segments:
+            # 全豁免形态（空 subject + 全表 >100 行）：不 publish——与
+            # index_memory 的 A3 守卫同款。publish_rows([],[]) 会把记忆留在
+            # missing_row_vector_rows 选集（NOT EXISTS 谓词永真）且绕过
+            # already_current 早退，此后的每个 index_only job 都重复一次
+            # 空 publish 事务；回执照实报 skipped、豁免可见。
+            return {"status": "skipped", "reason": "all_rows_exempted",
+                    "index_only": True, "notices_created": 0,
+                    "table_rows_exempted": int(_exempted)}
         results = embedder.embed_texts([segment.text for segment in segments], prefix=EMBED_PREFIX_STS)
         if time.monotonic() - phase_started > SEMANTIC_EMBED_PHASE_TIMEOUT_MS / 1000.0:
             # The llama call itself cannot be interrupted mid-flight; the cap

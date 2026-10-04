@@ -65,7 +65,6 @@ class _MemEditMixin:
             and current.get(key) != value
             for key, value in pairs
         )
-        metadata_update = next((value for key, value in pairs if key == "metadata"), None)
         # Gate-v2 G3: the old "entity/scope changed → snapshot semantics
         # changed → version bump" leg is gone — the keys are retired, they
         # never reach storage (stripped below), so they can no longer drive

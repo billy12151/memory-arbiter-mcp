@@ -34,7 +34,7 @@ from .constants import (
     SCAN_SLOW_LANE_PER_KICK,
 )
 from .db_generation import CONFLICT_DETECTOR_VERSION as CONFLICT_DETECTOR_VERSION  # noqa: F401（显式 re-export：scan_admission 调用期读+测试 patch 缝）
-from .difference_classifier import classify_pair, is_garbage
+from .difference_classifier import classify_pair
 from .pipeline.evidence import filter_exempted_scan_rows
 from .semantic_conflict import decide_evidence, is_cross_evolution
 from .normalize_gate import compute_summary_votes, normalize_gate
@@ -209,6 +209,9 @@ class ScanPipeline(_ScanPairsMixin, _ScanEnumerate):
         auto_rejected = int(state.get("auto_rejected") or 0)
         internal_found = int(state.get("internal_found") or 0)
         machine_cleared = int(state.get("machine_cleared") or 0)
+        # B3（2026-10-05 审查接线）：扫描腿豁免计数进轮级账本——此前
+        # _process_memory 写进 outcome 后全链无消费，kick 回执不可见。
+        table_rows_exempted = int(state.get("table_rows_exempted") or 0)
         anchor_buckets: dict[str, int] = {}
         processed_ids: list[int] = []
         # A4：跨 kick 的失败计数（随轮状态落盘；不用 migration_state 的
@@ -284,6 +287,7 @@ class ScanPipeline(_ScanPairsMixin, _ScanEnumerate):
                 auto_rejected += outcome["auto_rejected"]
                 internal_found += outcome["internal"]
                 machine_cleared += int(outcome.get("machine_cleared") or 0)
+                table_rows_exempted += int(outcome.get("table_rows_exempted") or 0)
                 last_id = max(last_id, memory_id)
                 processed_ids.append(memory_id)
                 processed += 1
@@ -314,6 +318,10 @@ class ScanPipeline(_ScanPairsMixin, _ScanEnumerate):
             int(mid)
             for mid, count in poison_failures.items()
             if int(count) >= SCAN_POISON_MAX_FAILURES
+            # A4 口径（2026-10-05 审查修正）：只报「本 kick 仍失败」的条目
+            # ——修复后的恢复 kick（水位已推进、覆盖完整）不得继续把
+            # 已扫成的记忆报成 poison，与 complete=True 自相矛盾。
+            and int(mid) in failed_this_kick
         )
         # 0.17.0 P2-6.2 slow lane: with the fast lane settled (or its batch
         # exhausted for this kick), spend a small leftover budget rotating
@@ -342,6 +350,9 @@ class ScanPipeline(_ScanPairsMixin, _ScanEnumerate):
                         # machine_cleared——轮级「机判清除」计数少账，观测口径
                         # 与快车道不一致。
                         machine_cleared += int(slow_outcome.get("machine_cleared") or 0)
+                        table_rows_exempted += int(
+                            slow_outcome.get("table_rows_exempted") or 0
+                        )
                         slow_lane_done += 1
             except Exception:
                 pass
@@ -354,6 +365,7 @@ class ScanPipeline(_ScanPairsMixin, _ScanEnumerate):
             "auto_rejected": auto_rejected,
             "internal_found": internal_found,
             "machine_cleared": machine_cleared,
+            "table_rows_exempted": table_rows_exempted,
             "poison_failures": poison_failures,
         })
         self.db.meta.record_scan_pipeline_state(state)
@@ -380,6 +392,7 @@ class ScanPipeline(_ScanPairsMixin, _ScanEnumerate):
             "queued_total": queued,
             "auto_rejected_total": auto_rejected,
             "machine_cleared_total": machine_cleared,
+            "table_rows_exempted_total": table_rows_exempted,
             "internal_found_total": internal_found,
             "normalize_suspects_total": state.get("normalize_suspects") or 0,
             "pending_memories": pending_left,
@@ -464,7 +477,7 @@ class ScanPipeline(_ScanPairsMixin, _ScanEnumerate):
         outcome: dict[str, Any] = {
             "version": None, "workspace": None,
             "queued": 0, "auto_rejected": 0, "internal": 0,
-            "machine_cleared": 0, "cleared_garbage": 0,
+            "machine_cleared": 0,
         }
         # 0.17.0 R2 单连接收编：下方只读探针（get_memory / KNN / 向量批取 /
         # claims 向量 SELECT）此前每步各自开/关连接（conn churn），改为穿过
@@ -610,8 +623,6 @@ class ScanPipeline(_ScanPairsMixin, _ScanEnumerate):
                     )
                     if verdict == "clear":
                         outcome["machine_cleared"] += 1
-                        if is_garbage(str(unit["text"])) or is_garbage(str(hit.get("text") or "")):
-                            outcome["cleared_garbage"] += 1
                         continue
                     refs, candidate_key, candidate_hash = self._pair_identity(
                         memory_id, version, unit, peer_id, hit,
@@ -839,21 +850,5 @@ class ScanPipeline(_ScanPairsMixin, _ScanEnumerate):
         from .models import utc_now_iso
 
         return utc_now_iso()
-
-
-
-
-    @staticmethod
-    def _scan_envelope(memory: dict[str, Any], quote: str) -> dict[str, Any]:
-        metadata_value = memory.get("metadata")
-        metadata = metadata_value if isinstance(metadata_value, dict) else {}
-        return {
-            "quote": str(quote)[:1000], "subject": str(memory.get("subject") or "")[:200],
-            "tags": list(memory.get("tags") or [])[:20],
-            "workspace_canonical": memory.get("workspace_canonical") or memory.get("workspace"),
-            "memory_id": int(memory.get("id") or 0), "version": int(memory.get("version") or 1),
-            "event_time": memory.get("event_time"),
-            "metadata": {key: metadata.get(key) for key in ("entity", "scope") if metadata.get(key)},
-        }
 
     QUOTE_LIGHT_CHARS = 60

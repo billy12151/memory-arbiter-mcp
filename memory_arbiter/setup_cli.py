@@ -33,7 +33,7 @@ from typing import Any, Callable
 
 # Model + download sources — kept as module constants so they are easy to update.
 DEFAULT_MODEL_FILENAME = "embeddinggemma-300m-qat-Q8_0.gguf"
-# Exact upstream byte counts (HF Content-Length verified 2026-09-09; qwen
+# Exact upstream byte counts (HF Content-Length verified 2026-09-09; embedder
 # matches the production model on disk). --install downloads these known files
 # and validates EXACTLY — a ±20% tolerance would let a silent truncation land
 # as a corrupt model that every later run then "skips as already present".
@@ -52,17 +52,11 @@ MODELSCOPE_DOWNLOAD_URL = (
 )
 LLAMA_CPP_CPU_EXTRA_INDEX = "https://abetlen.github.io/llama-cpp-python/whl/cpu"
 
-# Semantic-conflict (Qwen) model — the second half of a "full" install. URLs
-# verified 2026-09-09: HF honours Range (206), ModelScope answers 200 to a
-# ranged probe (the downloader treats an ignored Range as restart-from-zero).
-# 0.16.8: default judge model is the official Qwen3-0.6B Q8_0 (the official
-# repo ships small sizes only as Q8_0). Existing installs keep whatever their
-# config points at — the decode-family routing accepts both generations.
-# 0.17.1: the Qwen/GGUF semantic judge retired. The judge is mDeBERTa
-# (V4m checkpoint, 1.1GB, ships separately) — configured via
-# semantic_conflict.mdeberta_ckpt; setup no longer downloads it. See the
-# README "conflict judge model" section for the manual three-step install
-# (extra → checkpoint → config key).
+# Semantic-conflict judge — historical (0.17.1): the Qwen/GGUF semantic judge
+# retired. The judge is mDeBERTa (V4m checkpoint, 1.1GB, ships separately) —
+# configured via semantic_conflict.mdeberta_ckpt; setup no longer downloads
+# any judge model. See the README "conflict judge model" section for the
+# manual three-step install (extra → checkpoint → config key).
 _DOWNLOAD_CHUNK_BYTES = 1 << 20  # 1 MiB
 _DOWNLOAD_TIMEOUT_S = 60
 _DOWNLOAD_USER_AGENT = "memory-arbiter-setup"
@@ -90,7 +84,8 @@ def _default_config_dict(
     db_path: Path,
     backup_jsonl: Path,
 ) -> dict[str, Any]:
-    """Return the slim starter config (19 user keys, file-only; 0.15.14 count).
+    """Return the slim starter config (file-only; the complete user surface
+    is the 21-key reference example, this template intentionally slimmer).
 
     Everything else the 0.14.x config carried is a frozen constant now.
     Identity (client/agent_id) is intentionally left empty: the MCP server

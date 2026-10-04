@@ -36,10 +36,11 @@ def _render_plan(plan: dict[str, Any]) -> str:
     mode_lines = (
         [
             "The source evidence index is cloned unchanged; no model loading is",
-            "required for the migration itself. If this release rotated the",
-            "embedding pipeline version, the preserved space is reported as",
-            "mismatch on the next page and stays disabled until rebuilt with a",
-            "local model (memory_repair rebuild_evidence) — 0.17.0 does rotate it.",
+            "required for the migration itself. Only if a future release rotates",
+            "the embedding pipeline version would the preserved space be reported",
+            "as mismatch and stay disabled until rebuilt with a local model",
+            "(memory_repair rebuild_evidence). 0.17.0 pinned the version at 2",
+            "and did NOT rotate it (owner 2026-09-26): existing vectors stay valid.",
         ]
         if conflict_only else
         [

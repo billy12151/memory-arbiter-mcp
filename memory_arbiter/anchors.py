@@ -72,12 +72,6 @@ GENERIC_ANCHORS: frozenset[str] = frozenset({
 })
 
 
-def _is_cjk_char(ch: str) -> bool:
-    """True if a char is CJK. Implementation: text.is_cjk_char (Phase 1); re-export."""
-    from .text import is_cjk_char
-    return is_cjk_char(ch)
-
-
 def _split_runs(text: str) -> list[tuple[str, str]]:
     """Split text into (kind, value) runs.
 

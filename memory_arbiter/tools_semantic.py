@@ -68,8 +68,7 @@ class _ToolsSemantic:
                 "unavailable (judge_unavailable/judge_backend_error) or times "
                 "out (judge_timeout); the check is truncated (rows_capped: the "
                 "memory exceeds the 256-row conflict-channel cap, 0.17.0; "
-                "evidence_units_capped: the legacy 64-unit cap on the unit "
-                "fallback path; pairs_examined_capped: the 500-pair examined "
+                "pairs_examined_capped: the 500-pair examined "
                 "cap; notice_budget_exhausted: the fair job deadline hit). "
                 "Pairs beyond a truncation land in the conflict backlog "
                 "(0.17.0, bounded and visible) or are covered by scheduled "
@@ -96,12 +95,6 @@ class _ToolsSemantic:
             "mean_pair_ms": round(sum(durations) / len(durations)),
             "p95_pair_ms": durations[max(0, math.ceil(0.95 * len(durations)) - 1)],
         }
-
-    @staticmethod
-    def _embedding_text(record: dict[str, Any]) -> str:
-        subject = record.get("subject") or ""
-        content = record.get("content") or ""
-        return f"{subject}\n{content}".strip()
 
     def _semantic_configured(self) -> bool:
         # 0.17.1: the judge is the mDeBERTa checkpoint — configured → enabled.
@@ -203,9 +196,6 @@ class _ToolsSemantic:
                 "last_claim_error_at": self._notice_claim_last_error_at,
             },
         }
-
-    def _semantic_control(self, action: str) -> dict[str, Any]:
-        return self._semantic_control_with_timeout(action, timeout=30.0)
 
     def _semantic_control_with_timeout(
         self, action: str, timeout: float = 30.0, workspace: Any = None,

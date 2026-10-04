@@ -127,6 +127,15 @@ class Settings:
         warn_removed("embedding.", emb_cfg, _REMOVED_EMBEDDING_KEYS)
         semantic_cfg = section("semantic_conflict")
         warn_removed("semantic_conflict.", semantic_cfg, _REMOVED_SEMANTIC_KEYS)
+        # 0.17.1: claim 对比通道整体退役（memory_claims/memory_claim_vec 建表
+        # 与 claims.required 写入门一并移除）——与 model_path/n_gpu_layers 同批
+        # 退役键给同款「no longer」软着陆警告，不静默忽略。
+        if section("claims"):
+            config_warnings.append(
+                "claims is removed in 0.17.1 (the claim comparison channel and "
+                "the claims.required gate were retired with the memory_claims "
+                "tables); value ignored"
+            )
         # A5 (0.15.14): max_notice_pairs was not frozen — the notice-count cap
         # itself was removed (notices are bounded by the examined-pairs cap);
         # name that instead of the generic frozen-constant wording.

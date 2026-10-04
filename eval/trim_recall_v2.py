@@ -23,9 +23,7 @@ from pathlib import Path
 D = Path(__file__).resolve().parent.parent / "eval" / "fixtures" / "recall"
 NEW_VERSION = "recall-v2-kw-trim"
 SHORT = 500
-CROSS_KEEP = {("A11", "t-7e35f83b3b64")}  # zh→en 探针保留 1 条；B02 整题为 en→mixed 探针
 CROSS_DROP = {("A11", "t-80939d044dc9")}
-PROTECT_K_SHORT = {"t-067ed356d645", "t-968fccbf3d26", "t-fad591d44a64"}
 
 
 def main() -> int:
@@ -60,7 +58,6 @@ def main() -> int:
             keep_labels.append(l)
 
     # R3：死题判定（修剪后 relevant=0 的 paraphrase/lookup 题）
-    qkind = {q["qid"]: q["kind"] for q in queries}
     relevant_count: dict[str, int] = {}
     for l in keep_labels:
         if l["label"] == "relevant":

@@ -2655,8 +2655,6 @@ def test_clean_gate_negative_reaches_checked_no_notice(tmp_path: Path, monkeypat
 
     result = tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
     result.pop("elapsed_ms", None)
-    result.pop("claims_channel", None)  # 0.17.0 P2-5.3 通道回执键
-    result.pop("claims_channel_c", None)  # gate-v2 G6b 通道 C 回执键
     result.pop("judge_budget", None); result.pop("qwen_budget", None)  # Q1 additive receipt key（本用例 a_cross 扣池 1）
     assert result == {"status": "completed", "outcome": "checked_no_notice", "notices_created": 0, "pairs_examined": 1, "rows_mode": True, "rows_examined": 1, "model_clear": 1}
     # A clean model decision is not counted as check degradation.
@@ -2699,8 +2697,6 @@ def test_idle_worker_job_budget_does_not_cap_inflight_qwen(tmp_path: Path, monke
     result = tools._process_semantic_conflict_job(new["id"], _job_snapshot(tools, new["id"]))
 
     result.pop("elapsed_ms", None)
-    result.pop("claims_channel", None)  # 0.17.0 P2-5.3 通道回执键
-    result.pop("claims_channel_c", None)  # gate-v2 G6b 通道 C 回执键
     result.pop("judge_budget", None); result.pop("qwen_budget", None)  # Q1 additive receipt key（本用例 a_cross 扣池 1）
     assert result == {"status": "completed", "outcome": "notices_created", "notices_created": 1, "pairs_examined": 1, "rows_mode": True, "rows_examined": 1}
     # 0.17.1 攒批：判定走批前向，deadline 检查粒度从每对变为每块。

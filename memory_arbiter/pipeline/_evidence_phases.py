@@ -343,6 +343,14 @@ class _EvidencePhases:
                     continue
                 seen_pairs.add(pair_key)
                 seg_a, seg_b = originators[i][0], originators[j][0]
+                if seg_b.unit_index < seg_a.unit_index:
+                    # 跨生产者身份方向归一（2026-10-05 审查修复）：扫描腿
+                    # （_examine_internal）以 i<j（unit_index 升序）配对，
+                    # internal_conflicts 的 exists 探针与 UNIQUE 键是有序对；
+                    # KNN 发现方向是「发现者在前」，非对称邻域下可产出
+                    # (q,p)。不归一则同一矛盾在下一轮 kick 以 (p,q) 再落
+                    # 一行 pending（exists 必 miss，UNIQUE 不拦）。
+                    seg_a, seg_b = seg_b, seg_a
                 cos = float(sims[i, j])
                 if cos < SEMANTIC_CANDIDATE_COS_FLOOR:
                     ctx["below_cos_floor"] = ctx.get("below_cos_floor", 0) + 1

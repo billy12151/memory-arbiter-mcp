@@ -120,12 +120,21 @@ class WritePipeline:
                     vector = [float(x) for x in er.embedding]
                     # 校准轮：该向量即 refresh_summary_vector 稍后要写的同一条
                     # ——就地 upsert（此时记忆行已 insert），refresh 侧做输入
-                    # 未变跳过，写路径 inline embed 从 3 次回 2 次。
+                    # 未变跳过，写路径 inline embed 从 3 次回 2 次。vec0 虚表
+                    # 无视一切 conflict 子句（同库 upsert_summary_vector 的
+                    # docstring：OR IGNORE 在 PK 冲突下也 raise），故 DELETE
+                    # +INSERT——INSERT OR REPLACE 只在「行必不存在」这一
+                    # 未声明前提下成立，一旦既有 id 重入（退休删行失败等）
+                    # 会被 except 吞掉并留下陈旧向量。
                     try:
                         import json as _json
                         with self.db.write_transaction() as conn:
                             conn.execute(
-                                "INSERT OR REPLACE INTO memory_summary_vec(id, embedding) VALUES (?, ?)",
+                                "DELETE FROM memory_summary_vec WHERE id = ?",
+                                (int(memory_id),),
+                            )
+                            conn.execute(
+                                "INSERT INTO memory_summary_vec(id, embedding) VALUES (?, ?)",
                                 (int(memory_id), _json.dumps(vector)),
                             )
                     except Exception:

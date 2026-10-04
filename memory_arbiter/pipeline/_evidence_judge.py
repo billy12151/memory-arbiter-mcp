@@ -7,7 +7,6 @@ _judge_pair_compat、test_judge_budget_pool 直取 _JobJudgeBudget）。
 from __future__ import annotations
 
 import hashlib
-import hashlib
 from typing import Any, TYPE_CHECKING
 
 from ..constants import SEMANTIC_MAX_EXAMINED_PAIRS

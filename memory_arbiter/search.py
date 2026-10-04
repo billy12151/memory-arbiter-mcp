@@ -137,7 +137,8 @@ def _wide_recall(
          unavailable (no query_embedding or no sqlite-vec), pool not yet full,
          with ≥2 anchor hits, capped. Ablated 2026-09-19 (recall-ch1235): zero
          relevant-target contribution on corpus recall-v1 while vectors work.
-      5. evidence-vector KNN over `memory_evidence_vec` — optional, only when
+      5. row-vector KNN over `memory_row_vec` (via db.row_knn, C4 since
+         0.17.0) — optional, only when
          query_embedding provided and sqlite-vec available. Catches semantically similar but lexically
          dissimilar memories. Candidates are flagged so soft-rerank can give
          them a floor score (the query text didn't literally match anything).
