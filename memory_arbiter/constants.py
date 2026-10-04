@@ -273,6 +273,11 @@ SEMANTIC_TABLE_ROW_EXEMPT = 100
 # 消失，实测 offset=156@limit=100 时 100 条→0 条）。clamp 保通道存活；
 # 翻页深度语义本就是 best-effort（v0.15.4 口径），不新增承诺。
 VEC0_MAX_K = 4096
+# 0.17.1 修复批 A4：毒记忆（稳定抛非 TypeError/ValueError 的异常、水位无法
+# 推进）的失败上界。跨 kick 累计在 scan_pipeline_state.poison_failures；
+# 达界后 kick 回执 poison_skipped 可见（不自动 mark_scanned——那会静默丢
+# 覆盖；轮次保持 complete=false、conflict_scan_required 门不清，由用户处置）。
+SCAN_POISON_MAX_FAILURES = 5
 # 0.17.0 P2-3.4: candidate pair_score weights (order-only, never a verdict).
 # Base is the C4 subject/tags overlap; value features outrank topic
 # similarity because 98% of same-topic pairs are continuations, not

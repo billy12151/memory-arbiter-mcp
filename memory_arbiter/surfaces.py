@@ -1306,7 +1306,15 @@ class ProductSurfaces:
                 # Expire queue rows whose pinned versions drifted before the
                 # next judgment page is built (§6㉑④: refresh, never drop).
                 self.db.scan_queue_refresh_stale_pins()
-            return self.db.state.response(result)
+            # A10（0.17.1 修复批）：_forward 的错误路径返回的是**完整信封**
+            # （_invalid_product_call → state.response(..., ok=False)）。再包
+            # 一层会把被拒的 kick 变成顶层 ok=True + data.ok=False（通用
+            # ok 契约误读为成功，实测 neighbor_k="abc" 即此形态）。识别
+            # 信封形状后原样透传；其余（kick 自身失败 dict / 成功回执）
+            # 按 result["ok"] 组装。
+            if "mode" in result and "data" in result:
+                return result
+            return self.db.state.response(result, ok=bool(result.get("ok", True)))
         if task == "scan_queue":
             # 0.16.0 §6㉑: agent-facing judgment queue. Page = "handle page 1,
             # submit its dispositions with the next page fetch"; submit lands

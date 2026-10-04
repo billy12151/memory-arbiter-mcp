@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import math
 import sqlite3
 import time
 import uuid
@@ -31,6 +32,7 @@ from typing import Any, TYPE_CHECKING
 from .acl import scope_names, workspace_scope_sql
 from .constants import (
     SCAN_MACHINE_ROUTE_TOP_K,
+    SCAN_POISON_MAX_FAILURES,
     SCAN_SLOW_LANE_PER_KICK,
     SEMANTIC_MAX_ROWS,
 )
@@ -149,7 +151,13 @@ class ScanPipeline:
                 ),
             }
         max_memories = max(1, min(int(max_memories), 2000))
-        time_budget_s = max(1.0, min(float(time_budget_s), 300.0))
+        # A10（0.17.1 修复批）：float("nan") 会让 min/max 链静默产出 nan，
+        # 下游 `remaining_budget <= 0.5` 恒 False（nan 比较全假）→ 预算失效。
+        # 非有限值按默认 45s 处理（与缺省一致），不静默变 1.0s。
+        budget_value = float(time_budget_s)
+        if not math.isfinite(budget_value):
+            budget_value = 45.0
+        time_budget_s = max(1.0, min(budget_value, 300.0))
         neighbor_k = max(1, min(int(neighbor_k), 20))
 
         state = self.db.meta.scan_pipeline_state()
@@ -197,14 +205,42 @@ class ScanPipeline:
         machine_cleared = int(state.get("machine_cleared") or 0)
         anchor_buckets: dict[str, int] = {}
         processed_ids: list[int] = []
+        # A4：跨 kick 的失败计数（随轮状态落盘；不用 migration_state 的
+        # per-id 键——那会让 memory_status 的全量回显无界增长）。
+        poison_failures: dict[str, Any] = dict(state.get("poison_failures") or {})
 
         batch = 50
+        # A4（0.17.1 修复批）：两个推进机制修正。
+        # ①回卷：pending 是"全量"口径，而取数按 id>last_id —— 编辑过的旧
+        #   记忆（id<last_id、watermark 落后）只有重开 round（last_id=0）才
+        #   扫得到。此前的机制是"空页 → complete=True → 下一 kick 重开
+        #   round"，靠一次谎报完成来自愈；而谎报会经 _complete_round 清掉
+        #   conflict_scan_required 门（实测：门被清而毒记忆从未被扫描）。
+        #   改为本轮内显式回卷一次：空页且仍有 pending 时 last_id=0 再取，
+        #   补扫完再判完成——既自愈又不谎报。
+        # ②失败围栏：本轮失败条不得被反复取回（尾位毒记忆此前单 kick 热
+        #   重试 253 次吃光墙钟）。失败条排除在本轮取数之外，跨 kick 由
+        #   poison_failures 计数（随轮状态落盘），达上界后回执可见。
+        wrapped = False
+        failed_this_kick: set[int] = set()
         while processed < max_memories:
             remaining_budget = budget - (time.monotonic() - started)
             if remaining_budget <= 0.5:
                 break
-            ids = self.db.pending_scan_memory_ids(after_id=last_id, limit=batch)
+            ids = [
+                memory_id
+                for memory_id in self.db.pending_scan_memory_ids(after_id=last_id, limit=batch)
+                if memory_id not in failed_this_kick
+            ]
             if not ids:
+                if (
+                    not wrapped
+                    and last_id != 0
+                    and self.db.pending_scan_memory_count() > 0
+                ):
+                    wrapped = True
+                    last_id = 0
+                    continue
                 state["complete"] = True
                 break
             for memory_id in ids:
@@ -226,6 +262,10 @@ class ScanPipeline:
                     logging.getLogger(__name__).exception(
                         "scan kick: memory %s failed; skipping (watermark not advanced)",
                         memory_id,
+                    )
+                    failed_this_kick.add(memory_id)
+                    poison_failures[str(memory_id)] = (
+                        int(poison_failures.get(str(memory_id)) or 0) + 1
                     )
                     continue
                 version = outcome["version"]
@@ -257,9 +297,18 @@ class ScanPipeline:
             "updated_at": self._now(),
         })
         pending_left = self.db.pending_scan_memory_count()
-        if pending_left == 0:
-            state["complete"] = True
+        # A4（0.17.1 修复批）：complete 必须由"pending 清零"支撑——此前
+        # 空页即置 True 且不复位，毒记忆（或任何失败条）被跳过时轮次仍
+        # 宣称完成并清掉 conflict_scan_required 门（实测：门被清而该记忆
+        # 从未被扫描，完整性宣称断裂）。回卷已尽力补扫，pending_left>0
+        # 只可能是稳定失败的毒记忆 → 不宣称完成（门不清=覆盖不完整）。
+        state["complete"] = pending_left == 0
         complete = bool(state.get("complete"))
+        poison_skipped = sorted(
+            int(mid)
+            for mid, count in poison_failures.items()
+            if int(count) >= SCAN_POISON_MAX_FAILURES
+        )
         # 0.17.0 P2-6.2 slow lane: with the fast lane settled (or its batch
         # exhausted for this kick), spend a small leftover budget rotating
         # through the LEAST-recently-scanned watermark-current memories —
@@ -299,6 +348,7 @@ class ScanPipeline:
             "auto_rejected": auto_rejected,
             "internal_found": internal_found,
             "machine_cleared": machine_cleared,
+            "poison_failures": poison_failures,
         })
         self.db.meta.record_scan_pipeline_state(state)
         # C5 pacing record + audit line: the same doctor faces the legacy
@@ -314,7 +364,7 @@ class ScanPipeline:
         )
         if complete:
             self._complete_round(state)
-        return {
+        receipt: dict[str, Any] = {
             "ok": True,
             "round_id": state.get("round_id"),
             "mode": state.get("mode"),
@@ -330,6 +380,11 @@ class ScanPipeline:
             "complete": complete,
             "duration_ms": int((time.monotonic() - started) * 1000),
         }
+        if poison_skipped:
+            # A4：达上界的毒记忆——可见而非静默（水位未推进=覆盖不完整，
+            # 由用户决定处置：修数据 / 显式忽略）。
+            receipt["poison_skipped"] = poison_skipped
+        return receipt
 
     def _pending_workspace_items(self) -> int:
         """0.16.10 §九: conflict scan requires the workspace-normalization
