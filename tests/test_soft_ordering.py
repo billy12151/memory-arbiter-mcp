@@ -221,6 +221,9 @@ def test_write_path_notify_level_not_demoted_by_score(tmp_path: Path, monkeypatc
         return real_decide(text, hit_text)
 
     monkeypatch.setattr(pipeline.evidence, "decide_evidence", decide)
+    # 拆分批（方案 §6-2c）：读点随收集相迁 _evidence_phases，双命名空间 patch 保钉子能力
+    import memory_arbiter.pipeline._evidence_phases as _evp
+    monkeypatch.setattr(_evp, "decide_evidence", decide)
 
     def fake_knn(embedding: Any, k: Any = 5, workspace: Any = None, exclude_memory_id: Any = None, conn: Any = None, **_kw: Any) -> list[dict[str, Any]]:
         return [

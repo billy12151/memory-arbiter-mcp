@@ -49,6 +49,9 @@ from .search_text import (  # noqa: F401
     _query_non_cjk_dominant as _query_non_cjk_dominant,
 )
 from .search_scoring import (  # noqa: F401
+    _RECENCY_BONUS_7D as _RECENCY_BONUS_7D,
+    _RECENCY_BONUS_30D as _RECENCY_BONUS_30D,
+    _RECENCY_BONUS_90D as _RECENCY_BONUS_90D,
     _trust_bonus as _trust_bonus,
     _parse_ingest_time as _parse_ingest_time,
     _ingest_sort_key as _ingest_sort_key,

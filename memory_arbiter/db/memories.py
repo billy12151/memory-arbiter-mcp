@@ -26,6 +26,7 @@ from ._mem_helpers import (  # noqa: F401  (split re-export)
     content_sha as content_sha,
     _row_to_dict as _row_to_dict,
     _strip_retired_metadata_keys as _strip_retired_metadata_keys,
+    _RETIRED_METADATA_KEYS as _RETIRED_METADATA_KEYS,
 )
 from ._mem_vectors import _MemVectorsMixin
 

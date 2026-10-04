@@ -12,7 +12,6 @@ from __future__ import annotations
 from typing import Any, TYPE_CHECKING
 
 from .constants import SEMANTIC_MAX_ROWS
-from .db_generation import CONFLICT_DETECTOR_VERSION
 from .difference_classifier import classify_pair, internal_noise_pair
 from .semantic_conflict import decide_evidence
 
@@ -31,6 +30,7 @@ class _ScanPairsMixin:
         self, memory_id: int, version: int, workspace: str,
         units: list[dict[str, Any]],
     ) -> int:
+        from . import scan_pipeline as _sp  # 拆分批：CDV 经 scan_pipeline 命名空间调用期读（patch 缝=R2-A4 同型）
         """Same-memory unit×unit contradictions (E10 ①, §6⑳).
 
         0.16.4 §0.5/§2: the whole filter sequence is ONE shared gate —
@@ -76,7 +76,7 @@ class _ScanPairsMixin:
                     span_a=[int(a["start_offset"]), int(a["end_offset"])],
                     span_b=[int(b["start_offset"]), int(b["end_offset"])],
                     reason=decision.reason,
-                    detector_version=CONFLICT_DETECTOR_VERSION,
+                    detector_version=_sp.CONFLICT_DETECTOR_VERSION,
                 )
                 if created:
                     landed += 1
@@ -104,6 +104,7 @@ class _ScanPairsMixin:
         self, memory_id: int, version: int, unit: dict[str, Any],
         peer_id: int, hit: dict[str, Any],
     ) -> list[dict[str, Any]]:
+        from . import scan_pipeline as _sp  # 拆分批：CDV 经 scan_pipeline 命名空间调用期读（patch 缝=R2-A4 同型）
         def member(mid: int, ver: int, quote: str, span: list[int], unit_eid: int, content_hash: str) -> dict[str, Any]:
             return {
                 "memory_id": mid, "version": ver,
@@ -112,7 +113,7 @@ class _ScanPairsMixin:
                 "evidence_quote": quote, "evidence_span": span,
                 "content_hash": content_hash, "evidence_unit": unit_eid,
                 "direction": "deterministic", "prompt_version": None,
-                "detector_version": CONFLICT_DETECTOR_VERSION,
+                "detector_version": _sp.CONFLICT_DETECTOR_VERSION,
             }
 
         peer_version = int(hit.get("memory_version") or hit.get("memory_row_version") or 1)
@@ -188,6 +189,7 @@ def _candidate_pair_member(
     unit: "dict[str, Any]", hit: "dict[str, Any]",
     anchor_text: str, peer_text: str,
 ) -> dict[str, Any]:
+    from . import scan_pipeline as _sp  # 拆分批：CDV 经 scan_pipeline 命名空间调用期读（patch 缝=R2-A4 同型）
     """One ``members`` entry of a scan_rule_candidates pair (0.17.0 R2 收编).
 
     The candidates store and the duplicates_pool previously assembled this
@@ -216,7 +218,7 @@ def _candidate_pair_member(
         "evidence_quote": quote, "evidence_span": span,
         "content_hash": content_hash, "evidence_unit": evidence_unit,
         "direction": "deterministic", "prompt_version": None,
-        "detector_version": CONFLICT_DETECTOR_VERSION,
+        "detector_version": _sp.CONFLICT_DETECTOR_VERSION,
     }
 
 

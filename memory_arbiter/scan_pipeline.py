@@ -33,7 +33,7 @@ from .constants import (
     SCAN_POISON_MAX_FAILURES,
     SCAN_SLOW_LANE_PER_KICK,
 )
-from .db_generation import CONFLICT_DETECTOR_VERSION
+from .db_generation import CONFLICT_DETECTOR_VERSION as CONFLICT_DETECTOR_VERSION  # noqa: F401（显式 re-export：scan_admission 调用期读+测试 patch 缝）
 from .difference_classifier import classify_pair, is_garbage
 from .pipeline.evidence import filter_exempted_scan_rows
 from .semantic_conflict import decide_evidence, is_cross_evolution
