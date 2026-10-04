@@ -4,9 +4,11 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from .anchors import (
+# score_anchor_overlap：scripts/tune_tag_weights.py 保活面（老 search.py 隐式 re-export）
+from .anchors import (  # noqa: F401
     STOP_ANCHORS,
     extract_anchors,
+    score_anchor_overlap,
 )
 from .acl import (
     WorkspaceScope,
