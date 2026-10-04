@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import sys
 
 from ..evidence import INDEXABLE_PREFILTER_SQL
 import struct
@@ -16,7 +17,7 @@ from ..config import Settings
 from ..degrade import DegradeState
 
 from ..acl import WorkspaceScope, workspace_scope_sql
-from ..constants import DEFAULT_WORKSPACE_NAME, MAX_MEMORY_TOTAL_TAGS
+from ..constants import DEFAULT_WORKSPACE_NAME, MAX_MEMORY_TOTAL_TAGS, VEC0_MAX_K
 from ..models import MemoryRecord, utc_now_iso
 from ..text import (
     canon_entity as _canon_entity,
@@ -624,7 +625,17 @@ class MemoriesStore:
             or not query_embedding or not str(workspace_canonical or "").strip()
         ):
             return []
+        # A1（0.17.1 修复批）：同 row_knn 的 vec0 k 硬上限——仓内当前唯一
+        # 生产调用传 k=10（write 去重），属 API 层防御；超限同样会被下方
+        # except sqlite3.Error 吞成空结果。
         requested_k = max(1, int(k))
+        if requested_k > VEC0_MAX_K:
+            print(
+                f"summary_knn: k={requested_k} exceeds the vec0 limit; "
+                f"clamped to {VEC0_MAX_K}",
+                file=sys.stderr,
+            )
+            requested_k = VEC0_MAX_K
         eligible_params: list[Any] = [
             int(exclude_memory_id), workspace_canonical,
         ]

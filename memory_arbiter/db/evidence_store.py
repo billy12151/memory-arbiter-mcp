@@ -5,10 +5,12 @@ import hashlib
 import json
 import sqlite3
 import struct
+import sys
 from typing import Any, TYPE_CHECKING
 
 from ..db_generation import CONFLICT_DETECTOR_VERSION
 from ..acl import WorkspaceScope, workspace_scope_sql
+from ..constants import VEC0_MAX_K
 from ..evidence import has_indexable_text, INDEXABLE_PREFILTER_SQL
 from ..rowseg import RowSegment
 from ..models import utc_now_iso
@@ -509,7 +511,18 @@ class EvidenceStore:
         else:
             status_sql = "v.parent_status='active'"
             memory_status_sql = "m.status='active'"
+        # A1（0.17.1 修复批）：vec0 的 k 硬上限——超过会让整条查询报
+        # "k value in knn query too large" 并被本函数的 except sqlite3.Error
+        # 吞成空结果。深 offset 的 pool_cap×16 会越过 4096（limit=100 时
+        # offset≥156），clamp 保通道存活（翻页深度本就是 best-effort）。
         requested_k = max(1, int(k))
+        if requested_k > VEC0_MAX_K:
+            print(
+                f"row_knn: k={requested_k} exceeds the vec0 limit; "
+                f"clamped to {VEC0_MAX_K}",
+                file=sys.stderr,
+            )
+            requested_k = VEC0_MAX_K
         workspace_sql, workspace_params = workspace_scope_sql(
             "COALESCE(NULLIF(m.workspace_canonical,''),m.workspace)", workspace,
         )

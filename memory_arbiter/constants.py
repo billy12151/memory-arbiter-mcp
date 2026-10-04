@@ -265,6 +265,14 @@ SEMANTIC_INTERNAL_SELF_KNN_K = 5
 # ~10ms/行（6 万行≈10 分钟嵌入+180MB 向量垃圾，且污染 KNN 空间）。该表
 # 无行级召回（hits 不能命中表内行），摘要级召回不受影响。
 SEMANTIC_TABLE_ROW_EXEMPT = 100
+# 0.17.1 修复批 A1：sqlite-vec 0.1.x vec0 KNN 硬上限（实测 0.1.9 /
+# SQLite 3.53.4：k=4096 通过，k=4097 报 "k value in knn query too large,
+# the limit is 4096"）。深 offset 会把 k 推到 4096+（recall 的
+# pool_cap=(offset+limit+1)，evidence 通道再 ×16）——届时 vec0 整条查询
+# 失败，而调用方的 except sqlite3.Error 会把它吞成空结果（语义通道静默
+# 消失，实测 offset=156@limit=100 时 100 条→0 条）。clamp 保通道存活；
+# 翻页深度语义本就是 best-effort（v0.15.4 口径），不新增承诺。
+VEC0_MAX_K = 4096
 # 0.17.0 P2-3.4: candidate pair_score weights (order-only, never a verdict).
 # Base is the C4 subject/tags overlap; value features outrank topic
 # similarity because 98% of same-topic pairs are continuations, not

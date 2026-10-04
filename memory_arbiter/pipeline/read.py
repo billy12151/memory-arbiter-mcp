@@ -1314,28 +1314,38 @@ class ReadPipeline:
         # 字节预算——与 batch_read 的 80KB 家族同款同常数、同结构化降级
         # （never silent truncation）：超限整页降元数据（保留 content_chars），
         # 指引 agent 逐条 read。preview 页本就无内容，不进此门。
+        #
+        # A6（0.17.1 修复批）：find 页条目是**扁平**形状（content 在顶层，
+        # _preview_item 返回 dict(item)），此前的 entry["memory"] 取值恒空
+        # → total_bytes 恒 0、门永不触发（实测 360KB 放行）；hits 页的
+        # hit_spans[].text 也不在预算内（实测未升级全文的 hits 页 509KB
+        # 放行）。两处一并计入。
         if content_mode in {"full", "hits"}:
             def _item_bytes(entry: dict[str, Any]) -> int:
-                memory = entry.get("memory") or {}
-                return len(str(memory.get("content") or "").encode("utf-8"))
+                total = len(str(entry.get("content") or "").encode("utf-8"))
+                for span in entry.get("hit_spans") or []:
+                    if isinstance(span, dict):
+                        total += len(str(span.get("text") or "").encode("utf-8"))
+                return total
 
             total_bytes = sum(_item_bytes(entry) for entry in results)
             if total_bytes > BATCH_READ_FULL_BUDGET_BYTES:
                 slim_results: list[dict[str, Any]] = []
                 for entry in results:
-                    memory = entry.get("memory") or {}
-                    if not str(memory.get("content") or ""):
-                        slim_results.append(entry)
-                        continue
-                    record = {key: value for key, value in memory.items() if key != "content"}
-                    record["content_chars"] = len(str(memory.get("content") or ""))
-                    slim_results.append(entry | {"memory": record})
+                    slim = {key: value for key, value in entry.items() if key != "content"}
+                    if entry.get("hit_spans"):
+                        # hits 页：hit_spans 是命中的窗口坐标，降级保留 +
+                        # 显式标记（绝不静默截断）。content（若因覆盖率升级
+                        # 而存在）已剥离，content_chars 保留全文长度。
+                        slim["hit_spans_truncated_by_budget"] = True
+                    slim_results.append(slim)
                 response_data["results"] = slim_results
                 response_data["over_budget"] = True
                 response_data["budget_bytes"] = BATCH_READ_FULL_BUDGET_BYTES
                 response_data["total_bytes"] = total_bytes
                 response_data["hint"] = (
-                    "batch_find over the content byte budget; no contents were returned — "
+                    "batch_find over the content byte budget: full texts were dropped "
+                    "(content_chars kept; hit_spans, when present, are the hit windows) — "
                     "read items individually (memory action='read') or lower limit_per_query"
                 )
                 if self.settings.include_size and isinstance(response_data.get("size"), dict):
