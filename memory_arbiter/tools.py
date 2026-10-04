@@ -912,7 +912,7 @@ class MemoryTools:
         version and content hash under its own transaction, so a concurrent
         edit simply yields stale_snapshot and the memory stays pending."""
         from .evidence import evidence_content_hash
-        from .pipeline.evidence import EvidencePipeline  # noqa: F401  (类型注释用)
+        from .pipeline.evidence import EvidencePipeline, _filter_exempted_segments  # noqa: F401  (类型注释用)
         from .rowseg import segment_rows
 
         rows = self.db.missing_row_vector_rows()
@@ -922,6 +922,13 @@ class MemoryTools:
                 content = str(row.get("content") or "")
                 row_sha = str(row.get("content_sha") or "") or evidence_content_hash(content)
                 segments = segment_rows(str(row.get("subject") or ""), content)
+                if not segments:
+                    continue
+                # A3（0.17.1 修复批）：B3 超长表格段豁免——boot backfill 此前
+                # 未接线，存量巨表会在这里重新嵌入并复活（每次启动白烧 GPU）。
+                # 全豁免（空 subject + 全表）时不 publish（否则清空行会让
+                # missing_row_vector_rows 每次重选该记忆，造成回填死循环）。
+                segments, _exempted = _filter_exempted_segments(segments)
                 if not segments:
                     continue
                 # C1: one batched embed per memory instead of a per-segment

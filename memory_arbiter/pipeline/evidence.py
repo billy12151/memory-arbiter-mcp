@@ -212,6 +212,38 @@ def _filter_exempted_segments(segments: "list[Any]") -> "tuple[list[Any], int]":
     return kept, len(indexes)
 
 
+def filter_exempted_scan_rows(
+    rows: "list[dict[str, Any]]",
+) -> "tuple[list[dict[str, Any]], int]":
+    """A3（0.17.1 修复批）：扫描腿的 B3 豁免适配。
+
+    ``scan_rows`` 返回 DB dict（键 kind / unit_index），而 ``_giant_table_indexes``
+    期望带 .kind/.row_index 的 segment 对象——用轻量 shim 喂同一 helper，
+    避免复制聚段逻辑（scan_rows 的 unit_index 就是 row_index，
+    evidence_store.py 注释明示）。返回 (保留行, 豁免行数)。
+    """
+    from collections import namedtuple
+
+    if not rows:
+        return [], 0
+    _ScanSeg = namedtuple("_ScanSeg", "kind row_index")
+    shim = [
+        _ScanSeg(
+            str(row.get("kind") or "sentence"),
+            int(row.get("unit_index") or 0),
+        )
+        for row in rows
+    ]
+    indexes = _giant_table_indexes(shim)
+    if not indexes:
+        return list(rows), 0
+    kept = [
+        row for row in rows
+        if int(row.get("unit_index") or 0) not in indexes
+    ]
+    return kept, len(indexes)
+
+
 class _JudgeBatch:
     """0.17.1 (owner 拍板: 攒批进本版): collect judge inputs through a phase's
     gates first (closure / version drift / budget / deadline — the pre-judge
@@ -660,6 +692,21 @@ class EvidencePipeline:
         row_segments = segment_rows(
             str(current.get("subject") or ""), str(current.get("content") or ""),
         )
+        # A3（0.17.1 修复批）：B3 超长表格段豁免——本路径是升级
+        # （vnext_migration 每记忆调用）与 repair 的入口，此前未接线：
+        # 存量巨表行会在这里复活（实测 120 行表 → 119 行 + 一次 scan 落地
+        # 7021 条 internal_conflicts）。
+        row_segments, exempted_count = _filter_exempted_segments(row_segments)
+        if not row_segments:
+            # 全豁免形态（空 subject + 全表 >100 行）：不 publish——publish_rows
+            # ([],[]) 会清空既有行并把记忆留在 missing_row_vector_rows 选集里，
+            # 造成每次启动重 embed 的死循环。保留现状、回执可见。
+            return {
+                "status": "skipped",
+                "reason": "all_rows_exempted",
+                "table_rows_exempted": exempted_count,
+                "warnings": warnings,
+            }
         row_embeddings: list[list[float]] = []
         ok = True
         for embed_result in embedder.embed_texts([seg.text for seg in row_segments], prefix=EMBED_PREFIX_STS):
@@ -690,10 +737,13 @@ class EvidencePipeline:
                 and vec_state.get("target_space_id") == embedder.embedding_space_id
             ):
                 self.db.maybe_complete_space_rebuild(embedder.embedding_space_id)
-        return {
+        result = {
             "status": "indexed" if published.get("published") else "failed",
             **published,
         }
+        if exempted_count:
+            result["table_rows_exempted"] = exempted_count
+        return result
 
     @staticmethod
     def _streamed_pairs(

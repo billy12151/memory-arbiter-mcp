@@ -38,6 +38,7 @@ from .constants import (
 )
 from .db_generation import CONFLICT_DETECTOR_VERSION
 from .difference_classifier import classify_pair, internal_noise_pair, is_garbage
+from .pipeline.evidence import filter_exempted_scan_rows
 from .semantic_conflict import decide_evidence, is_cross_evolution
 from .normalize_gate import compute_summary_votes, normalize_gate
 
@@ -491,6 +492,13 @@ class ScanPipeline:
                 # write-side loops and the diagnostic channel's anchor SQL.
                 if str(row.get("kind") or "") != "subject"
             ]
+            # A3（0.17.1 修复批）：B3 超长表格段豁免——扫描腿此前直读
+            # scan_rows 无过滤，存量巨表仍做 O(n²) 内部检查（实测 120 行表
+            # 一次 kick 落地 7021 条 internal_conflicts）。豁免计数必须在
+            # 早退（if not internal_source）之前累加，否则丢账。
+            internal_source, _exempted_rows = filter_exempted_scan_rows(internal_source)
+            if _exempted_rows:
+                outcome["table_rows_exempted"] = _exempted_rows
             if not internal_source:
                 return outcome
             internal = self._examine_internal(memory_id, version, workspace, internal_source)
