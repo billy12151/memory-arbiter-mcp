@@ -9,24 +9,16 @@ this is the default write destination, not the autonomous-move rule.
 """
 from __future__ import annotations
 
-import re
+from .ws_keys import _mechanical_ws_key as _mechanical_key  # noqa: F401  (split re-export)
 
 TWIN_BUCKET = "mema-twin"
 TWIN_DEV_BUCKET = "mema-twin-dev"
 TWIN_IDENTITY = "mema-twin"
 
-
-def _mechanical_key(name: str) -> str:
-    """Mechanical workspace key: strip whitespace/hyphens/underscores + casefold.
-
-    与 ``db/workspaces._mechanical_ws_key`` 同源契约（解析器的 1b 折叠）。
-    A9（0.17.1 修复批）：此处**复制**该 3 行实现而非导入——twin_redirect 是
-    被 pipeline/write、pipeline/operations、queue_protocol 消费的叶子模块，
-    而 db/workspaces 位于其下游；直接 import 虽在当前依赖图上无环，但把
-    叶子模块绑到 DB 层会限制未来拆分（且 import 路径经 db/__init__ 有
-    副作用）。两处一致性由 tests/test_twin_redirect.py 的等价钉守（防漂移）。
-    """
-    return re.sub(r"[\s_\-]+", "", str(name or "")).casefold()
+# 拆分批 ①（2026-10-04）：A9 时代的「有意复制」由顶层 ws_keys.py 收拢取代
+# ——顶层叶子不触发 db/__init__ 副作用（A9 的复制理由就此消解），两侧现在
+# 同源。_mechanical_key 名字保留（消费方 + tests/test_twin_variant_guard 的
+# 等价钉继续指向它）。
 
 
 def twin_redirect_target(

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import re
 import sqlite3
 from contextlib import contextmanager
 from typing import Any, Iterator, TYPE_CHECKING
@@ -12,83 +11,26 @@ from ..degrade import DegradeState
 from ..constants import (
     EMBED_PREFIX_STS,
     DEFAULT_WORKSPACE_NAME,
-    DEFAULT_TERMS,
     WORKSPACE_MATCH_DISTANCE,
     is_default_workspace_term,
 )
 from ..db_generation import database_startup_lock
 from ..models import utc_now_iso
+from ..ws_keys import (
+    _DEFAULT_TERM_SQL_NOT_IN as _DEFAULT_TERM_SQL_NOT_IN,
+    _DEFAULT_TERM_SQL_PARAMS as _DEFAULT_TERM_SQL_PARAMS,
+    _coerce_ws as _coerce_ws,
+    _mechanical_ws_key as _mechanical_ws_key,
+    _normalize_alias_key as _normalize_alias_key,
+    _normalize_ws_group_key as _normalize_ws_group_key,
+)
 
 if TYPE_CHECKING:
     from .core import MemoryDB
 
 # Case-folded non-empty default terms, for SQL NOT IN guards. lower() in
 # SQLite is ASCII-only, which covers the terms that have case at all.
-_DEFAULT_TERM_SQL_PARAMS = tuple(sorted({t.casefold() for t in DEFAULT_TERMS if t}))
-_DEFAULT_TERM_SQL_NOT_IN = (
-    " AND lower(c.name) NOT IN (" + ",".join("?" for _ in _DEFAULT_TERM_SQL_PARAMS) + ")"
-)
 
-
-def _normalize_alias_key(ws: str | None) -> str:
-    """Normalize a workspace string into a stable alias-governance key.
-
-    Case-folded + whitespace-collapsed so "金营项目 " and "金营项目" map to the
-    same alias row. This is only the governance lookup key; the display
-    canonical is stored verbatim in workspace_aliases.canonical. Non-string
-    inputs (loosely-typed MCP JSON) are coerced to str rather than crashing.
-    """
-    if ws is None:
-        return ""
-    s = ws.strip() if isinstance(ws, str) else str(ws).strip()
-    if not s:
-        return ""
-    return " ".join(s.split()).casefold()
-
-
-def _mechanical_ws_key(ws: str | None) -> str:
-    """Fold a workspace string to a deterministic case/separator-insensitive key.
-
-    Unlike _normalize_alias_key (which only case-folds + collapses whitespace
-    for the governance table), this also strips hyphens and underscores so pure
-    spelling variants of one canonical collide: AgentLane / agent-lane /
-    agent_lane -> "agentlane". Used only to reuse an EXISTING canonical, never to
-    invent a new spelling. Returns "" for empty/whitespace input so blank
-    workspaces never collapse together here.
-    """
-    if not isinstance(ws, str):
-        ws = "" if ws is None else str(ws)
-    return re.sub(r"[\s_\-]+", "", ws).casefold()
-
-
-def _normalize_ws_group_key(ws: str | None) -> str:
-    """Grouping key for ``normalize_workspace_canonicals`` — deliberately
-    STRICTER than ``_mechanical_ws_key``.
-
-    Same separator stripping, but ``str.lower`` instead of ``casefold``:
-    'Straße' vs 'strasse' and the 'ﬁ' ligature vs 'file' stay distinct
-    instead of collapsing. Normalize is a bulk destructive merge, so its
-    grouping key errs toward NOT merging (a missed variant is recoverable, a
-    wrong merge is not); the non-destructive orthography reuse in the
-    decision primitive / resolver / migrate keeps the full casefold of
-    ``_mechanical_ws_key``. The whole planner (grouping, respected-rejection
-    match, shadowed-redirect match, rejected-only twin map) uses this one key
-    space so every comparison stays consistent with the groups built from it.
-    """
-    if not isinstance(ws, str):
-        ws = "" if ws is None else str(ws)
-    return re.sub(r"[\s_\-]+", "", ws).lower()
-
-
-def _coerce_ws(ws: Any) -> str:
-    """Coerce a possibly-non-string workspace value to a trimmed str.
-
-    MCP clients send loosely-typed JSON; alias/canonical may arrive as int/
-    list/dict. Coerce rather than raise AttributeError on ``.strip()``.
-    """
-    if ws is None:
-        return ""
-    return ws.strip() if isinstance(ws, str) else str(ws).strip()
 
 class WorkspaceStore:
     def __init__(self, db: "MemoryDB"):
