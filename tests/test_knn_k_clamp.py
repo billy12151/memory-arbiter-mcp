@@ -50,9 +50,14 @@ def test_vec0_max_k_constant_is_the_real_ceiling(tmp_path) -> None:
 
 
 def test_row_knn_clamps_over_limit_k(tmp_path) -> None:
-    """k=5000（超限）在 400 行库上必须返回非空 —— clamp 生效。"""
+    """k=5000（超限）必须返回非空 —— clamp 生效。
+
+    行数无关紧要：vec0 的 k 上限是查询参数限制，不是数据量限制
+    （性能复盘 2026-10-04：此测试曾用 400 条记忆、独占 46s——
+    每条都走完整写入（嵌入+发布），而 clamp 验证只需行数>0）。
+    """
     tools = make_tools(tmp_path)
-    _seed(tools, 400)
+    _seed(tools, 20)
     q = FakeEmbedder.embed_text(prefix="", body="债务转移").embedding
     rows = tools.db.row_knn(q, k=5000, workspace="w")
     assert rows, "k=5000 必须被 clamp 到 4096 并返回结果（此前整条查询失败返 []）"
@@ -61,7 +66,8 @@ def test_row_knn_clamps_over_limit_k(tmp_path) -> None:
 def test_row_knn_clamp_boundary_equivalence(tmp_path) -> None:
     """k=VEC0_MAX_K 与 k=100000 返回同一集合（clamp 后等价，边界钉）。"""
     tools = make_tools(tmp_path)
-    _seed(tools, 300)
+    # 20 条足够：两个 k 都 ≥ 库中行数 → 各自返回全部行 → 集合必然可比
+    _seed(tools, 20)
     q = FakeEmbedder.embed_text(prefix="", body="债务转移").embedding
     at_limit = tools.db.row_knn(q, k=VEC0_MAX_K, workspace="w")
     over_limit = tools.db.row_knn(q, k=100_000, workspace="w")
@@ -70,10 +76,14 @@ def test_row_knn_clamp_boundary_equivalence(tmp_path) -> None:
 
 
 def test_find_deep_offset_no_longer_goes_dark(tmp_path) -> None:
-    """产品面：limit=100, offset=200（k=4816>4096）此前返 0 条，现返非空。"""
+    """产品面：深 offset（k>4096）此前返 0 条，现返非空。
+
+    最小触发组合：pool_cap = offset+limit+1 > 256 ⟺ k>4096。
+    取 offset=157/limit=100（恰越界），库 170 条 → 页非空可断言。
+    """
     tools = make_tools(tmp_path)
-    _seed(tools, 400)
-    res = tools.memory("find", {"query": "债务转移", "limit": 100, "offset": 200, "workspace": "w"})
+    _seed(tools, 170)
+    res = tools.memory("find", {"query": "债务转移", "limit": 100, "offset": 157, "workspace": "w"})
     assert res.get("ok"), res
     results = res["data"]["results"]
     assert len(results) > 0, "深 offset 不得再全灭（clamp 保通道）"
