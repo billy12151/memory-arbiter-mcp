@@ -76,8 +76,9 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 MODELS_DIR="${MEMA_MODELS_DIR:-$HOME/.local/share/memory-arbiter/models}"
 CFG="${MEMA_CONFIG:-$HOME/.config/memory-arbiter/config.json}"
 
-echo "[1/4] 安装 wheel（含 torch/transformers 依赖约 200MB,几分钟）"
-pip install "${MEMA_EXTRA_ARGS:-}" "$HERE"/memory_arbiter_mcp-*.whl
+echo "[1/4] 安装 wheel + 全 extras（vec/semantic-local/mdeberta；torch 等依赖约 200MB,几分钟）"
+WHEEL_PATH="$(ls "$HERE"/memory_arbiter_mcp-*.whl | head -1)"
+pip install ${MEMA_EXTRA_ARGS:-} "memory-arbiter-mcp[vec,semantic-local,mdeberta] @ file://$WHEEL_PATH"
 
 echo "[2/4] 安装模型到 $MODELS_DIR"
 mkdir -p "$MODELS_DIR" "$HOME/.config/memory-arbiter"
