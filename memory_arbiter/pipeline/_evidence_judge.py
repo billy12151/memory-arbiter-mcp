@@ -36,7 +36,7 @@ class _JudgeBatch:
     def __len__(self) -> int:
         return len(self._items)
 
-    def drain(self, judge_fn: "Any", *, stop_probe: "Any = None") -> list[dict[str, Any]]:
+    def drain(self, judge_fn: "Any", *, stop_probe: Any = None) -> list[dict[str, Any]]:
         """judge_fn(list[(a, b)]) -> list[PairVerdict]; returns the queued
         items with ``verdict`` attached, in queue order. 逐片契约（R1 实施
         review P2-2）：每片返回数与该片对数逐一校验，违约片连同其后的全部
