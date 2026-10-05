@@ -5,7 +5,7 @@
 #
 # Does everything the multi-step manual flow used to require:
 #   1. install the package with [vec,semantic-local] extras (uv > pipx > pip)
-#   2. mema setup --install  (deps check + download both GGUF models + config)
+#   2. mema setup --install  (deps check + download the embedding GGUF model + config)
 #   3. mema doctor           (verify the install end-to-end)
 #   4. print the MCP client config snippet to paste
 set -euo pipefail
@@ -49,10 +49,10 @@ if command -v python3 >/dev/null 2>&1; then
     [ -n "${USER_BASE_BIN:-}" ] && export PATH="$USER_BASE_BIN:$PATH"
 fi
 
-# ── 2. full setup: deps + both models + config.json ─────────────────────────
+# ── 2. full setup: deps + embedding model + config.json ─────────────────────────
 # Exit 1 from setup means "missing items" (e.g. a 3.13 interpreter without
 # llama.cpp wheels) — report it instead of dying before doctor runs.
-log "mema setup --install（下载约 800MB 模型，支持断点续传/国内镜像）"
+log "mema setup --install（下载约 330MB embedding 模型，支持断点续传/国内镜像）"
 mema setup --install || warn "mema setup --install 未完全就绪，请查看上方输出（常见：Python 3.13+ 无 llama.cpp wheel，见 pyenv 提示）"
 
 # ── 3. verify ────────────────────────────────────────────────────────────────

@@ -51,7 +51,7 @@ CONFIG_DESCRIPTORS = [
     _item("semantic_conflict.mdeberta_model_dir", "semantic", "semantic_conflict_mdeberta_model_dir"),
     _item("semantic_conflict.mdeberta_batch", "semantic", "semantic_conflict_mdeberta_batch", 0),
     _item("semantic_conflict.on_write", "semantic", "semantic_conflict_on_write", "async"),
-    _item("semantic_conflict.mdeberta_notice_min_prob", "semantic", "semantic_conflict_mdeberta_notice_min_prob", 0.80),
+    _item("semantic_conflict.mdeberta_notice_min_prob", "semantic", "semantic_conflict_mdeberta_notice_min_prob", 0.5),
     _item("semantic_conflict.notice_sync_wait_ms", "semantic", "semantic_conflict_notice_sync_wait_ms", NOTICE_SYNC_WAIT_MS),
     _item("update_check.enabled", "update", "update_check_enabled", True),
     _item("include_size", "reporting", default=True),

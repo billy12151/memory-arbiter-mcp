@@ -134,7 +134,7 @@ def doctor_overview_cli(settings: Settings, deep: bool = False) -> OverviewRepor
                 "database.upgrade_required",
                 "legacy database generation; current code will not open or modify it",
                 {"generation": generation, "path": str(settings.db_path)},
-                "Stop all writers, then run `mema upgrade --dry-run` before `mema upgrade`.",
+                "Stop all writers, then run `mema upgrade --dry-run` before `mema upgrade`. After upgrading, the first start auto-backfills row vectors — verify with mema doctor (rows.coverage).",
             )],
             {"mode": "upgrade_required", "total_memories": 0},
         )

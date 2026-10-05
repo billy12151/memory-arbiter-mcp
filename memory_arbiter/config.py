@@ -58,7 +58,8 @@ class Settings:
     semantic_conflict_mdeberta_model_dir: Path | None = None
     # 0.17.1 owner 拍板: P(conflict) ≥ this → normal notice; below → counted
     # only. possible_conflict → info notice (no threshold — ~1% rate).
-    semantic_conflict_mdeberta_notice_min_prob: float = 0.80
+    # owner 2026-10-05 终拍 T=0.5（召回优先，阈值不抬高，后续靠模型提升）
+    semantic_conflict_mdeberta_notice_min_prob: float = 0.5
     # 0.17.1 §3.2 攒批 (owner 2026-09-28 拍板)：0 = auto 按设备分档——
     # 有 GPU（Apple Silicon MPS / NVIDIA）16，无 GPU 8；显式数值覆盖 auto。
     semantic_conflict_mdeberta_batch: int = 0
@@ -253,7 +254,7 @@ class Settings:
         # 静默吞成 1.0 = 正式 notice 永不出的配置错误）。
         mdeberta_min_prob_val = clamp_float(
             parse_float(
-                mdeberta_min_prob, 0.80,
+                mdeberta_min_prob, 0.5,
                 name="semantic_conflict.mdeberta_notice_min_prob",
                 warnings=config_warnings,
             ),

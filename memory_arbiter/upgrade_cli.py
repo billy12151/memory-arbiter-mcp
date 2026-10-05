@@ -338,6 +338,9 @@ def run_upgrade(
     if result.get("ok"):
         result["next_step"] = (
             "Restart the MCP client and run `mema doctor --json`. "
+            "Row vectors are backfilled automatically on first start (a daemon "
+            "thread) — watch doctor rows.coverage; with no embedding model the "
+            "backfill stays pending until one is configured. "
             "Also schedule the two maintenance tasks (hourly conflict scan + daily governance "
             "reminder); the full platform-agnostic spec is the `scheduled_tasks` help topic."
         )

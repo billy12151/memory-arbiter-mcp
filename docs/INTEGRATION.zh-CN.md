@@ -28,7 +28,7 @@ stdio 是默认传输。要让多个本地客户端共享一个社区版进程�
   "update_check": {"enabled": true},
   "include_size": true,
   "embedding": {"model_path": "…", "auto_query": true, "auto_write": true},
-  "semantic_conflict": {"enabled": true, "mdeberta_ckpt": "…", "mdeberta_model_dir": "…", "mdeberta_batch": 16, "mdeberta_notice_min_prob": 0.8, "on_write": "async", "notice_sync_wait_ms": 3000},
+  "semantic_conflict": {"enabled": true, "mdeberta_ckpt": "…", "mdeberta_model_dir": "…", "mdeberta_batch": 16, "mdeberta_notice_min_prob": 0.5, "on_write": "async", "notice_sync_wait_ms": 3000},
   "mcp": {"transport": "stdio", "http": {"host": "127.0.0.1", "port": 8000}}
 }
 ```
@@ -37,7 +37,7 @@ stdio 是默认传输。要让多个本地客户端共享一个社区版进程�
 
 - `embedding.model_path` 指向本地 GGUF 模型就是启用 sqlite-vec 证据召回的唯一意图——不再有 `vec.enabled`/`embedding.provider`/`vec.dim`。向量维度取自模型本身；数据库把活跃维度记录为库内事实源，换成不同输出维度的模型时会在启动时按新维度 DROP 并重建向量表，索引翻为 `state=mismatch`，待全量重建把数据重新发布进新表。
 - `semantic_conflict.mdeberta_ckpt` 指向本地 mDeBERTa 判定权重（V4m）即启用语义冲突运行时，并在启动时加载、常驻不卸载（`preload`/`resident` 冻结为 true）。`semantic_conflict.enabled=false` 是显式关闭的逃生口；不设 + 有 `mdeberta_ckpt` 即视为启用。0.17.1 起 Qwen/GGUF 判定后端已删除，旧 `model_path` 配置会给迁移警告。
-- 真实（有 config 文件的）安装缺能力时——embedding 模型缺失，或语义冲突未显式关闭但 mdeberta 判定模型缺失——每次工具响应都会带一条持久的降级横幅（指向 `mema setup --install`），每个 Agent 的第一次调用还会在 onboarding notice 里附带能力健康卡。`enabled=false` 且已配置模型视为 deliberate 极简安装，不 nag。`mema setup --install` 是 setup 的执行模式：自动 pip 装 extras、下载两个 GGUF 模型（断点续传，HuggingFace 失败自动切 ModelScope），并回写完成的 config；裸 `mema setup` 保持只指导不执行。
+- 真实（有 config 文件的）安装缺能力时——embedding 模型缺失，或语义冲突未显式关闭但 mdeberta 判定模型缺失——每次工具响应都会带一条持久的降级横幅（指向 `mema setup --install`），每个 Agent 的第一次调用还会在 onboarding notice 里附带能力健康卡。`enabled=false` 且已配置模型视为 deliberate 极简安装，不 nag。`mema setup --install` 是 setup 的执行模式：自动 pip 装 extras、下载 embedding GGUF 模型（断点续传，HuggingFace 失败自动切 ModelScope）；mDeBERTa 判定权重另行手动安装，并回写完成的 config；裸 `mema setup` 保持只指导不执行。
 - 排序固定为 hybrid（字面 + 证据倒数排名融合），没有排序模式可选。
 - HTTP 接口路径固定 `/mcp`，请求体上限固定 4 MB。
 
@@ -87,7 +87,7 @@ stdio 是默认传输。要让多个本地客户端共享一个社区版进程�
 
 ### 三分类判定（0.17.1）
 
-证据 KNN 只提供有界的短 pair 召回和排序。0.17.1 起判定由本地 mDeBERTa（V4m）三分类完成：conflict≥0.80 出 normal notice、possible 出 info 灰区通知、no_conflict 静默 clear；写入漏斗门（初筛/G5/余弦带/规则证据）全部保留。
+证据 KNN 只提供有界的短 pair 召回和排序。0.17.1 起判定由本地 mDeBERTa（v52_ep3）三分类完成：conflict 且 P ≥ `mdeberta_notice_min_prob`（现 0.5）出 normal notice、possible 出 info 灰区通知、no_conflict 静默 clear；写入漏斗门（初筛/G5/余弦带/规则证据）全部保留。
 
 模型绝不选出赢家、压制定时扫描或修改记忆。其概率与确定性漏斗共同生效——确定性直出路径（同键归一值不同，不经判定直接出 notice）仍要求：
 
@@ -111,7 +111,7 @@ stdio 是默认传输。要让多个本地客户端共享一个社区版进程�
 
 ### 写入时 notice
 
-一条用户可见 notice 要求：判定模型给出 `conflict` 且 P ≥ `semantic_conflict.mdeberta_notice_min_prob`（默认 `0.80`）——或确定性直出判定（同键归一值不同、有 grounding）——且无共存 veto、槽位来源完整；`possible_conflict` 落 info 灰区通知。internal（同记忆）发现写时不判死：一律以 pending 落库并附模型意见，终裁归扫描侧强模型。Notice 快照冻结成员版本、值分组、槽位来源、detector/模型版本、任务 id 和去重键。
+一条用户可见 notice 要求：判定模型给出 `conflict` 且 P ≥ `semantic_conflict.mdeberta_notice_min_prob`（默认 `0.5`）——或确定性直出判定（同键归一值不同、有 grounding）——且无共存 veto、槽位来源完整；`possible_conflict` 落 info 灰区通知。internal（同记忆）发现写时不判死：一律以 pending 落库并附模型意见，终裁归扫描侧强模型。Notice 快照冻结成员版本、值分组、槽位来源、detector/模型版本、任务 id 和去重键。
 
 写入成功后，服务器最多等待 `semantic_conflict.notice_sync_wait_ms`（0.15.8 起为活配置键，默认 `3000`，范围 `0–5000`）以完成有界的 notice 任务。等待超时后写入照常成功返回，同一个已接受任务继续异步执行——不会被取消或重算。队列满/入队被拒是另一回事：那时根本没有可等待任务。`checked_no_notice` 只表示该有界写入时任务内的每个候选都走完了漏斗，**不是**全库无冲突的声明。定时扫描仍是持久的召回兜底。
 
@@ -144,15 +144,15 @@ job 预算（10000 ms，冻结）是队列公平预算，不是推理超时。�
 
 Canonical 归一在每种隔离模式下都会运行，与 ACL 相互独立：
 
-- `none`：精确/确认/向量/规则/Qwen 归一行为与 weak 相同，但不应用 workspace ACL。省略 workspace 过滤时返回所有 workspace。
+- `none`：精确/确认/机械变体/向量归一加确定性 `AUTO|KEEP|ASK` 规则，与 weak 相同，但不应用 workspace ACL。省略 workspace 过滤时返回所有 workspace。
 - `weak`：同样的归一，外加软性排序/提示；没有硬可见性过滤。
-- `strict`：精确/确认和安全的机械规则可以复用 canonical；Qwen 不能静默合并。新 workspace 保持 pending，直到授权的 `confirm_pending_workspace`。可见性使用 guarded 向量准入（0.15.0 起恒开，冻结常量）：workspace 敏感的 recall/read/repair 操作、冲突/notice 工作流和 console 内容/计数视图共享调用方 canonical 加上所有在守卫余弦距离（0.25，冻结）之内、且通过 default 池、短名称和泛化子串 guard 的 canonical。进程级维护（如语义运行时控制、备份回放、doctor、settings）不按此限定。向量缺失或 sqlite-vec 降级时回退到精确 canonical 作用域；绝缘的 `default` 池永远不会被准入 strict 项目作用域。
+- `strict`：精确/确认和安全的机械规则可以复用 canonical；近似匹配绝不静默并桶。新 workspace 保持 pending，直到授权的 `confirm_pending_workspace`。可见性使用 guarded 向量准入（0.15.0 起恒开，冻结常量）：workspace 敏感的 recall/read/repair 操作、冲突/notice 工作流和 console 内容/计数视图共享调用方 canonical 加上所有在守卫余弦距离（0.25，冻结）之内、且通过 default 池、短名称和泛化子串 guard 的 canonical。进程级维护（如语义运行时控制、备份回放、doctor、settings）不按此限定。向量缺失或 sqlite-vec 降级时回退到精确 canonical 作用域；绝缘的 `default` 池永远不会被准入 strict 项目作用域。
 
 在 `none` 和 `weak` 中，首次写入并注册 canonical workspace 时，响应返回非阻断的顶层 notice：`type=workspace_review`、`action_required=review_workspace_registry`，并附带 doctor 复查调用和需要用户另行授权的 `confirm_workspaces` 调用。重复写入已有 canonical 不重复提醒。`strict` 使用原有 pending workspace 阻断流程。
 
-解析顺序是：内部已确认/负向 workspace 决策 → 精确 canonical → 有界向量候选 → 确定性 `AUTO|KEEP|ASK` → 仅对未决近似项调 Qwen。Qwen 必须从提供的候选中选择，可以提示 `alias`/`typo`/`same_project` 关系，但自动归一只写记忆的 `workspace_canonical`，不创建持久 redirect。负决策抑制重复提议。产品治理使用 rename、migrate、pending 确认和全注册表复查；内部决策行不是产品工作流。
+解析顺序：内部已确认/负向 workspace 决策 → 精确 canonical → 机械变体 → 有界向量候选 → 确定性 `AUTO|KEEP|ASK`——链路里已无模型参与。自动归一只写记忆的 `workspace_canonical`，不创建持久 redirect。负决策抑制重复提议。产品治理使用 rename、migrate、pending 确认和全注册表复查；内部决策行不是产品工作流。
 
-Workspace 和冲突推理共享一个串行本地 worker。近似匹配 Qwen 预算（750 ms，冻结）是独立的短预算：超时/忙碌时保留原始 canonical 并返回复查提示，而不是阻塞写入时 notice 门。
+workspace 归一与冲突推理共享一个串行本地 worker。
 
 ## 响应信封
 
@@ -177,7 +177,7 @@ JSONL 回放无需授权即可预览。应用回放需要显式用户授权，�
 | 更老的 claim + memory/section-vector 代次 | 原样拒绝启动 | 同样的 side-by-side `mema upgrade` | 核心/公开数据保留；证据单元生成/保留，向量重建 |
 | 未知、不完整、失败/恢复中的目标库 | 拒绝 | 用 `mema doctor --json` 诊断；只能用低层迁移工作流修复/续跑 | 验证成功前永远不作为 current 打开 |
 
-没有公开的原地升级：两条路径都构建并验证一个 side-by-side 目标。完整重建需要 sqlite-vec、可读的已配置 GGUF embedding 模型、`llama-cpp-python`（`semantic-local` extra 同时提供 embedding 运行时）、可写目标目录和足够磁盘。只有源向量状态为 `ready` 且 active space ID 与当前模型/管线完全一致时，conflict-only 路径才复用现有证据/向量且不加载模型。独立的可选语义冲突 Qwen 模型不是迁移前置条件。
+没有公开的原地升级：两条路径都构建并验证一个 side-by-side 目标。完整重建需要 sqlite-vec、可读的已配置 GGUF embedding 模型、`llama-cpp-python`（`semantic-local` extra 同时提供 embedding 运行时）、可写目标目录和足够磁盘。只有源向量状态为 `ready` 且 active space ID 与当前模型/管线完全一致时，conflict-only 路径才复用现有证据/向量且不加载模型。可选的 mDeBERTa 判定权重不是迁移前置条件。
 
 ### WAL 安全流程
 
@@ -192,7 +192,7 @@ JSONL 回放无需授权即可预览。应用回放需要显式用户授权，�
 
    checkpoint 报告非零 `busy` 时中止；当 `-wal` 中还有已提交帧时只拷贝主文件是不完整的。关闭前用 SQLite 的在线 `.backup` 命令也是安全的。
 4. 运行 `mema upgrade`；重启并用 `mema doctor --json` 验证。
-5. 完成 status/doctor 显示的带 epoch 固定的完整 `scan_candidates` 全库扫描。
+5. 完成 status/doctor 显示的带 epoch 固定的完整 `scan_candidates` 全库扫描。升级后首次启动，守护线程自动回填语句行向量，进度见 `mema doctor` 的 `rows.coverage`——未配置 embedding 模型时回填保持挂起，配置后自动继续。
 
 side-by-side 拷贝保留记忆内容/历史、备份回放回执、workspace canonical 和当前 redirect/负决策状态及审计。已废弃的 workspace 决策事件账本被刻意省略。每个结构迁移显式声明 `vector_effect=preserve|rebuild`：preserve 原样复制 FTS/证据/向量 payload，只替换冲突域，再独立判断空间兼容性；不兼容时写入 `mismatch` 并禁用向量读取，等待后续重建，不阻断结构迁移。它刻意以空的冲突/notice 状态开始：旧 `conflicts`、`conflict_judgments` 和 `semantic_notices` 历史不迁移。目标发布要求指纹稳定、破坏性表为空、generation 与完成时间在同一事务提交，并在移除 WAL/SHM、切换配置前完成 `wal_checkpoint(TRUNCATE)`；rebuild 路径额外要求合格证据全覆盖且目标向量状态在预期空间为 `ready`。
 

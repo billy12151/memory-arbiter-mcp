@@ -5,7 +5,7 @@
 
 Memory Arbiter is a trustworthy local fact layer for AI agents — not just shared memory, but shared facts that are current, trusted, traceable, and safe to use. It is a local SQLite service exposed over MCP: four product tools, evidence-based recall, advisory conflict notices, and user-authorized governance. Every fact is stored once in local SQLite and every model it can call runs locally.
 
-> Current release: `0.17.1` (0.16.6-line repair release: write-time content dedup gate, internal eval harness, first-run demo protocol, similarity-hint redesign, conflict-detection repair wave).
+> Current release: `0.17.1` (mDeBERTa three-class judge with the claims channel retired; workspace required on remember + workspace-govern actions, `workspaces` view; automatic row-vector backfill after upgrade; full-project review fix wave).
 
 ## Why trust it
 
@@ -37,7 +37,7 @@ The agent should treat this README as the source of truth, inspect the local env
 ### Install manually
 
 ```bash
-# One command: package + deps + both models + config.json (resumable downloads, ModelScope fallback)
+# One command: package + deps + embedding model + config.json (resumable downloads, ModelScope fallback)
 curl -fsSL https://memarbiter.cn/install.sh | bash
 ```
 
@@ -45,7 +45,7 @@ Or step by step:
 
 ```bash
 pip install "memory-arbiter-mcp[vec,semantic-local]"  # core + sqlite-vec + local GGUF runtime
-mema setup --install   # downloads both models (~800MB, resumable) and writes config.json
+mema setup --install   # downloads the embedding GGUF (~330MB, resumable); the mDeBERTa judge is a separate manual install
 mema doctor            # verify
 ```
 
@@ -65,7 +65,7 @@ The daily loop is four calls — `remember` a reusable fact, `find` to recall, `
 
 ## The four tools
 
-- `memory`: `remember`, `find`, `batch_find`, `read`, `update`, `judge`, `status`, `help`
+- `memory`: `remember`, `find`, `batch_find`, `read`, `batch_read`, `update`, `judge`, `status`, `help`
 - `memory_review`: read-only health, conflict groups/details, history, expired memory, audit, and entities
 - `memory_govern`: explicitly authorized retirement, conflict-plan application/resolution, confirmation, and workspace governance
 - `memory_repair`: evidence rebuild, broad conflict scanning/recording, history cleanup, entity assignment, pending activation, backup replay, semantic runtime control, and notice lifecycle
@@ -74,20 +74,20 @@ Every product call returns the envelope `{ok, mode, warnings, degraded, data}`. 
 
 `batch_find` runs up to 8 queries in one call and merges the pages (dedup by `memory_id`; each item carries `matched_query_ids`/`best_query_id`; `per_query` reports per-query stats) — for multi-topic tasks this replaces 5-10 tool round-trips with one. Since 0.15.9 find is also honest about emptiness: a query that recalls nothing returns an empty page with a reword hint (no recent-memory stuffing), and candidates below the calibrated relevance floor (8.1) never enter a query-recall page at all — fewer "looks related, isn't" citations.
 
-`find` is an index page: by default (`content_mode="preview"`, 0.15.10) each result carries metadata plus `content_chars` (the full-text length — what a `read` would cost) and a bounded `outline` of up to 8 `{head, offset}` segments whose offsets share `read`'s span coordinate system, so `span=[offset, offset+N]` slices that exact segment. **Keyword query style (0.17.0):** a query of space-separated short CJK words (each ≤4 chars, e.g. `向量 唯一键 冲突`) is understood as keywords — memories semantically close to the query whose content/subject contains one of the keywords (whole-word substring) rank higher; topic-generic words that flood the candidate pool are ignored, and no forced matching happens when a keyword appears nowhere (reword instead). Content depth is a single-choice enum: `content_mode="hits"` adds `hit_spans` — the vector-matched units as `{text, start_offset, end_offset}` sliced from the source (read `span=[start,end]` returns exactly that text). Hit spans are never truncated: when merged hits cover ≥50% of the content the item upgrades to full text with `hit_spans` kept as an annotation; items without vector hits keep the plain preview shape. `hit_window=N` (default 0) extends each hit with ±N neighbouring complete sentences (neighbours marked `matched=false`); `hit_spans` appears only on query-recall pages — browse/filter pages carry none — and stale-version hits are dropped with a `stale_hit_spans` marker plus a re-query warning (the evidence index may lag right after an edit). `content_mode="full"` returns whole texts (the old `include_content=true`, removed in 0.15.10 — the call fails loudly with a migration pointer). Scores compare only within the page, and if the top page misses you should reword the query or add `tags_filter` rather than deep-page — unfiltered query-recall reports `total_estimate=null`/`has_more=false`, while filtered recall keeps the exact count. The `size` block meters the page as actually returned: `returned_chars`/`returned_count` and a `tokens_estimate` from a deterministic bucket-table estimator (`heuristic_v1`) calibrated against a Qwen2.5 tokenizer on real records; it runs ~30% high on pure Chinese prose and ~17% high on pure English — the estimate and the estimated share one yardstick, so savings comparisons stay valid. Since 0.15.6 the same size block rides every recall surface — `read` (meters the record as returned, span windows included), `memory_review` `expired` and `history` (meter their result lists) — under one global config key `include_size` (default `true`); each block's `display_hint` repeats the token number with a report-this-recall-cost instruction, `include_size=false` turns all of them off together, and `find`'s old per-call `include_size` parameter is ignored with a warning. `unresolved_conflict_count` appears only when page items directly hit an open/applying conflict group, and counts those page items.
+`find` is an index page: by default (`content_mode="preview"`, 0.15.10) each result carries metadata plus `content_chars` (the full-text length — what a `read` would cost) and a bounded `outline` of up to 8 `{head, offset}` segments whose offsets share `read`'s span coordinate system, so `span=[offset, offset+N]` slices that exact segment. **Keyword query style (0.17.0):** a query of space-separated short CJK words (each ≤4 chars, e.g. `向量 唯一键 冲突`) is understood as keywords — memories semantically close to the query whose content/subject contains one of the keywords (whole-word substring) rank higher; topic-generic words that flood the candidate pool are ignored, and no forced matching happens when a keyword appears nowhere (reword instead). Content depth is a single-choice enum: `content_mode="hits"` adds `hit_spans` — the vector-matched units as `{text, start_offset, end_offset}` sliced from the source (read `span=[start,end]` returns exactly that text). Hit spans are never truncated: when merged hits cover ≥50% of the content the item upgrades to full text with `hit_spans` kept as an annotation; items without vector hits keep the plain preview shape. `hit_window=N` (default 0) extends each hit with ±N neighbouring complete sentences (neighbours marked `matched=false`); `hit_spans` appears only on query-recall pages — browse/filter pages carry none — and stale-version hits are dropped with a `stale_hit_spans` marker plus a re-query warning (the evidence index may lag right after an edit). `content_mode="full"` returns whole texts (the old `include_content=true`, removed in 0.15.10 — the call fails loudly with a migration pointer). Scores compare only within the page, and if the top page misses you should reword the query or add `tags_filter` rather than deep-page — unfiltered query-recall reports `total_estimate=null`/`has_more=false`, while filtered recall keeps the exact count. The `size` block meters the page as actually returned: `returned_chars`/`returned_count` and a `tokens_estimate` from a deterministic bucket-table estimator (`heuristic_v1`) calibrated against a Qwen2.5 tokenizer at design time (calibration reference only — no Qwen runtime ships since 0.17.1); it runs ~30% high on pure Chinese prose and ~17% high on pure English — the estimate and the estimated share one yardstick, so savings comparisons stay valid. Since 0.15.6 the same size block rides every recall surface — `read` (meters the record as returned, span windows included), `memory_review` `expired` and `history` (meter their result lists) — under one global config key `include_size` (default `true`); each block's `display_hint` repeats the token number with a report-this-recall-cost instruction, `include_size=false` turns all of them off together, and `find`'s old per-call `include_size` parameter is ignored with a warning. `unresolved_conflict_count` appears only when page items directly hit an open/applying conflict group, and counts those page items.
 
 ## How recall works
 
 Lexical and evidence channels recall independently and merge per memory with reciprocal-rank fusion, then trust, recency, filter, and workspace adjustments.
 
 - **Lexical**: FTS5 over content plus subject/tags LIKE; the bounded content-LIKE anchor channel runs only when vectors are unavailable (degradation path since 0.16.10).
-- **Evidence**: the write-path job derives row segments from the `subject` (leading subject row), sentences, and table rows (0.17.0: the former unit tables retired; row vectors are the one evidence channel). The indexer never extracts facts, infers entities, or calls a model — it only slices the stored source. Evidence hits carry source offsets. `memory(action="read", data={"memory_id": 42, "span":{"start":120,"end":640}})` returns only that clipped source window plus `data.span.{start,end,total_chars}`; omit `span` to read the complete source. Span bounds are strict integers with `0 <= start < end`, and `end` clips at content length.
+- **Evidence**: the write-path job derives row segments from the `subject` (leading subject row), sentences, and table rows (0.17.0: the former unit tables retired; row vectors are the one evidence channel). The indexer never extracts facts, infers entities, or calls a model — it only slices the stored source. Evidence hits carry source offsets. `memory(action="read", data={"memory_id": 42, "span":{"start":120,"end":640}})` returns only that clipped source window plus `data.span.{start,end,total_chars}`; omit `span` to read the complete source. Span bounds are strict integers with `0 <= start < end`, and `end` clips at content length. Table segments longer than 100 rows are exempt as a whole (no row vectors, no pair detection — visible as `table_rows_exempted` in receipts).
 
 ## Conflict groups and notices
 
 Evidence KNN recalls sentence-level neighbours; it does not decide conflict truth. Since 0.17.1, each candidate pair that survives the deterministic funnel (sentence prefilter, memory-level screen, cosine band, rule evidence) is judged by an optional local **mDeBERTa** encoder (three classes: `conflict` / `no_conflict` / `possible_conflict`, plus a mechanism head). The judge sees the two bare row texts — no metadata, no prompt engineering — and returns calibrated probabilities:
 
-- `conflict` at P ≥ `semantic_conflict.mdeberta_notice_min_prob` (default 0.80) → a normal-severity notice;
+- `conflict` at P ≥ `semantic_conflict.mdeberta_notice_min_prob` (default 0.5) → a normal-severity notice;
 - `possible_conflict` → an `info`-severity notice (grey-zone reference, no `action_required`);
 - `no_conflict` → silent clear (counted in the receipt).
 
@@ -144,6 +144,8 @@ mema upgrade
 
 # Restart the MCP client and verify.
 mema doctor --json
+
+After the upgrade, the first server start launches a daemon thread that backfills sentence row vectors automatically; watch progress in `mema doctor` (`rows.coverage`) or `memory(action="status")`. With no embedding model configured the backfill stays pending and resumes once the model is available — nothing to run by hand.
 ```
 
 The full evidence-rebuild path requires sqlite-vec, a configured/readable local GGUF embedding model, `llama-cpp-python` (install the `semantic-local` extra because it also runs GGUF embeddings), a writable target directory, and enough free disk. A preserve migration does not load either model and does not require vector completeness; it reports vector compatibility independently and marks incompatible preserved data `mismatch`. The optional conflict-judge checkpoint itself is never a migration prerequisite. The command reports its selected mode, vector effect/compatibility, memory count, estimated vector work, free disk space, source, and target before asking for confirmation.
@@ -175,7 +177,7 @@ The complete user surface is 21 keys (0.15.14: added `semantic_conflict.n_gpu_la
   },
   "semantic_conflict": {
     "enabled": true,
-    "mdeberta_ckpt": "~/.local/share/memory-arbiter/models/mdeberta-v4m_dual_v1.pt",
+    "mdeberta_ckpt": "~/.local/share/memory-arbiter/models/mdeberta-v52_ep3_fp16.pt",
     "on_write": "async",
     "notice_sync_wait_ms": 3000
   },
@@ -196,12 +198,12 @@ The complete user surface is 21 keys (0.15.14: added `semantic_conflict.n_gpu_la
 | `include_size` | Global switch for the recall size block (v0.15.6): on = `find`/`read`/`expired`/`history` all attach `{returned_chars, returned_count, tokens_estimate}`; off = none of them do |
 | `embedding.model_path` | Local GGUF embedding model — pointing at it is the sole intent to enable sqlite-vec evidence recall |
 | `embedding.auto_query` / `auto_write` | Auto-embed at query/write time (default `true`) |
-| `semantic_conflict.mdeberta_ckpt` | Local mDeBERTa checkpoint (V4m, 1.1GB, ships separately) for write-time conflict judging. Configured → auto-enabled, loaded at startup, kept resident (CPU fp32). Install the `mdeberta` extra first; see the model-download note below |
+| `semantic_conflict.mdeberta_ckpt` | Local mDeBERTa checkpoint (v52_ep3_fp16, ~531MB, ships separately) for write-time conflict judging. Configured → auto-enabled, loaded at startup, kept resident (CPU fp32). Install the `mdeberta` extra first; see the model-download note below |
 | `semantic_conflict.enabled` | Explicit off-switch; unset + `mdeberta_ckpt` means enabled, explicit `false` wins |
 | `semantic_conflict.on_write` | Write-time detection: `async` (default) or `off` |
 | `semantic_conflict.notice_sync_wait_ms` | How long the write response waits for the post-commit check so its result rides along (v0.15.8, default `3000`, clamp `0–5000`); `0` = never block the write response — batch ingestion still gets the check run asynchronously and notices deliver on a later response |
 | `semantic_conflict.mdeberta_model_dir` | config.json + tokenizer directory; default = `<ckpt dir>/mdeberta-base` |
-| `semantic_conflict.mdeberta_notice_min_prob` | P(conflict) floor for a normal-severity notice (default `0.80`); below it the pair is counted, not notified |
+| `semantic_conflict.mdeberta_notice_min_prob` | P(conflict) floor for a normal-severity notice (default `0.5`); below it the pair is counted, not notified |
 | `semantic_conflict.mdeberta_batch` | Judge batch size (default `0` = auto, device-tiered: 16 with a GPU — Apple Silicon / NVIDIA — 8 on CPU; an explicit value `>0` overrides the tier. No startup probe) |
 | `mcp.transport` | `stdio` (default) or opt-in `streamable-http` localhost server |
 | `mcp.http.host` / `port` | Local HTTP endpoint; host is restricted to loopback, defaults to `127.0.0.1:8000`; the endpoint path is fixed at `/mcp` |
@@ -268,7 +270,7 @@ Use the absolute `npx` path from `which npx` on your machine. Remove any older `
 The write-time conflict judge needs a one-time manual install (the 1.1GB checkpoint does not ship on PyPI):
 
 1. `pip install memory-arbiter-mcp[mdeberta]` (torch CPU wheel ~200MB + transformers);
-2. download `mdeberta-v4m_dual_v1.pt` (1.1GB, full weights) plus the `mdeberta-base` directory (config.json + tokenizer, MB-sized) from the mini-clash release artifacts;
+2. download `mdeberta-v52_ep3_fp16.pt` (~531MB, fp16 weights) plus the `mdeberta-base` directory (config.json + tokenizer, MB-sized) from the mini-clash release artifacts;
 3. point `semantic_conflict.mdeberta_ckpt` at the `.pt` file in config.json (auto-enables + preloads at startup; `mdeberta_model_dir` defaults to a `mdeberta-base` folder next to the checkpoint).
 
 `mema doctor` verifies the dependency, the checkpoint digest, and the judge's label contract. Unconfigured = write-time arbitration disabled (scan/Agent fallback unaffected). ONNX+INT8 (smaller, no torch) is planned for a later release.

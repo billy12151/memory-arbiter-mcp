@@ -8,18 +8,14 @@ Memory Arbiter（迷码，命令 `mema`）让多个 AI 客户端共享同一个�
 
 ## 冲突识别：scan 宽门，notice 严门
 
-Evidence KNN 只负责召回和排序。可选的本地 Qwen2.5-0.5B 对短 pair 分别执行 A→B 与 B→A 抽槽，每次只能输出四个字段：
+Evidence KNN 只负责召回和排序。可选的本地 mDeBERTa 双头 checkpoint 对漏斗存活的对做整对文本判决：三分类（conflict / no_conflict / possible_conflict）+ 机制分类头（观测备注）。它不做属性/值抽槽（claims 通道已随判定引擎换代整体退役），不看元数据、不做 prompt 工程，只读两段裸行文本；顺序表以 ckpt 自带的 `_meta_labels`/`_meta_mechs` 声明为准，训练序漂移在加载时响亮失败。
 
-```json
-{"attribute_a":"数据库选型","value_a":"MySQL","attribute_b":"数据库选型","value_b":"SQLite"}
-```
+判定引擎不选赢家、不压制扫描、不编辑记忆。确定性漏斗（句预筛、记忆级筛选、余弦带、规则证据）全部保留；确定性直出路径（同键归一值不同）不经判定直接出 notice。
 
-Qwen 不输出 conflict/coexistence/winner，也不编辑记忆。代码负责校验双向映射、机械属性/值归一、原文 quote grounding、duplicate/compatible guard、作用域与演进等共存条件，以及 `workspace_canonical + entity + attribute + scope` 槽位身份。
+- Scheduled scan 是宽门：规则/KNN 基础候选始终保留，扫描路径不跑任何模型，判断归 agent。判定引擎缺席或失败不会缩小基础候选集（fail-open），未判成的对落 backlog 后续写入重试。
+- Write-time notice 是严门：判定给出 conflict 且 P ≥ `semantic_conflict.mdeberta_notice_min_prob`（现 0.5）——或确定性直出——才形成用户 notice；possible_conflict 落 info 灰区提示，其余静默转 scan，不向用户倾倒不确定候选。
 
-- Scheduled scan 是宽门：规则/KNN 基础候选始终保留，任一方向合法可增强召回；单向失败、grounding 弱、entity/scope 不足都保留为 `review_candidate`。Qwen 缺失、超时或非法不会缩小基础候选集。
-- Write-time notice 是严门：两方向都必须是合法四字段且交换后映射一致，值严格 grounding、槽位完整、无共存 veto，才可形成用户 notice；否则转入 scan，不向用户倾倒不确定候选。
-
-`notice_sync_wait_ms` 默认 3000 ms（范围 0–5000，0.15.8 起为活配置键），只决定同步返回或已接受的同一任务继续异步，不参与识别；`0` 表示完全异步，queue full 则根本没有已接受任务。`job_timeout_ms` 默认 5000 ms，只在 semantic 队列已有积压时作为 pair 间让路预算；空队列时不生效，已启动的 Qwen 推理只受 `inference_timeout_ms` 控制。`checked_no_notice` 仅表示本次有界检查完成，不代表全库无冲突。evidence/semantic 队列都是进程内队列，崩溃、强制关停、queue full 或模型子进程重启后要按 coverage 恢复：先反复 `rebuild_evidence` 到 eligible coverage 完整/向量 ready，再分页执行 `scan_candidates`。
+`notice_sync_wait_ms` 默认 3000 ms（范围 0–5000，0.15.8 起为活配置键），只决定同步返回或已接受的同一任务继续异步，不参与识别；`0` 表示完全异步，queue full 则根本没有已接受任务。`job_timeout_ms` 冻结为 10000 ms（0.17.1 合一总池重标），只在 semantic 队列已有积压时作为 pair 间让路预算；空队列时不生效，已开始的判定批次只受 `inference_timeout_ms`（30000 ms，冻结）控制。`checked_no_notice` 仅表示本次有界检查完成，不代表全库无冲突。evidence/semantic 队列都是进程内队列，崩溃、强制关停、queue full 或模型子进程重启后要按 coverage 恢复：先反复 `rebuild_evidence` 到 eligible coverage 完整/向量 ready，再分页执行 `scan_candidates`。
 
 ## 单一冲突表与治理协议
 
@@ -42,11 +38,11 @@ Qwen 不输出 conflict/coexistence/winner，也不编辑记忆。代码负责�
 
 `none`、`weak`、`strict` 三种模式都执行 canonical normalization；归一与 ACL 正交：
 
-- `none`：按与 weak 相同的 exact/confirmed/vector/rule/Qwen 流程归一，但不启用 workspace ACL；未指定 workspace 的查询仍跨全库。
+- `none`：归一与 weak 相同——exact/confirmed、机械变体、向量候选加确定性 `AUTO|KEEP|ASK` 规则；不启用 workspace ACL；未指定 workspace 的查询仍跨全库。
 - `weak`：同样归一，并把 workspace 用作软排序和提示信号。
-- `strict`：exact/confirmed 和安全机械规则可复用 canonical；Qwen 不得静默合并，新 workspace 保持 pending，需用户确认。可见性固定开启向量准入（0.14.x 的 `workspace_recall_admission`/`workspace_recall_cutoff` 旋钮已冻结为 true/0.25 常量）：workspace-sensitive 的 recall/read/repair、冲突/notice 流程和 console 内容/计数视图共用同一准入集合：caller canonical 加上 cosine 距离不超过 0.25 且通过 default 绝缘、短名和通用子串护栏的 canonical。semantic runtime control、backup replay、doctor、settings 等进程级操作不属于 workspace 内容视图。sqlite-vec/向量不可用时回退精确 canonical。`default` 全局池不进入 strict 项目 scope。
+- `strict`：exact/confirmed 和安全机械规则可复用 canonical；近似匹配绝不静默并桶，新 workspace 保持 pending，需用户确认。可见性固定开启向量准入（0.14.x 的 `workspace_recall_admission`/`workspace_recall_cutoff` 旋钮已冻结为 true/0.25 常量）：workspace-sensitive 的 recall/read/repair、冲突/notice 流程和 console 内容/计数视图共用同一准入集合：caller canonical 加上 cosine 距离不超过 0.25 且通过 default 绝缘、短名和通用子串护栏的 canonical。semantic runtime control、backup replay、doctor、settings 等进程级操作不属于 workspace 内容视图。sqlite-vec/向量不可用时回退精确 canonical。`default` 全局池不进入 strict 项目 scope。
 
-自动 vector/Qwen 结果只写本条 memory 的 `workspace_canonical`，不会创建持久转发。内部 negative decision 会阻止同一候选被模型重复推荐；日常治理使用 rename/migrate/move-by-id（`move_memories_workspace`）/confirm-pending 和全注册表确认（`confirm_workspaces`），不需要理解内部状态表。workspace Qwen 预算固定 750 ms（常量）；超时保留 raw canonical 并返回 review hint，不阻塞 notice 门禁。
+自动归一只写本条 memory 的 `workspace_canonical`，不会创建持久转发。内部 negative decision 会阻止同一候选重复出现；日常治理使用 rename/migrate/move-by-id（`move_memories_workspace`）/confirm-pending 和全注册表确认（`confirm_workspaces`），不需要理解内部状态表。
 
 ## Workspace 必传（0.17.1，breaking）
 

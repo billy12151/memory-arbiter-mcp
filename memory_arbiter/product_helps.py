@@ -131,7 +131,7 @@ _PRODUCT_HELPS: dict[str, Any] = {
             "together; find's old per-call include_size parameter "
             "is ignored (warning only). "
             "tokens_estimate uses a deterministic bucket estimator "
-            "(heuristic_v1, Qwen2.5-calibrated): pure Chinese prose runs ~30% high and pure English "
+            "(heuristic_v1, calibrated against a Qwen2.5 tokenizer at design time — no Qwen runtime ships since 0.17.1): pure Chinese prose runs ~30% high and pure English "
             "~17% high, and emoji/ZWJ sequences run systematically low (byte-level BPE means a "
             "single emoji is >=1 token) — the estimate and the estimated share one yardstick, so "
             "savings comparisons stay valid. "
@@ -163,7 +163,7 @@ _PRODUCT_HELPS: dict[str, Any] = {
         "value_reference": _memory_value_reference(),
     },
     "memory_review": {
-        "description": "Read-only inspection. Never changes memory state.",
+        "description": "Read-only inspection. Never changes memory state. Start sessions with view='workspaces' to list bucket names (the required workspace input for remember and workspace-govern actions).",
         "views": ["overview", "doctor", "conflicts", "conflict_detail", "history", "expired", "audit", "entities", "workspaces", "help"],
         "examples": {
             "conflicts": {"view": "conflicts", "data": {"status": "open", "limit": 20}},
@@ -212,7 +212,7 @@ _PRODUCT_HELPS: dict[str, Any] = {
         },
     },
     "memory_repair": {
-        "description": "Maintenance and repair operations. Prefer dry_run first; cleanup, activation, and protected-memory metadata changes still require authorized=true when the underlying operation requires it.",
+        "description": "Maintenance and repair operations. Prefer dry_run first; cleanup, activation, and protected-memory metadata changes still require authorized=true when the underlying operation requires it. Table segments >100 rows are exempt from row vectors and pair detection (visible as table_rows_exempted in kick receipts); after an upgrade the first server start auto-backfills row vectors (watch doctor rows.coverage).",
         "tasks": ["rebuild_evidence", "scan_pipeline", "scan_queue", "scan_candidates", "scan_duplicates", "scan_workspace_anomalies", "cleanup_history", "set_entity", "activate_pending", "replay_backup", "normalize_workspaces", "semantic_control", "notice", "record_conflict", "help"],
         "examples": {
             "rebuild_evidence": {"task": "rebuild_evidence", "data": {"dry_run": True, "memory_ids": [123]}},

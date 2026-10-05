@@ -99,7 +99,7 @@ else
   "embedding": {"model_path": "$MODELS_DIR/$(ls "$HERE/models/"*.gguf | xargs basename)"},
   "semantic_conflict": {
     "mdeberta_ckpt": "$MODELS_DIR/$CKPT_NAME",
-    "mdeberta_notice_min_prob": 0.83
+    "mdeberta_notice_min_prob": 0.5
   }
 }
 CFGJSON

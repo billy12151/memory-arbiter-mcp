@@ -3,7 +3,7 @@
 **[English](README.md) | 中文**
 
 > 这份文档写给所有人，不需要你是专业研发。精确的字段级契约见[集成指南](docs/INTEGRATION.zh-CN.md)。
-> 当前正式版本 `0.17.1`（0.16.6 线修复版：写时防重门 + 内部评测 harness + 首次演示规程 + 相似提示重设计 + 冲突检测修复线）。
+> 当前正式版本 `0.17.1`（判定引擎换 mDeBERTa 三分类、claims 通道退役 + workspace 必传 + workspaces 选桶视图 + 升级后语句向量自动回填 + 全量修复批）。
 
 ## 一句话说明白
 
@@ -66,17 +66,17 @@ Agent 应以这份 README 为事实来源，先检查本机环境，再判断使
 前提：电脑上装了 Python 3.11+。
 
 ```bash
-# 一条命令全搞定：装包 + 装依赖 + 下两个模型（约 800MB，断点续传/国内镜像）+ 写配置
+# 一条命令全搞定：装包 + 装依赖 + 下 embedding 模型（约 330MB，断点续传/国内镜像）+ 写配置
 curl -fsSL https://memarbiter.cn/install.sh | bash
 ```
 
 或者分步来：
 
 ```bash
-# 1. 安装（含向量召回和本地小模型运行时）
+# 1. 安装（含向量召回和 embedding 运行时）
 pip install "memory-arbiter-mcp[vec,semantic-local]"
 
-# 2. 完整安装：自动下载两个模型并写好配置
+# 2. 完整安装：自动下载 embedding 模型并写好配置（判定模型 mDeBERTa 需另行手动安装）
 mema setup --install
 
 # 3. 验证
@@ -100,6 +100,8 @@ mema doctor
 | `read` | 按编号看某条的完整原文 |
 | `update` | 同一个事实有新说法时，更新原记录，**不是**再记一条新的 |
 
+**记住一条新规矩（0.17.1 起，重要）**：记东西（`remember`）必须写明放进哪个抽屉（workspace）。会话开始先查一次桶列表：`memory_review(view="workspaces")`，照抄已有桶名；`"default"` 是全局公共池；确实要开新抽屉才起新名字。查一次就行，不用每次写前重查。五个改桶治理动作同样必传。
+
 > 为什么要强调"更新而不是再记一条"？因为同一件事记两条，迟早打架。迷码会帮你发现打架（见下文），但最好别制造打架。
 
 **find 的关键词问法（0.17.0 起）**：查询写成「空格分开的中文短词」（每个词 ≤4 字，比如 `向量 唯一键 冲突`）时，迷码把它们当关键词理解——语义相近、且正文或标题里真的含有某个词的记忆会排到前面。两个边界：太通用的词（在候选池里命中一大片的，比如「做法」「预算」）不参与抬升；某个词全文找不到就不硬匹配——查不到说明该换词，而不是机制替你猜。
@@ -112,9 +114,9 @@ mema doctor
   写入"数据库用 PostgreSQL"
         │
         ▼
-  系统发现已有一条"数据库用 MySQL"  ← 本地小模型双向核对，要求很严格：
-        │                            两边都得说清"哪个属性、哪个值"，
-        ▼                            说不清就不烦你
+  系统发现已有一条"数据库用 MySQL"  ← 本地判定模型（mDeBERTa）整对核对，
+        │                            三选一判决：真冲突/不是/拿不准，
+        ▼                            只有"真冲突"且置信度过线才提醒你
   给你发一条"提醒"（notice）
         │
         ├── 你看了觉得是误报 → dismiss（这条提醒关掉，记为"不是冲突"）
@@ -136,7 +138,7 @@ mema doctor
 
 几个让人安心的点：
 
-- **宁可漏报，不乱报。** 写入时的提醒门槛很高：模型必须两个方向都给出一致的"属性/值"抽取，还得在原文里找得到出处。不满足就静默转入后台扫描，不拿不确定的东西打扰你。
+- **宁可漏报，不乱报。** 写入时的提醒门槛很高：先过确定性漏斗（余弦带、规则证据），再由判定模型给出"真冲突"判决且置信度 ≥ 阈值（`mdeberta_notice_min_prob`，现 0.5）。不满足就静默转入后台扫描，不拿不确定的东西打扰你。
 - **后台还有一道兜底扫描。** 定时扫描（`scan_candidates`）门槛宽、保召回，模型不在线也能跑出确定性候选。两道门配合：宽门保证不漏，严门保证不吵。
 - **想清一遍全库的重复记忆？** 用 `memory_repair(task="scan_duplicates")` 一次拿全：服务端把所有页的近重复对聚合成一份有界结果（最多 200 对，默认只给 id/主题/workspace/原因/距离这类轻量字段，`include_quotes=true` 再附上证据引文），不会把 agent 会话撑爆。分诊后该合并的走 `merge_memories`，误报的照旧用 `record_conflict` 压掉。
 - **装完记得设定时任务。** 迷码自己不带定时器（扫描的价值闭环在 agent 判流，得靠外部调度器到点唤醒 agent）。0.16.0 规格升到 v2：①每小时先反复踢一脚 `memory_repair(task="scan_pipeline", data={"action": "kick"})` 直到返回 `complete=true`（服务端自己走库：全量还是增量、断点在哪全由水位线自判；扫出的疑似项进独立的判断队列，不进通知、也不进用户面冲突列表），再按页清队列 `memory_repair(task="scan_queue", data={"action": "page"}` / `action="submit"`——服务端代行落库：驳回即抑制源，确证时 agent 只需给 slot 和各组显示值）；②每天跑一次 `doctor` 做治理提醒。`scan_candidates` 降级为手动/排查通道；老版「分页+分诊」任务会被 doctor 的 `conflicts.spec_drift` 点名重建。完整规格：`memory(action="help", data={"topic": "scheduled_tasks"})`。
@@ -217,9 +219,11 @@ mema doctor --json
 
 为什么要先跑那条 `sqlite3` 命令？因为数据库的"最新流水"可能还在 WAL 暂存文件里，只拷主文件会拷丢。这条命令先把流水并入主文件，再拷贝才是完整的。
 
+**升级后要做点什么吗？** 不用。第一次启动迷码会自己开个后台线程把语句向量补齐（记忆的"每句话向量"，冲突检测用）。进度看 `mema doctor` 的 `rows.coverage`；没装向量模型时它会先挂起，装好后自动继续，全程不用手动跑脚本。
+
 ## 配置（进阶）
 
-配置文件在 `~/.config/memory-arbiter/config.json`（`mema setup` 会帮你生成）。0.15.0 起**配置只认文件**：所有可调项就是下面这 19 个键（0.15.14：新增 `semantic_conflict.n_gpu_layers`，删除 `semantic_conflict.max_notice_pairs` 与 `policy_path`），引擎参数、超时、阈值、上限全部冻结为内置常量，不用再操心。
+配置文件在 `~/.config/memory-arbiter/config.json`（`mema setup` 会帮你生成）。0.15.0 起**配置只认文件**：所有可调项就是下面这 21 个键（0.17.1：退役 `claims.required`、`semantic_conflict.model_path` 和 `n_gpu_layers`，新增四个 `mdeberta_*` 键），引擎参数、超时、阈值、上限全部冻结为内置常量，不用再操心。
 
 | 配置项 | 白话说明 | 默认值 |
 | --- | --- | --- |
@@ -233,11 +237,13 @@ mema doctor --json
 | `update_check.enabled` | 唯一会联网的功能：偶尔查一下 PyPI 有没有新版本。关掉就完全不联网 | `true` |
 | `embedding.model_path` | 本地 embedding 模型（GGUF 文件）路径——**填了就是"我要用按意思搜"**，不用再开别的开关；向量维度自动跟着模型走，换不同维度的模型会在启动时自动按新维度重建向量表 | 无 |
 | `embedding.auto_query` / `embedding.auto_write` | 查询/写入时自动算向量 | `true` |
-| `semantic_conflict.mdeberta_ckpt` | 本地 mDeBERTa 判定模型权重（V4m，1.1GB，单独下载），用于写入时的冲突判定。填了就自动启用、启动时加载、常驻内存（CPU）。先装 `mdeberta` extra，再下载 ckpt，详见 README「冲突判定模型」一节 | 无 |
+| `semantic_conflict.mdeberta_ckpt` | 本地 mDeBERTa 判定模型权重（v52_ep3_fp16，约 531MB，单独下载），用于写入时的冲突判定。填了就自动启用、启动时加载、常驻内存（CPU）。先装 `mdeberta` extra，再下载 ckpt，详见 README「冲突判定模型」一节 | 无 |
 | `semantic_conflict.enabled` | 显式关掉语义冲突的逃生口；不填时指向模型即启用，显式 `false` 优先 | 自动 |
 | `semantic_conflict.on_write` | 写入时的冲突检测：`async`（异步提醒）或 `off`（关闭） | `async` |
 | `semantic_conflict.notice_sync_wait_ms` | 写入响应愿意等多久，好让写时检查结果直接挂在本次响应上（0.15.8 恢复的配置键，默认 `3000`，范围 `0–5000`）；填 `0` = 完全不阻塞写入响应——批量导入就用这个，检查照常后台跑，提醒照样在之后的响应里带出来 | `3000` |
 | `semantic_conflict.mdeberta_model_dir` | 判定模型的 config+tokenizer 目录；缺省=ckpt 同目录的 `mdeberta-base/` | 无 |
+| `semantic_conflict.mdeberta_notice_min_prob` | 判定置信度阈值：低于它的"真冲突"只计数不打扰（现 0.5，召回优先口径） | `0.5` |
+| `semantic_conflict.mdeberta_batch` | 判定批大小（0=自动按设备分档：Apple Silicon/NVIDIA 16、其余 8） | `0` |
 | `include_size` | 召回复量总开关（0.15.6）：开着，`find` / `read` / 过期审计 / 历史版本四个召回面都带 `size` 块（返回字符数 + 条数 + **token 预估**），agent 汇报成本用同一把尺子；关了就全都不带 | `true` |
 
 关于"指向模型就是意图"再说两句：以前要 `vec.enabled`、`embedding.provider`、`vec.dim` 三个开关凑齐才算开了向量，现在**只看 `embedding.model_path` 填没填**；mdeberta 判定模型同理，配了 ckpt 就启动即加载、常驻不卸载。

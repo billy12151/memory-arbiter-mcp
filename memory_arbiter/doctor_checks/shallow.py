@@ -50,7 +50,12 @@ def _c_row_vector_coverage(ctx: _DoctorCtx) -> Finding:
         )
     return _finding(
         "rows.coverage", True,
-        f"{covered}/{eligible} evidence-indexed memories have row vectors",
+        f"{covered}/{eligible} evidence-indexed memories have row vectors."
+        " If you just upgraded: row vectors are backfilled automatically by a"
+        " boot daemon thread — re-run doctor later or check"
+        " memory(action='status'); no manual step is needed. If the gap"
+        " persists, configure embedding.model_path or run"
+        " memory_repair(task='rebuild_evidence').",
         evidence={"row_covered": covered, "row_eligible": eligible},
     )
 
