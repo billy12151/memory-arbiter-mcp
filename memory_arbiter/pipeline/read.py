@@ -630,8 +630,9 @@ class ReadPipeline(_ReadSearch):
             elif content_mode == "full":
                 span = span_map.get(mid)
                 if (
-                    span is not None and (span["end"] is None or span["end"] > span["start"])
-                    and span["start"] < len(str(record.get("content") or ""))
+                    span is not None
+                    and int(span["end"] or 0) > int(span["start"] or 0)
+                    and int(span["start"] or 0) < len(str(record.get("content") or ""))
                 ):
                     unit_needed.append((mid, int(record.get("version") or 1)))
         # P2 #12 resolution point: deferred span ends ({"start": N} entries)
@@ -643,9 +644,10 @@ class ReadPipeline(_ReadSearch):
         for mid, span_entry in span_map.items():
             if span_entry["end"] is None:
                 record = prefetched.get(mid)
+                start_i = int(span_entry["start"] or 0)
                 content_len = len(str((record or {}).get("content") or ""))
                 span_entry["end"] = (
-                    content_len if content_len > span_entry["start"] else span_entry["start"] + 1
+                    content_len if content_len > start_i else start_i + 1
                 )
         unit_rows_map: dict[int, list[dict[str, Any]]] = (
             self.db.evidence.text_unit_rows_for_ids(unit_needed) if unit_needed else {}
@@ -703,13 +705,17 @@ class ReadPipeline(_ReadSearch):
                 item["memory"] = record
             else:  # full
                 record = dict(memory)
-                if span is not None and span["end"] > span["start"]:
-                    if span["start"] < len(content):
-                        clipped_end = min(span["end"], len(content))
+                if span is not None:
+                    sp_start, sp_end = int(span["start"] or 0), int(span["end"] or 0)
+                else:
+                    sp_start, sp_end = -1, -1
+                if sp_end > sp_start and span is not None:
+                    if sp_start < len(content):
+                        clipped_end = min(sp_end, len(content))
                         rows = [
                             row for row in unit_rows_map.get(mid, [])
                             if int(row["start_offset"]) < clipped_end
-                            and int(row["end_offset"]) > span["start"]
+                            and int(row["end_offset"]) > sp_start
                         ]
                         if rows:
                             # Unit-aligned: contiguous slice from the first to

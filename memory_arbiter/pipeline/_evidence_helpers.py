@@ -168,9 +168,8 @@ def _giant_table_indexes(segments: "list[Any]") -> "set[int]":
             if len(run) > SEMANTIC_TABLE_ROW_EXEMPT:
                 exempted.update(run)
             run = []
-            prev_index = None
             continue
-        if run and idx == prev_index + 1:
+        if run and prev_index is not None and idx == prev_index + 1:
             run.append(idx)
         else:
             if len(run) > SEMANTIC_TABLE_ROW_EXEMPT:
