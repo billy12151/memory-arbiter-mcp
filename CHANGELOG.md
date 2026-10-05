@@ -3,7 +3,9 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
-## [0.17.1 追加] — 未发版（claim 对比通道退役 + 判定输入上下文化，owner 2026-09-28 拍板）
+## [0.17.1] — 2026-10-04
+
+（claim 对比通道退役 + 判定输入上下文化 + 判定引擎重标 v46_ep1@0.55 + workspace 必传 + 全量修复批 + 内部向量自查/表格豁免）
 
 ### Fixed + Removed (全项目设计符合性审查批——6 域并行对照宣称口径 + 死代码专项，2026-10-05)
 

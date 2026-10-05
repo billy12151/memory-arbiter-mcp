@@ -257,3 +257,35 @@ def test_giant_table_filter_pure() -> None:
     content = _table_content(120) + "\n中间一句散文注释。\n" + _table_content(80)
     _k, n_split = _filter_exempted_segments(segment_rows("s", content))
     assert n_split == 120, f"断段后 80 行段不得豁免: {n_split}"
+
+
+def test_upgrade_boot_backfills_row_vectors(tmp_path: Path) -> None:
+    """升级路径钉（owner 2026-10-05 要求确保）：0.16 老库（无语句级向量）
+    升级后 boot 回填自动写入 memory_row/memory_row_vec——直调守护线程
+    执行体（生产 boot 后台线程同一段代码）。"""
+    tools = tv.make_tools(tmp_path, semantic_enabled=True)
+    ids = [tools.memory_write(
+        content=f"升级路径探针 {i}：超时阈值 {1000 + i}ms。",
+        subject="upgrade-probe", tags=[], workspace="default",
+    )["data"]["id"] for i in range(3)]
+    assert tools.wait_semantic_worker_drained(timeout=10)
+    with tools.db.connection() as conn:
+        conn.execute("DELETE FROM memory_row")
+        conn.execute("DELETE FROM memory_row_vec")
+        conn.commit()
+        assert conn.execute("SELECT count(*) FROM memory_row").fetchone()[0] == 0
+
+    from memory_arbiter.db import MemoryDB
+    from memory_arbiter.tools import MemoryTools
+
+    db2 = MemoryDB(tools.settings)
+    tools2 = MemoryTools(settings=tools.settings, db=db2)
+    db2.ensure_vec_tables(tv.FakeEmbedder.dim)
+    db2.init_vec_index_state("fake-vnext-space", True, active_dim=tv.FakeEmbedder.dim)
+    tools2._run_boot_backfills(tv.FakeEmbedder)  # 守护线程执行体，同步直调
+    with db2.connection() as conn:
+        rows = conn.execute("SELECT count(*) FROM memory_row").fetchone()[0]
+        vecs = conn.execute("SELECT count(*) FROM memory_row_vec").fetchone()[0]
+        covered = conn.execute("SELECT count(DISTINCT memory_id) FROM memory_row").fetchone()[0]
+    assert covered == 3, f"全部记忆应被回填覆盖: {covered}"
+    assert rows >= 3 and vecs >= 3
