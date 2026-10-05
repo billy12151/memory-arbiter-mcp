@@ -210,8 +210,15 @@ def _mdeberta_inference_process(conn: Any, config: dict[str, Any]) -> None:
     import gc
 
     try:
-        import torch
-        from transformers import AutoConfig, AutoModel, AutoTokenizer
+        # importlib 动态导入：mypy --strict 环境无 torch/transformers stub
+        # （CI 质量档只装 [test]），静态检查零依赖；运行语义与直接 import 等价。
+        import importlib
+
+        torch = importlib.import_module("torch")
+        _transformers = importlib.import_module("transformers")
+        AutoConfig = _transformers.AutoConfig
+        AutoModel = _transformers.AutoModel
+        AutoTokenizer = _transformers.AutoTokenizer
 
         torch.set_num_threads(int(config["n_threads"]))
         model_dir = str(config["model_dir"])
@@ -219,7 +226,7 @@ def _mdeberta_inference_process(conn: Any, config: dict[str, Any]) -> None:
         max_len = int(config["max_len"])
 
         cfg = AutoConfig.from_pretrained(model_dir)
-        base = AutoModel.from_config(cfg)  # type: ignore[no-untyped-call]
+        base = AutoModel.from_config(cfg)
         # P0 fix (implementation adversarial review): config.json may carry
         # dtype float16 (the NLI upstream's export does) — from_config would
         # build a Half encoder and the first forward would die on the

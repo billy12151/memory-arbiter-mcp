@@ -144,8 +144,10 @@ def _c_semantic_judge_model(ctx: _DoctorCtx) -> Finding | None:
             evidence={"ckpt": str(ckpt), "model_dir": str(model_dir)},
         )
     try:
-        import torch  # noqa: F401
-        import transformers  # noqa: F401
+        import importlib
+
+        importlib.import_module("torch")
+        importlib.import_module("transformers")
     except ImportError as exc:
         return _finding(
             "semantic.judge_model", False,
