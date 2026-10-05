@@ -2,7 +2,7 @@
 
 **English | [中文](INTEGRATION.zh-CN.md)**
 
-This guide describes the `0.16.12` contract.
+This guide describes the `0.17.1` contract.
 
 ## MCP Surface
 
@@ -18,7 +18,7 @@ Writes require a non-empty `subject`; include `source_type`, `event_time`, `sour
 
 ## Configuration Surface
 
-Since 0.15.0 configuration is file-only: everything user-tunable lives in `~/.config/memory-arbiter/config.json` (or the file the `MEMORY_ARBITER_CONFIG` launch-context variable points at). The complete surface is 19 keys (0.15.14: `semantic_conflict.n_gpu_layers` added, `semantic_conflict.max_notice_pairs` and `policy_path` removed):
+Since 0.15.0 configuration is file-only: everything user-tunable lives in `~/.config/memory-arbiter/config.json` (or the file the `MEMORY_ARBITER_CONFIG` launch-context variable points at). The complete surface is 21 keys (0.17.1: `claims.required`, `semantic_conflict.model_path` and `n_gpu_layers` removed; the four `semantic_conflict.mdeberta_*` keys added):
 
 ```json
 {
@@ -28,7 +28,7 @@ Since 0.15.0 configuration is file-only: everything user-tunable lives in `~/.co
   "update_check": {"enabled": true},
   "include_size": true,
   "embedding": {"model_path": "…", "auto_query": true, "auto_write": true},
-  "semantic_conflict": {"enabled": true, "model_path": "…", "on_write": "async", "n_gpu_layers": -1, "notice_sync_wait_ms": 3000},
+  "semantic_conflict": {"enabled": true, "mdeberta_ckpt": "…", "mdeberta_model_dir": "…", "mdeberta_batch": 16, "mdeberta_notice_min_prob": 0.5, "on_write": "async", "notice_sync_wait_ms": 3000},
   "mcp": {"transport": "stdio", "http": {"host": "127.0.0.1", "port": 8000}}
 }
 ```
@@ -36,8 +36,8 @@ Since 0.15.0 configuration is file-only: everything user-tunable lives in `~/.co
 Intent semantics:
 
 - Pointing `embedding.model_path` at a local GGUF model is the sole intent to enable sqlite-vec evidence recall — there is no `vec.enabled`/`embedding.provider`/`vec.dim` any more. The vector dimension comes from the model itself; the database records the active dimension as its fact source, and switching to a model with a different output dimension drops and recreates the vector tables at the new dimension at startup, flipping the index to `state=mismatch` until the full rebuild republishes into the fresh tables.
-- Pointing `semantic_conflict.model_path` at a local Qwen2.5-0.5B GGUF enables the semantic-conflict runtime, loads it at startup, and keeps it resident (frozen `preload`/`resident=true`). `semantic_conflict.enabled=false` is the explicit off-switch; unset + `model_path` means enabled.
-- When a capability is missing from a real (config-file) install — the embedding model is absent, or the Qwen model is absent while semantic conflict is not explicitly disabled — every tool response carries a persistent degraded-mode banner pointing at `mema setup --install`, and each agent's first call attaches a capability health card to the onboarding notice. `enabled=false` with a configured model is treated as a deliberate minimal install and stays quiet. `mema setup --install` is the execution mode of the setup helper: pip-installs the extras, downloads both GGUF models (resumable, HuggingFace with ModelScope fallback), and writes the finished config itself; bare `mema setup` remains guidance-only.
+- Pointing `semantic_conflict.mdeberta_ckpt` at a local mDeBERTa checkpoint enables the semantic-conflict runtime, loads it at startup, and keeps it resident. `semantic_conflict.enabled=false` is the explicit off-switch; unset + `mdeberta_ckpt` means enabled. Since 0.17.1 the Qwen/GGUF judge backend is deleted; a legacy `model_path` entry draws a migration warning.
+- When a capability is missing from a real (config-file) install — the embedding model is absent, or the mdeberta judge checkpoint is absent while semantic conflict is not explicitly disabled — every tool response carries a persistent degraded-mode banner pointing at `mema setup --install`, and each agent's first call attaches a capability health card to the onboarding notice. `enabled=false` with a configured model is treated as a deliberate minimal install and stays quiet. `mema setup --install` is the execution mode of the setup helper: pip-installs the extras, downloads the embedding GGUF model (resumable, HuggingFace with ModelScope fallback), and writes the finished config itself — the mDeBERTa judge checkpoint is a separate manual install; bare `mema setup` remains guidance-only.
 - Ranking is fixed hybrid (lexical + evidence fusion with reciprocal-rank fusion); there is no ranking-mode choice.
 - The HTTP endpoint path is fixed `/mcp` and request bodies are capped at 4 MB.
 
@@ -54,7 +54,7 @@ Six environment variables remain as launch context: `MEMORY_ARBITER_CONFIG`, `ME
 | `semantic_conflict.backend`, `semantic_conflict.max_concurrency` | Removed — dead knobs (single local backend, serial worker) |
 | `semantic_conflict.preload`, `semantic_conflict.resident` | Frozen `true` — configured model loads at startup and stays resident |
 | `semantic_conflict.n_ctx` / `n_threads` / `n_batch` | Frozen constants (2048 since 0.15.8 / 4 / 128) |
-| `semantic_conflict.job_timeout_ms` / `inference_timeout_ms` / `load_timeout_ms` / `min_pair_budget_ms` | Frozen constants (5000 / 30000 / 120000 / 1000 ms) |
+| `semantic_conflict.job_timeout_ms` / `inference_timeout_ms` / `load_timeout_ms` / `min_pair_budget_ms` | Frozen constants (10000 / 30000 / 120000 / 1000 ms) |
 | `semantic_conflict.queue_max_size`, `semantic_conflict.max_evidence_units` | Frozen constants (100 / 24) |
 | `semantic_conflict.scan_enhance`, `semantic_conflict.scan_max_pairs`, `semantic_conflict.scan_budget_ms` | Frozen constants (true / 8 / 60000) |
 | `semantic_conflict.workspace_qwen_budget_ms` | Frozen constant (750 ms) — `notice_sync_wait_ms` left this table in 0.15.8 (live key again: default 3000, clamp 0–5000, 0 = never block the write response) |
@@ -71,11 +71,11 @@ Frozen constants live in `memory_arbiter/constants.py` at their former defaults;
 
 With sqlite-vec and a local embedding model configured, writes asynchronously publish sentence/paragraph evidence derived from the stored source. Lexical and evidence channels recall independently and merge per memory with reciprocal-rank fusion before trust, recency, filters, and workspace adjustments. Evidence offsets identify relevant source text.
 
-`memory(action="find")` is an index page: by default results carry metadata plus `content_chars` (the full-text length, i.e. the read cost) and a bounded `outline` (up to 8 `{head, offset}` segments from the evidence pipeline's heading/text units), never full content. Since 0.15.10 the content depth is a single-choice enum `content_mode`: `"hits"` adds `hit_spans` per item — the vector-matched units as `{text, start_offset, end_offset}` sliced from the source, so `read span=[start_offset, end_offset]` returns exactly that text. Hit spans are never truncated: when merged hits cover >=50% of the content the item upgrades to full text with `hit_spans` kept as an annotation (the server never picks "the important hits" for you); items without vector hits keep the plain preview shape. `"full"` returns whole texts. The old `include_content=true` boolean is removed (breaking): the call fails at the validation boundary with a migration pointer — use `content_mode="full"`. Page scores compare only within the page; if the top page misses, reword the query or add `tags_filter` instead of deep paging — unfiltered query-recall reports `total_estimate=null`/`has_more=false`, while filtered recall keeps the exact SQL count. `unresolved_conflict_count` appears only when page items directly hit an open/applying conflict group, counting those page items. Since 0.15.9 find is honest about emptiness: a query that recalls nothing returns `retrieval_mode="empty"` with a reword-or-filter hint (the old recent-memory fallback and its `recent_fallback` mode value are gone), and reranked candidates below the calibrated relevance floor (8.1) never enter a query-recall page — treat an empty result as "not in this library", not as "try page 2".
+`memory(action="find")` is an index page: by default results carry metadata plus `content_chars` (the full-text length, i.e. the read cost) and a bounded `outline` (up to 8 `{head, offset}` segments from the evidence pipeline's heading/text units), never full content. Since 0.15.10 the content depth is a single-choice enum `content_mode`: `"hits"` adds `hit_spans` per item — the vector-matched units as `{text, start_offset, end_offset}` sliced from the source, so `read span=[start_offset, end_offset]` returns exactly that text. Hit spans are never truncated: when merged hits cover >=50% of the content the item upgrades to full text with `hit_spans` kept as an annotation (the server never picks "the important hits" for you); items without vector hits keep the plain preview shape. `hit_window=N` (default 0) extends each hit with ±N neighbouring complete sentences (neighbours marked `matched=false`); `hit_spans` appears only on query-recall pages — browse/filter pages carry none — and stale-version hits are dropped with a `stale_hit_spans` marker plus a re-query warning (offsets are 0-based code-point offsets into the content as indexed for the item's version; the evidence index may lag right after an edit — see `vector_lag`). `"full"` returns whole texts. The old `include_content=true` boolean is removed (breaking): the call fails at the validation boundary with a migration pointer — use `content_mode="full"`. Page scores compare only within the page; if the top page misses, reword the query or add `tags_filter` instead of deep paging — unfiltered query-recall reports `total_estimate=null`/`has_more=false`, while filtered recall keeps the exact SQL count. `unresolved_conflict_count` appears only when page items directly hit an open/applying conflict group, counting those page items. Since 0.15.9 find is honest about emptiness: a query that recalls nothing returns `retrieval_mode="empty"` with a reword-or-filter hint (the old recent-memory fallback and its `recent_fallback` mode value are gone), and reranked candidates below the calibrated relevance floor (8.1) never enter a query-recall page — treat an empty result as "not in this library", not as "try page 2".
 
 `memory(action="batch_find", data={"queries":[{"id":"collections","query":"催收 辱骂 侮辱"},{"id":"debt","query":"债务转移 债权人同意"}], "limit_per_query":3})` runs up to 8 queries in one call and returns one merged index page — the multi-topic replacement for 5-10 sequential `find` round-trips. Every query goes through the identical find pipeline (same relevance floor, same honest-empty), is sliced to `limit_per_query` (default 3, max 20) before merging, and shared filters (`workspace`/`tags_filter`/`source_type`/time windows) apply to all queries. `deduplicate=true` (default) merges by `memory_id`: each item carries `matched_query_ids` (every hitting query) and `best_query_id`, ordered by best score. `per_query` reports `{id, count, has_more, retrieval_mode}` per query. Malformed batches (over 8 items, duplicate ids — `id` defaults to the query text — duplicate queries, over 64KB) are rejected whole: there is no partial-success mode.
 
-``memory(action="batch_read", data={"memory_ids": [...], "content_mode": "preview|hits|full"})` is `read` in batch (0.16.0): caps preview 50 / hits 50 / full 10 ids, and `full` adds an 80KB byte budget (100KB ceiling) — an over-budget batch returns a structured over-long prompt with contents omitted, never a silent truncation. `spans` maps memory_id to `{start, end}` and is the `hits` unit selector for id-driven calls: the window returns COMPLETE evidence units (no half-sentence slices; the legacy character window remains only as the fallback when no evidence rows exist yet). `read` itself gains the same `content_mode` (default `full`, backward compatible).
+``memory(action="batch_read", data={"memory_ids": [...], "content_mode": "preview|hits|full"})` is `read` in batch (0.16.0): caps preview 50 / hits 50 / full 10 ids, and an 80KB byte budget (100KB ceiling) covers any contents the page carries — `full` texts and `hits` items upgraded by >=50% coverage alike; an over-budget batch returns a structured over-long prompt with contents omitted, never a silent truncation. `spans` maps memory_id to `{start, end}` and is the `hits` unit selector for id-driven calls: the window returns COMPLETE evidence units (no half-sentence slices; the legacy character window remains only as the fallback when no evidence rows exist yet, reported with a lag warning). `hit_window=N` (default 0) extends each hit span with ±N neighbouring complete units (neighbours marked `matched=false`). `read` itself gains the same `content_mode` (default `full`, backward compatible) and `hit_window`.
 
 **0.16.5 serialization (breaking for 0.16.0–0.16.4 readers):** tool responses carry exactly ONE compact copy in `content[0].text` — compact JSON, `json.loads` it; `structuredContent` is absent and the vacuous output schema is gone (the ~55% wire saving is intact). `content` is the one channel every MCP client reads — the 0.16.0 form left pre-2025-06-18 clients with empty results. Clients that had migrated to `structuredContent` must move back to `content[0].text`.
 
@@ -85,28 +85,22 @@ Use `memory_repair(task="rebuild_evidence", data={"dry_run":true})` to inspect m
 
 ## Conflict Detection Contract
 
-### Bidirectional four-field extraction
+### Three-class judge (0.17.1)
 
-Evidence KNN provides bounded short-pair recall and ranking only. Optional local Qwen2.5-0.5B runs once as A→B and once as B→A. Each result must be a strict JSON object with exactly four bounded string fields:
+Evidence KNN provides bounded short-pair recall and ranking only. Since 0.17.1 the optional judge is a local mDeBERTa encoder (v52_ep3 checkpoint, CPU) that classifies each funnel-surviving pair as `conflict` / `no_conflict` / `possible_conflict` with calibrated probabilities: `conflict` at P ≥ `semantic_conflict.mdeberta_notice_min_prob` (default 0.5) lands a normal notice, `possible_conflict` lands an `info` grey-zone notice, `no_conflict` clears silently. The write-time funnel gates (sentence prefilter, memory screen, cosine band, rule evidence) are unchanged.
 
-```json
-{"attribute_a":"database","value_a":"MySQL","attribute_b":"database","value_b":"SQLite"}
-```
+The judge never picks a winner, suppresses the scheduled scan, or edits memory. Its probabilities ride the deterministic funnel, which still validates the DIRECT-verdict path (same stripped key + canonical value difference lands a notice without spending the judge):
 
-The model must not return a final conflict/coexistence decision, winner, or mutation. Code validates:
+1. the mechanically extracted attribute/value pair is grounded in the row texts, except mechanical case/unit/number/confirmed-alias derivations;
+2. the normalized values actually differ;
+3. deterministic duplicate, compatibility, environment/version/region/object, observation-time, historical/current, evolution, and measurement-scope vetoes do not apply;
+4. the notice carries sufficient `workspace_canonical + attribute + subject` identity (gate-v2: metadata entity/scope are retired; historical groups keep their old slot keys).
 
-1. each direction has a concrete same-attribute/different-value extraction;
-2. after swapping sides, both directions agree on normalized attributes and value-to-source mapping;
-3. values are grounded in their corresponding evidence quote, except mechanical case/unit/number/confirmed-alias derivations;
-4. normalized values actually differ;
-5. deterministic duplicate, compatibility, environment/version/region/object, observation-time, historical/current, evolution, and measurement-scope vetoes do not apply;
-6. a formal slot has sufficient `workspace_canonical + entity + attribute + scope` provenance.
-
-Fuzzy attribute similarity cannot create a formal slot. Qwen failure or absence has no authority to veto deterministic scan candidates.
+Fuzzy attribute similarity cannot create a formal slot. Judge failure or absence (mDeBERTa unconfigured/unavailable) never vetoes deterministic candidates — the pipeline fails open, and pairs the judge could not settle fall to the conflict backlog and retry on later writes.
 
 ### Scheduled scan: broad gate
 
-`memory_repair(task="scan_candidates")` enumerates bounded KNN/rule candidates without loading the whole library into the agent session. The scan keeps the deterministic baseline and, when the local Qwen runtime is available (scan enhancement is always on, a frozen constant), runs a bounded enhancement over the page: rule candidates are enriched with extracted `attribute/value` member fields and `value_groups`, and similarity-only pairs (normally opt-in via `include_check`) that extract a legal same-attribute/different-value in either direction are unioned into `candidates`. Qwen pair evaluations per page are capped at 8 and the page deadline is bounded at 60 s (frozen constants); verified candidates whose memories agree on metadata `entity/scope` are aggregated into `slot_groups`. Single-direction output, weak grounding, or missing entity/scope remains `review_candidate` for agent deep reading; Qwen absent/invalid/timeout/budget failure never reduces the baseline set and never removes a rule candidate.
+`memory_repair(task="scan_candidates")` enumerates bounded KNN/rule candidates without loading the whole library into the agent session. The scan path runs no model: the deterministic baseline IS the candidate set, and judgment belongs to the agent (deep-read each candidate, then `record_conflict` with `status="open"` or `"not_a_conflict"`). An unconfigured or unavailable judge never reduces this set; write-time pairs the judge could not settle land in the conflict backlog and are retried by later writes.
 
 Candidates carry member versions, evidence spans, candidate identity, and deep-read calls. `scan_candidates` does not itself persist triage. For every reviewed candidate, call `memory_repair(task="record_conflict")` with `status="open"` or `status="not_a_conflict"`; otherwise it may appear on a later scan. Pass `slot_key` only for `status="open"` — a `not_a_conflict` triage records through `candidate_key` alone and returns `open_group_exists` if an open group already owns the slot. Candidate-only `not_a_conflict` rows use `candidate_key` and do not invent `scope="unknown"`.
 
@@ -116,13 +110,13 @@ Candidates carry member versions, evidence spans, candidate identity, and deep-r
 
 Only a completed full-scan boundary — a `scan_candidates` page returning `next_anchor_memory_id=null` with anchors actually scanned — appends one lightweight audit line to `scan_log.jsonl` (`scan_time`, `duration_sec`, `status=completed`, caller identity, and the configured model names). Intermediate pages stay silent, and per-page counters are gone: the file is audit evidence, not a scan-results log. That file is the machine-checkable evidence that a scheduled task exists: with no completed line and no conflict-scan progress, agents receive a `scan_never_run` guidance notice (info), a required rebuild escalates to `scan_required` (warning), and a newest entry older than 14 days trips `scan_stale` (info). The notice carries a platform-agnostic `setup.tasks` spec (hourly conflict scan + daily governance reminder) and self-closes once the tasks run; the same evidence drives doctor's `conflicts.scan_required` / `conflicts.scan_stale` findings. Fetch the full spec any time with `memory(action="help", data={"topic": "scheduled_tasks"})`.
 
-### Write-time notice: strict gate
+### Write-time notice
 
-A user-visible notice requires both valid directions, consistent side mapping, strict quote grounding, distinct normalized values, complete slot provenance, and no coexistence veto. Any failure closes the notice path and leaves the case for scheduled scan review. Notice snapshots freeze member versions, value groups, slot provenance, detector/prompt version, task id, and dedupe key.
+A user-visible notice requires the judge to return `conflict` at P ≥ `semantic_conflict.mdeberta_notice_min_prob` (default `0.5`) — or the deterministic direct verdict (same stripped key, different canonical values, grounded) — with no coexistence veto and complete slot provenance; `possible_conflict` lands an `info` grey-zone notice instead. Internal (same-memory) findings never die at write time: they land `pending` with the model opinion attached, and the scan-side strong model owns negative verdicts. Notice snapshots freeze member versions, value groups, slot provenance, detector/model version, task id, and dedupe key.
 
-After a successful write, the server waits at most `semantic_conflict.notice_sync_wait_ms` (v0.15.8 live config key, default `3000`, clamp `0–5000`) for the bounded notice task. If the wait expires, the write returns successfully and the same accepted task continues asynchronously; it is not cancelled or recomputed. A queue-full/rejected enqueue is different: there is no task to wait for. `checked_no_notice` means only that every candidate inside that bounded write-time task completed the strict gate; it is not a whole-library claim. Scheduled scan remains the durable recall backstop.
+After a successful write, the server waits at most `semantic_conflict.notice_sync_wait_ms` (v0.15.8 live config key, default `3000`, clamp `0–5000`) for the bounded notice task. If the wait expires, the write returns successfully and the same accepted task continues asynchronously; it is not cancelled or recomputed. A queue-full/rejected enqueue is different: there is no task to wait for. `checked_no_notice` means only that every candidate inside that bounded write-time task completed the funnel; it is not a whole-library claim. Scheduled scan remains the durable recall backstop.
 
-The job budget (5000 ms, frozen) is a queue-fairness budget, not an inference timeout. It activates only when another semantic job is waiting and is checked between candidate pairs. An already-started Qwen request runs under the inference timeout (30000 ms, frozen) even if the job budget expires; after that pair finishes, the worker yields before starting another pair. With no backlog, the job budget is inactive.
+The job budget (10000 ms, frozen) is a queue-fairness budget, not an inference timeout. It activates only when another semantic job is waiting and is checked between candidate pairs. An already-started judge batch runs under the inference timeout (30000 ms, frozen) even if the job budget expires; after the batch returns, the worker yields before starting another. Judged pairs that could not settle (timeout/unavailable/error) stay in the conflict backlog and retry on later writes; when pre-deduction or skipping occurred, the receipt carries a `judge_budget` breakdown. With no backlog, the job budget is inactive.
 
 ## One Conflicts Table
 
@@ -151,15 +145,15 @@ Prefer correcting an incorrect current fact, preserve historical/external/locked
 
 Canonical normalization runs under every isolation mode and is independent from ACL:
 
-- `none`: exact/confirmed/vector/rule/Qwen normalization behaves like weak mode, but no workspace ACL is applied. An omitted workspace filter returns all workspaces.
+- `none`: exact/confirmed/mechanical-variant/vector normalization with deterministic `AUTO|KEEP|ASK` rules, like weak mode, but no workspace ACL is applied. An omitted workspace filter returns all workspaces.
 - `weak`: same normalization plus soft ranking/hints; no hard visibility filter.
-- `strict`: exact/confirmed and safe mechanical rules may reuse a canonical; Qwen cannot silently merge. A new workspace remains pending until authorized `confirm_pending_workspace`. Visibility uses guarded vector admission (always on since 0.15.0, a frozen constant): workspace-sensitive recall/read/repair operations, conflict/notice workflows, and console content/count views share the caller canonical plus every canonical within the guarded cosine cutoff (0.25, frozen) that passes default-pool, short-name, and generic-substring guards. Process-global maintenance such as semantic runtime control, backup replay, doctor, and settings is not scoped this way. Missing vectors or sqlite-vec degradation falls back to exact-canonical scope; the insulated `default` pool is never admitted into a strict project scope.
+- `strict`: exact/confirmed and safe mechanical rules may reuse a canonical; a near-match never merges silently. A new workspace remains pending until authorized `confirm_pending_workspace`. Visibility uses guarded vector admission (always on since 0.15.0, a frozen constant): workspace-sensitive recall/read/repair operations, conflict/notice workflows, and console content/count views share the caller canonical plus every canonical within the guarded cosine cutoff (0.25, frozen) that passes default-pool, short-name, and generic-substring guards. Process-global maintenance such as semantic runtime control, backup replay, doctor, and settings is not scoped this way. Missing vectors or sqlite-vec degradation falls back to exact-canonical scope; the insulated `default` pool is never admitted into a strict project scope.
 
 In `none` and `weak`, the first write that registers a canonical returns a non-blocking top-level notice with `type=workspace_review`, `action_required=review_workspace_registry`, a doctor review call, and the authorized `confirm_workspaces` call to use only after review. Repeated writes to an existing canonical do not repeat it. `strict` uses its blocking pending-workspace response instead.
 
-Resolution order is internal confirmed/negative workspace decisions, exact canonical, bounded vector candidates, deterministic `AUTO|KEEP|ASK`, then Qwen only for an undecided near-match. Qwen must choose from the supplied candidates and may suggest an `alias`/`typo`/`same_project` relationship, but automatic normalization writes only the memory's `workspace_canonical`; it does not create a persistent redirect. Negative decisions suppress repeated proposals. Product governance uses rename, migrate, pending confirmation, and full-registry review; internal decision rows are not a product workflow.
+Resolution order is internal confirmed/negative workspace decisions, exact canonical, mechanical variants, bounded vector candidates, then deterministic `AUTO|KEEP|ASK` — there is no model in the loop anymore. Automatic normalization writes only the memory's `workspace_canonical`; it does not create a persistent redirect. Negative decisions suppress repeated proposals. Product governance uses rename, migrate, pending confirmation, and full-registry review; internal decision rows are not a product workflow.
 
-Workspace and conflict inference share a serial local worker. The near-match Qwen budget (750 ms, frozen) is an independent short budget: timeout/busy preserves the raw canonical and returns a review hint rather than blocking the write-time notice gate.
+Workspace normalization and conflict inference share one serial local worker.
 
 ## Response Envelope
 
@@ -184,7 +178,7 @@ JSONL replay is previewable without authorization. Applying replay requires expl
 | Older claim + memory/section-vector generations | Refused without modification | Same side-by-side `mema upgrade` | Core/public data retained; evidence units generated/retained and vectors rebuilt |
 | Unknown, partial, failed/resuming target | Refused | Diagnose with `mema doctor --json`; repair/resume only with the lower-level migration workflow | Never open as current until verification succeeds |
 
-There is no public in-place upgrade: both paths build and verify a side-by-side target. A full rebuild requires sqlite-vec, a readable configured GGUF embedding model, `llama-cpp-python` (the `semantic-local` extra also supplies the embedding runtime), a writable target directory, and enough free space. The conflict-only path is selected only when the source vector state is `ready` and its active space ID exactly matches the configured model and pipeline; it then reuses evidence/vector state without loading a model. The separate optional semantic-conflict Qwen model is not a migration prerequisite.
+There is no public in-place upgrade: both paths build and verify a side-by-side target. A full rebuild requires sqlite-vec, a readable configured GGUF embedding model, `llama-cpp-python` (the `semantic-local` extra also supplies the embedding runtime), a writable target directory, and enough free space. The conflict-only path is selected only when the source vector state is `ready` and its active space ID exactly matches the configured model and pipeline; it then reuses evidence/vector state without loading a model. The optional mDeBERTa conflict-judge checkpoint is not a migration prerequisite.
 
 ### WAL-safe procedure
 
@@ -199,7 +193,7 @@ There is no public in-place upgrade: both paths build and verify a side-by-side 
 
    Abort if the checkpoint reports non-zero `busy`; copying only the main file while committed frames remain in `-wal` is incomplete. SQLite's online `.backup` command is also safe before shutdown.
 4. Run `mema upgrade`; restart and verify with `mema doctor --json`.
-5. Complete the epoch-pinned full `scan_candidates` pass shown by status/doctor.
+5. Complete the epoch-pinned full `scan_candidates` pass shown by status/doctor. After the upgrade the first server start auto-backfills sentence row vectors on a daemon thread; progress is visible in `mema doctor` (`rows.coverage`) — with no embedding model the backfill stays pending until one is configured.
 
 The side-by-side copy retains memory content/history, backup replay receipts, workspace canonicals and current redirect/negative-decision state, and audit. The obsolete workspace decision event ledger is intentionally omitted. Preserve migrations clone FTS/evidence/vector payloads unchanged and replace only the conflict domain; compatibility is evaluated independently, and an incompatible configured space is recorded as `mismatch` so vector reads stay disabled until repair. Rebuild migrations regenerate evidence vectors. The target intentionally starts with empty conflict/notice state: old `conflicts`, `conflict_judgments`, and `semantic_notices` history are not migrated. Target publication requires fingerprint stability, empty destructive tables, an atomic generation/completion marker, and a successful target `wal_checkpoint(TRUNCATE)` before WAL/SHM removal and config switch; rebuild migrations additionally require complete eligible evidence coverage and `state=ready` in the expected space.
 
@@ -207,4 +201,4 @@ On success `conflict_scan_required=true` and a persistent epoch are recorded. On
 
 ## 中文摘要
 
-0.14.2 使用单一 `conflicts` 表保存一对多冲突事件、裁决和应用结果；生命周期为 `open → applying → resolved` 或 `not_a_conflict`。Qwen 只做 A→B/B→A 四字段 attribute/value 抽槽，不选正确值、不修改记忆。scheduled scan 宽门保召回，write-time notice 双向一致且严格 grounding 才提醒。治理顺序固定为 `judge → apply_conflict_action（逐条 CAS）→ resolve_conflict`。`none/weak/strict` 都做 workspace canonical normalization；strict 可选 guarded vector admission，default 池不进入项目 scope。升级到 `workspace_state_v1` 会丢弃旧 conflict/judgment/notice 历史和旧 workspace decision event ledger，并设置必须由匹配 detector 的完整全库 scan 清除的 epoch 标志。**完整中文集成指南见 [INTEGRATION.zh-CN.md](INTEGRATION.zh-CN.md)。**
+0.17.1 使用单一 `conflicts` 表保存一对多冲突事件、裁决和应用结果；生命周期为 `open → applying → resolved` 或 `not_a_conflict`。写时判定由可选本地 mDeBERTa 双头 checkpoint 完成（conflict/no_conflict/possible 三分类+机制分类，整对文本判决、无属性/值抽槽，claims 通道退役）；P(conflict) ≥ `mdeberta_notice_min_prob`（现 0.5）才出 normal notice。scheduled scan 宽门保召回，write-time notice 双向一致且严格 grounding 才提醒。治理顺序固定为 `judge → apply_conflict_action（逐条 CAS）→ resolve_conflict`。`none/weak/strict` 都做 workspace canonical normalization；strict 可选 guarded vector admission，default 池不进入项目 scope。升级到 `workspace_state_v1` 会丢弃旧 conflict/judgment/notice 历史和旧 workspace decision event ledger，并设置必须由匹配 detector 的完整全库 scan 清除的 epoch 标志。**完整中文集成指南见 [INTEGRATION.zh-CN.md](INTEGRATION.zh-CN.md)。**

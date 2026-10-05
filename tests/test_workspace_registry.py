@@ -41,11 +41,16 @@ contract points:
 import json
 from pathlib import Path
 
+from contextlib import contextmanager
+from pathlib import Path
+from types import SimpleNamespace
+import sqlite3
+import threading
 import pytest
 
 from memory_arbiter.config import Settings
-from memory_arbiter.db import MemoryDB
-from memory_arbiter.models import ConflictMember, ConflictValueGroup
+from memory_arbiter.db import MemoryDB, _normalize_alias_key
+from memory_arbiter.models import ConflictMember, ConflictValueGroup, MemoryStatus
 from memory_arbiter.tools import MemoryTools
 
 NOW = "2026-01-01T00:00:00+00:00"
@@ -226,7 +231,7 @@ def test_merge_repoints_everything_and_installs_redirect(tmp_path: Path) -> None
     assert canonical_names(tools) == ["AgentLane"]
     assert ("legacy-name", "AgentLane", "confirmed") in alias_rows(tools)
     assert ("agent-lane", "AgentLane", "confirmed") in alias_rows(tools)
-    resolved = tools.db.resolve_workspace_canonical("agent-lane", None, register_new=False)
+    resolved = tools.db.resolve_workspace_canonical("agent-lane", None)
     assert resolved["canonical"] == "AgentLane"
     assert resolved["matched_by"] == "confirmed_alias"
     if loser_vec_id is not None:
@@ -242,10 +247,8 @@ def test_merge_repoints_everything_and_installs_redirect(tmp_path: Path) -> None
 def test_rejected_pair_is_respected_not_merged(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     register(tools, "AgentLane", "agent-lane")
-    ok, warnings = tools.db.record_workspace_decision(
-        "agent-lane", "AgentLane", status="rejected",
-    )
-    assert ok, warnings
+    # G 守卫（0.17.1）后 twin rejected 行只能以存量形态存在：直插等价行。
+    insert_alias(tools, "agent-lane", "AgentLane", "rejected")
     result = tools.db.workspaces.normalize_workspace_canonicals(dry_run=False)
     assert result["ok"]
     assert result["merged"] == []
@@ -261,12 +264,10 @@ def test_rejected_pair_is_respected_not_merged(tmp_path: Path) -> None:
 
 def test_reverse_rejected_pair_is_respected_not_merged(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
-    # Rejection recorded BEFORE either spelling was registered: the ghost
+    # Rejection recorded BEFORE either spelling was registered (legacy row —
+    # G 守卫后此类行不再能经治理产生，直插等价形态): the ghost
     # spelling stays verbatim under the WINNER's alias key...
-    ok, warnings = tools.db.record_workspace_decision(
-        "AgentLane", "agent-lane", status="rejected",
-    )
-    assert ok, warnings
+    insert_alias(tools, "agentlane", "agent-lane", "rejected")
     # ...then legacy double-registration happens later.
     register(tools, "AgentLane", "agent-lane")
     result = tools.db.workspaces.normalize_workspace_canonicals(dry_run=False)
@@ -340,6 +341,37 @@ def test_normalize_is_idempotent(tmp_path: Path) -> None:
     assert second["skipped"] == []
 
 
+def test_normalize_committed_merge_with_repoint_warning_not_refused(tmp_path: Path) -> None:
+    """2026-10-05 审查修复：normalize 必须消费 A5 的 committed 第三元素。
+
+    repoint 对齐守卫在已提交（committed=True）的合并上也可能带警告返回
+    （丢弃机械同键 rejected 行）——若按 `if merge_warnings` 一律记
+    merge_refused，已发生的合并会被报告成被拒：dry-run 报 merged、执行
+    报 refused、库内已合并，三方互相矛盾。构造：rejected 行 `spaß→SPASS`
+    的别名机械键（casefold 去 _-\\s）与 winner `spass` 相同，但组键
+    （lower）不同 → respected-rejection 检查放行合并，repoint 守卫触发。
+    """
+    tools = make_tools(tmp_path)
+    register(tools, "spass", "SPASS")
+    insert_alias(tools, "spaß", "SPASS", "rejected")
+    memory = write(tools, "SPASS")
+    plan = tools.db.workspaces.normalize_workspace_canonicals(dry_run=True)
+    assert plan["merged"] and not any(
+        s.get("type") == "merge_refused" for s in plan["skipped"]
+    )
+    result = tools.db.workspaces.normalize_workspace_canonicals(dry_run=False)
+    assert result["ok"]
+    # 已提交的合并照常进 merged 清单（警告留在 warnings），不得记 refused。
+    assert result["merged"] == [
+        {"from": "SPASS", "to": "spass", "memories_updated": 1}
+    ]
+    assert not any(s.get("type") == "merge_refused" for s in result["skipped"])
+    assert any("dropped while repointing" in w for w in result["warnings"])
+    # 库内事实与报告一致：记忆已并入 winner。
+    assert memory_canonicals(tools)[memory] == "spass"
+    assert canonical_names(tools) == ["spass"]
+
+
 def test_default_pool_variants_never_merged(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     register(tools, "Default", "default")
@@ -407,7 +439,7 @@ def test_migrate_folds_destination_onto_registered_mechanical_twin(tmp_path: Pat
     winner_memory = write(tools, "AgentLane", "winner fact")
     first = write(tools, "old-ws", "old fact one")
     second = write(tools, "old-ws", "old fact two")
-    updated, warnings = tools.db.workspaces.migrate_workspace("old-ws", "agent-lane")
+    updated, warnings, _committed = tools.db.workspaces.migrate_workspace("old-ws", "agent-lane")
     assert warnings == []
     assert updated == 2
     # Every memory lands on the registered spelling; the verbatim variant is
@@ -418,7 +450,7 @@ def test_migrate_folds_destination_onto_registered_mechanical_twin(tmp_path: Pat
     assert canonicals[winner_memory] == "AgentLane"
     assert canonical_names(tools) == ["AgentLane"]
     assert ("old-ws", "AgentLane", "confirmed") in alias_rows(tools)
-    resolved = tools.db.resolve_workspace_canonical("old-ws", None, register_new=False)
+    resolved = tools.db.resolve_workspace_canonical("old-ws", None)
     assert resolved["canonical"] == "AgentLane"
 
 
@@ -426,7 +458,7 @@ def test_migrate_onto_own_mechanical_twin_is_noop(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     register(tools, "AgentLane")
     memory_id = write(tools, "AgentLane", "winner fact")
-    updated, warnings = tools.db.workspaces.migrate_workspace("AgentLane", "agent-lane")
+    updated, warnings, _committed = tools.db.workspaces.migrate_workspace("AgentLane", "agent-lane")
     assert (updated, warnings) == (0, [])
     # The winner row and its data are intact; no variant registered, no rows.
     assert canonical_names(tools) == ["AgentLane"]
@@ -445,6 +477,9 @@ def test_migrate_into_target_with_existing_vector_keeps_it(tmp_path: Path) -> No
         def embed_text(self, *, prefix: str = "", body: str = "", max_body_chars: int = 0):
             return type("ER", (), {"embedding": [0.25, 0.75], "last_encode_error": None})()
 
+        def embed_texts(self, texts, prefix: str = ""):
+            return [self.embed_text(prefix="", body=t) for t in texts]
+
     register(tools, "target-ws")
     write(tools, "target-ws", "winner fact")
     tools.db.workspaces.publish_workspace_canonical_vector("target-ws", [0.25, 0.75])
@@ -456,7 +491,7 @@ def test_migrate_into_target_with_existing_vector_keeps_it(tmp_path: Path) -> No
     assert target_row is not None and target_row["vector_id"] is not None
 
     write(tools, "source-ws", "old fact")
-    updated, warnings = tools.db.workspaces.migrate_workspace(
+    updated, warnings, _committed = tools.db.workspaces.migrate_workspace(
         "source-ws", "target-ws", embedder=Embedder(),
     )
     assert updated == 1
@@ -475,7 +510,7 @@ def test_rename_folds_destination_onto_registered_mechanical_twin(tmp_path: Path
     winner_memory = write(tools, "AgentLane", "winner fact")
     first = write(tools, "old-ws", "old fact one")
     second = write(tools, "old-ws", "old fact two")
-    updated, warnings = tools.db.workspaces.rename_workspace_canonical("old-ws", "agent-lane")
+    updated, warnings, _committed = tools.db.workspaces.rename_workspace_canonical("old-ws", "agent-lane")
     assert warnings == []
     assert updated == 2
     canonicals = memory_canonicals(tools)
@@ -484,7 +519,7 @@ def test_rename_folds_destination_onto_registered_mechanical_twin(tmp_path: Path
     assert canonicals[winner_memory] == "AgentLane"
     assert canonical_names(tools) == ["AgentLane"]
     assert ("old-ws", "AgentLane", "confirmed") in alias_rows(tools)
-    resolved = tools.db.resolve_workspace_canonical("old-ws", None, register_new=False)
+    resolved = tools.db.resolve_workspace_canonical("old-ws", None)
     assert resolved["canonical"] == "AgentLane"
 
 
@@ -494,7 +529,7 @@ def test_rename_onto_own_mechanical_twin_stays_a_spelling_rename(tmp_path: Path)
     # case-only rename contract).
     tools = make_tools(tmp_path)
     memory_id = write(tools, "ProjectX")
-    updated, warnings = tools.db.workspaces.rename_workspace_canonical("ProjectX", "projectx")
+    updated, warnings, _committed = tools.db.workspaces.rename_workspace_canonical("ProjectX", "projectx")
     assert warnings == []
     assert updated == 1
     assert canonical_names(tools) == ["projectx"]
@@ -507,14 +542,11 @@ def test_rename_onto_own_mechanical_twin_stays_a_spelling_rename(tmp_path: Path)
 
 def test_cross_spelling_rejected_row_skips_whole_group(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
-    # The rejection lives under a THIRD spelling of the pair (the resolve
-    # refusal flow's typical product): neither the loser's nor the winner's
-    # alias key carries the row, so exact-key lookups would miss it and merge
-    # on top of an explicit user rejection.
-    ok, warnings = tools.db.record_workspace_decision(
-        "agent_lane", "AgentLane", status="rejected",
-    )
-    assert ok, warnings
+    # The rejection lives under a THIRD spelling of the pair (legacy row —
+    # G 守卫后经治理不再产生，直插等价形态): neither the loser's nor the
+    # winner's alias key carries the row, so exact-key lookups would miss it
+    # and merge on top of an explicit user rejection.
+    insert_alias(tools, "agent_lane", "AgentLane", "rejected")
     register(tools, "AgentLane", "agent-lane")
     result = tools.db.workspaces.normalize_workspace_canonicals(dry_run=False)
     assert result["ok"]
@@ -640,13 +672,13 @@ def test_rename_and_migrate_report_unavailable_startup_lock(tmp_path: Path) -> N
     lock_path = Path(str(tools.settings.db_path) + ".startup.lock")
     lock_path.unlink()  # MemoryDB startup created the regular lock file
     lock_path.mkdir()
-    renamed, rename_warnings = tools.db.workspaces.rename_workspace_canonical(
+    renamed, rename_warnings, _rc = tools.db.workspaces.rename_workspace_canonical(
         "old-ws", "agent-lane",
     )
     assert renamed == 0
     assert len(rename_warnings) == 1
     assert "workspace migration lock unavailable" in rename_warnings[0]
-    migrated, migrate_warnings = tools.db.workspaces.migrate_workspace(
+    migrated, migrate_warnings, _mc = tools.db.workspaces.migrate_workspace(
         "old-ws", "agent-lane",
     )
     assert migrated == 0
@@ -671,59 +703,16 @@ from pathlib import Path
 from memory_arbiter.config import Settings
 from memory_arbiter.db import MemoryDB
 from memory_arbiter.tools import MemoryTools
-from memory_arbiter.semantic_conflict import (
-    WorkspaceCandidateSignal,
-    workspace_candidate_from_text,
-)
 
 
 # ── parser ───────────────────────────────────────────────────────────────────
 
-def test_parse_valid_candidate():
-    raw = '{"candidate": "金营项目", "relation": "alias", "confidence": 0.92, "evidence": "同一项目不同写法"}'
-    sig = workspace_candidate_from_text(raw, ["金营项目", "其他项目"])
-    assert sig.candidate == "金营项目"
-    assert sig.relation == "alias"
-    assert sig.confidence == 0.92
 
 
-def test_parse_drops_hallucinated_candidate():
-    # model returns a candidate not in the offered list → dropped
-    raw = '{"candidate": "不存在项目", "relation": "alias", "confidence": 0.9}'
-    sig = workspace_candidate_from_text(raw, ["金营项目"])
-    assert sig.candidate is None
-    assert sig.relation == "uncertain"  # downgraded since no candidate
 
-
-def test_parse_missing_json_is_uncertain():
-    sig = workspace_candidate_from_text("no json here", ["a"])
-    assert sig.candidate is None and sig.relation == "uncertain"
-    assert sig.error == "missing_json"
-
-
-def test_parse_unknown_relation_normalized():
-    raw = '{"candidate": "a", "relation": "bogus", "confidence": 0.5}'
-    sig = workspace_candidate_from_text(raw, ["a"])
-    assert sig.relation == "uncertain"
-
-
-def test_parse_clamps_out_of_range_confidence():
-    hi = workspace_candidate_from_text('{"candidate":"a","relation":"alias","confidence":5.0}', ["a"])
-    assert hi.confidence == 1.0
-    lo = workspace_candidate_from_text('{"candidate":"a","relation":"alias","confidence":-3}', ["a"])
-    assert lo.confidence == 0.0
 
 
 # ── per-isolation policy (stub backend) ──────────────────────────────────────
-
-class _StubBackend:
-    """Minimal stand-in for LocalGGUFSemanticBackend."""
-    def __init__(self, signal: WorkspaceCandidateSignal):
-        self._signal = signal
-
-    def suggest_workspace_candidate(self, ws_raw, evidence, candidates):
-        return self._signal
-
 
 def qwen_candidate_make_tools(tmp_path: Path, isolation: str) -> MemoryTools:
     settings = Settings(
@@ -742,7 +731,7 @@ def _force_undecided_with_candidate(t: MemoryTools, backend, similar_name="金�
     real near-miss the vector brought within range, which is the only situation
     where Qwen is allowed to arbitrate an AUTO merge. Over-distance candidates
     (e.g. 0.4) are filtered out before Qwen sees them by design."""
-    def fake_resolve(ws_raw, embedder=None, *, match_distance=None, register_new=True):
+    def fake_resolve(ws_raw, embedder=None, *, match_distance=None):
         return {
             "canonical": ws_raw, "is_new": True, "matched_by": "new",
             "distance": None, "similar": [{"name": similar_name, "distance": distance}],
@@ -752,268 +741,24 @@ def _force_undecided_with_candidate(t: MemoryTools, backend, similar_name="金�
     t._ensure_semantic_backend = lambda: backend  # type: ignore
 
 
-def test_weak_high_confidence_silent_merge(tmp_path):
+def test_model_suggester_retired_undecided_asks(tmp_path):
+    """0.17.1 owner 拍板：模型建议器随 Qwen 判定引擎退役——undecided 规则
+    直接 ASK（suggester_retired_ask / no_similar_candidates）；旧 AUTO 合并
+    与全部 qwen_* decision_reason 不复存在。"""
     t = qwen_candidate_make_tools(tmp_path, "weak")
-    backend = _StubBackend(WorkspaceCandidateSignal("金营项目", "alias", 0.95, "同项目"))
-    _force_undecided_with_candidate(t, backend)
-    r = t.memory_write(content="x", workspace="金营", source_type="agent_generated", subject="test")
-    d = r["data"]
-    assert d["workspace_decision"] == "AUTO"
-    assert d["workspace_canonical"] == "金营项目"
-    assert d["workspace_matched_by"] == "qwen"
-
-
-def test_none_high_confidence_normalizes_without_acl_or_confirmed_alias(tmp_path):
-    t = qwen_candidate_make_tools(tmp_path, "none")
-    backend = _StubBackend(WorkspaceCandidateSignal("金营项目", "alias", 0.95, "同项目"))
-    _force_undecided_with_candidate(t, backend)
-    r = t.memory_write(content="x", workspace="金营", source_type="agent_generated", subject="test")
-    assert r["data"]["workspace_canonical"] == "金营项目"
-    assert t.db.get_workspace_decision("金营") is None
-    # none stays ACL-free: an unscoped search spans all workspaces, while an
-    # explicit filter canonicalizes then scopes that one query (spec §15.6).
-    # (The stub backend normalizes both writes to the same canonical.)
-    t.memory_write(content="y", workspace="其他", source_type="agent_generated", subject="other")
-    assert len(t.memory_search(query="")["data"]["results"]) == 2
-    scoped = t.memory_search(query="", workspace="金营项目")["data"]["results"]
-    assert {item.get("workspace_canonical") or item["workspace"] for item in scoped} == {"金营项目"}
-    assert t.memory_search(query="", workspace="别的项目")["data"]["results"] == []
-
-
-def test_weak_low_confidence_asks_not_merge(tmp_path):
-    t = qwen_candidate_make_tools(tmp_path, "weak")
-    backend = _StubBackend(WorkspaceCandidateSignal("金营项目", "related", 0.5, "可能相关"))
-    _force_undecided_with_candidate(t, backend)
-    r = t.memory_write(content="x", workspace="金营", source_type="agent_generated", subject="test")
-    d = r["data"]
-    assert d["workspace_decision"] == "ASK"
-    # NOT silently merged
-    assert d["workspace_canonical"] != "金营项目"
-    review = d.get("write_hints", {}).get("workspace_review")
-    assert review
-    merge = next(option for option in review["options"] if option["decision"] == "merge")
-    assert merge["authorization_required"] is True
-    assert "authorized" not in merge["call"]["data"]
-
-
-def test_near_miss_registers_only_final_canonical(tmp_path):
-    t = qwen_candidate_make_tools(tmp_path, "weak")
-    backend = _StubBackend(WorkspaceCandidateSignal("金营项目", "alias", 0.95, "同项目"))
-    _force_undecided_with_candidate(t, backend)
-    t.memory_write(content="x", workspace="金营", source_type="agent_generated", subject="test")
-    with t.db.connection() as conn:
-        names = {row["name"] for row in conn.execute("SELECT name FROM workspace_canonicals")}
-    assert "金营项目" in names
-    assert "金营" not in names
-
-
-def test_strict_never_silent_merges_even_high_conf(tmp_path):
-    t = qwen_candidate_make_tools(tmp_path, "strict")
-    backend = _StubBackend(WorkspaceCandidateSignal("金营项目", "alias", 0.99, "同项目"))
-    _force_undecided_with_candidate(t, backend)
-    r = t.memory_write(content="x", workspace="金营", source_type="agent_generated", subject="test")
-    d = r["data"]
-    # strict: high-conf candidate does NOT auto-merge; memory stays pending
-    assert d["workspace_canonical"] != "金营项目"
-    assert d.get("action_required") == "confirm_new_workspace"
-
-
-def test_no_backend_falls_back_to_ask(tmp_path):
-    t = qwen_candidate_make_tools(tmp_path, "weak")
-    _force_undecided_with_candidate(t, None)  # no backend
-    r = t.memory_write(content="x", workspace="金营", source_type="agent_generated", subject="test")
-    assert r["data"]["workspace_decision"] == "ASK"
-
-
-# ── strict-switch governance advisory (636 §9) ───────────────────────────────
-
-def test_strict_emits_governance_advisory(tmp_path, monkeypatch):
-    # isolation is file-only since 0.15.0; the strict advisory still fires.
-    import json
-
-    cfg = tmp_path / "config.json"
-    cfg.write_text(json.dumps({"isolation": "strict"}), encoding="utf-8")
-    monkeypatch.setenv("MEMORY_ARBITER_CONFIG", str(cfg))
-    s = Settings.from_env()
-    assert any("confirm_pending_workspace" in w and "migrate" in w for w in s.config_warnings)
-
-
-# ── decision-reason distinguishes model-absent from low-confidence (spec §8) ──
-
-def test_no_backend_reason_is_qwen_unavailable_not_low_conf(tmp_path):
-    t = qwen_candidate_make_tools(tmp_path, "weak")
-    _force_undecided_with_candidate(t, None)  # backend absent, candidates exist
-    r = t.memory_write(content="x", workspace="金营", source_type="agent_generated", subject="test")
-    d = r["data"]
-    assert d["workspace_decision"] == "ASK"
-    assert d["workspace_decision_reason"] == "qwen_unavailable"
-
-
-def test_genuine_low_confidence_reason_is_qwen_low_conf(tmp_path):
-    t = qwen_candidate_make_tools(tmp_path, "weak")
-    backend = _StubBackend(WorkspaceCandidateSignal("金营项目", "alias", 0.5, "可能相关"))
-    _force_undecided_with_candidate(t, backend)
-    r = t.memory_write(content="x", workspace="金营", source_type="agent_generated", subject="test")
-    d = r["data"]
-    assert d["workspace_decision"] == "ASK"
-    assert d["workspace_decision_reason"] == "qwen_low_conf"
-
-
-def test_rejected_candidate_reason_is_qwen_rejected(tmp_path):
-    t = qwen_candidate_make_tools(tmp_path, "none")
-    # Qwen suggests a candidate the user already rejected. The rule stays
-    # undecided (a second, non-rejected near-miss keeps it a near_miss), so the
-    # write path reaches the Qwen branch and must refuse the rejected merge.
-    backend = _StubBackend(WorkspaceCandidateSignal("金营项目", "alias", 0.95, "同项目"))
-
-    def fake_resolve(ws_raw, embedder=None, *, match_distance=None, register_new=True):
-        return {
-            "canonical": ws_raw, "is_new": True, "matched_by": "new", "distance": None,
-            "similar": [
-                {"name": "金营项目", "distance": 0.18},
-                {"name": "别的项目", "distance": 0.22},
-            ],
-            "rejected_canonicals": ["金营项目"],
-        }
-    t.db.resolve_workspace_canonical = fake_resolve  # type: ignore
-    t._ensure_semantic_backend = lambda: backend  # type: ignore
-    r = t.memory_write(content="x", workspace="金营", source_type="agent_generated", subject="test")
-    d = r["data"]
-    # A user-rejected candidate immediately overrides the high-confidence auto.
-    assert d["workspace_decision"] == "ASK"
-    assert d["workspace_canonical"] == "金营"
-    assert d["workspace_decision_reason"] == "qwen_rejected_candidate"
-
-
-# ── constrained decoding at the inference call site (2026-08-21 dry-run) ─────
-#
-# A real-library dry-run showed every workspace suggestion failing with
-# missing_json: Qwen2.5-0.5B answered in prose ("candidate: AgentLane\nrelation:
-# same_family") because suggest_workspace_candidate never passed a
-# response_format, unlike classify_pair. The parser tests above could not catch
-# it — only the call site can — so assert the schema is wired in and bounded.
-
-def test_workspace_suggester_uses_constrained_decoding() -> None:
-    from memory_arbiter.semantic_conflict import (
-        LocalGGUFSemanticBackend, _WORKSPACE_PROMPT, _WORKSPACE_RESPONSE_FORMAT,
+    tools = t["tools"] if isinstance(t, dict) else t
+    assert not hasattr(tools, "_suggest_workspace_candidate"), (
+        "retired suggester must be gone from MemoryTools"
     )
-
-    schema = _WORKSPACE_RESPONSE_FORMAT["schema"]
-    assert _WORKSPACE_RESPONSE_FORMAT["type"] == "json_object"
-    assert set(schema["required"]) == {"candidate", "relation", "confidence", "evidence"}
-    assert schema["additionalProperties"] is False
-    # relation is constrained to the spec's enum, so the model cannot invent one.
-    assert set(schema["properties"]["relation"]["enum"]) == {
-        "alias", "typo", "same_project", "same_family", "related", "unrelated", "uncertain",
-    }
-    # evidence is bounded: an unbounded field let the model paste whole memory
-    # bodies in and blow past max_tokens, truncating the JSON.
-    assert schema["properties"]["evidence"]["maxLength"] == 200
-    assert "只输出 JSON" in _WORKSPACE_PROMPT
-
-    captured: dict = {}
-
-    class _Llm:
-        @staticmethod
-        def create_chat_completion(**kwargs):
-            captured.update(kwargs)
-            return {"choices": [{"message": {"content": '{"candidate":"金营项目","relation":"alias","confidence":0.9,"evidence":"同项目"}'}}]}
-
-    backend = LocalGGUFSemanticBackend.__new__(LocalGGUFSemanticBackend)
-    import threading
-    backend._infer_lock = threading.Lock()
-    backend._cond = threading.Condition(threading.Lock())
-    backend._acquire_llm_for_call = lambda: _Llm()          # type: ignore[method-assign]
-    backend._release_llm_for_call = lambda: None            # type: ignore[method-assign]
-
-    signal = backend.suggest_workspace_candidate(
-        "金营", {"title": "金营项目排期", "key_sentences": ["交付计划"]}, ["金营项目"],
+    result = tools.memory_write(
+        content="占位内容", subject="zcode-data-migrat",
+        workspace="zcode-data-migrat", metadata={"entity": "x", "scope": "y"},
     )
-    assert captured.get("response_format") is _WORKSPACE_RESPONSE_FORMAT
-    assert signal.candidate == "金营项目"
-    assert signal.relation == "alias"
-    assert signal.error is None
+    data = result["data"]
+    reason = data.get("workspace_decision_reason")
+    assert reason not in {"qwen_high_conf", "qwen_low_conf", "qwen_timeout",
+                          "qwen_backend_error", "qwen_unavailable", "qwen_rejected"}, reason
 
-
-# ── Qwen only arbitrates in-threshold candidates (2026-08-21 real-lib A/B) ───
-#
-# A dry-run over the real 547-memory library had Qwen answer
-# "same_project@0.95" merging openclaw into proto-test at cosine 0.357 — far
-# past the 0.25 threshold — because the AUTO gate looked at Qwen confidence but
-# not vector distance. Fix: _suggest_workspace_candidate drops candidates beyond
-# workspace_qwen_candidate_distance before Qwen sees them, so an over-distance
-# name can never be resurrected into an AUTO merge.
-
-def test_over_distance_candidate_is_filtered_before_qwen(tmp_path):
-    t = qwen_candidate_make_tools(tmp_path, "none")
-    calls = []
-
-    class _SpyBackend:
-        def suggest_workspace_candidate(self, ws_raw, evidence, candidates, **kw):
-            calls.append(list(candidates))
-            return WorkspaceCandidateSignal(candidates[0] if candidates else None,
-                                            "same_project", 0.95, "hallucinated")
-
-    # Only over-distance neighbors (0.357 > 0.25): Qwen must not even be asked.
-    _force_undecided_with_candidate(t, _SpyBackend(), similar_name="proto-test", distance=0.357)
-    r = t.memory_write(content="x", workspace="openclaw", source_type="agent_generated", subject="s")
-    assert calls == []  # no candidate survived the distance bound
-    assert r["data"]["workspace_canonical"] == "openclaw"  # stays NEW, not merged
-    assert r["data"]["workspace_decision"] == "ASK"
-
-
-def test_in_threshold_candidate_still_reaches_qwen_and_auto_merges(tmp_path):
-    t = qwen_candidate_make_tools(tmp_path, "none")
-    backend = _StubBackend(WorkspaceCandidateSignal("金营项目", "same_project", 0.95, "同项目"))
-    _force_undecided_with_candidate(t, backend, distance=0.2)  # inside threshold
-    r = t.memory_write(content="x", workspace="金营", source_type="agent_generated", subject="s")
-    assert r["data"]["workspace_canonical"] == "金营项目"
-    assert r["data"]["workspace_decision"] == "AUTO"
-
-
-def test_qwen_candidate_pool_capped_at_top_k(tmp_path):
-    t = qwen_candidate_make_tools(tmp_path, "none")
-    seen = []
-
-    class _SpyBackend:
-        def suggest_workspace_candidate(self, ws_raw, evidence, candidates, **kw):
-            seen.append(list(candidates))
-            return WorkspaceCandidateSignal(None, "uncertain", None, "")
-
-    def fake_resolve(ws_raw, embedder=None, *, match_distance=None, register_new=True):
-        # Five in-threshold neighbors; only top-3 should reach Qwen.
-        return {"canonical": ws_raw, "is_new": True, "matched_by": "new", "distance": None,
-                "similar": [{"name": f"c{i}", "distance": 0.10 + i * 0.02} for i in range(5)],
-                "rejected_canonicals": []}
-    t.db.resolve_workspace_canonical = fake_resolve  # type: ignore
-    t._ensure_semantic_backend = lambda: _SpyBackend()  # type: ignore
-    t.memory_write(content="x", workspace="w", source_type="agent_generated", subject="s")
-    assert seen and len(seen[0]) == 3
-    assert seen[0] == ["c0", "c1", "c2"]
-
-
-# ── from test_workspace_alias_governance.py ──
-# make_tools renamed: alias_governance_make_tools; write/record_conflict identical to test_workspace_normalize.py versions -> single shared copy kept above
-
-"""Internal workspace redirect and negative-decision state.
-
-Pairwise alias actions are intentionally absent from the product surface. Tests
-cover the behaviors that remain load-bearing: deterministic resolver redirects,
-negative candidate suppression, rename/migrate forwarding, strict pending
-confirmation, collision safety, compact persistence, and rollback.
-"""
-from contextlib import contextmanager
-from pathlib import Path
-from types import SimpleNamespace
-import sqlite3
-import threading
-
-import pytest
-
-from memory_arbiter.config import Settings
-from memory_arbiter.db import MemoryDB, _normalize_alias_key
-from memory_arbiter.models import ConflictMember, ConflictValueGroup, MemoryStatus
-from memory_arbiter.tools import MemoryTools
 
 
 def alias_governance_make_tools(
@@ -1070,7 +815,7 @@ def test_compact_schema_has_no_event_ledger(tmp_path: Path) -> None:
 def test_confirmed_redirect_short_circuits_resolver(tmp_path: Path) -> None:
     tools = alias_governance_make_tools(tmp_path)
     decide(tools, "金营二期", "金营项目")
-    resolved = tools.db.resolve_workspace_canonical(" 金营二期 ", None, register_new=False)
+    resolved = tools.db.resolve_workspace_canonical(" 金营二期 ", None)
     assert resolved["canonical"] == "金营项目"
     assert resolved["matched_by"] == "confirmed_alias"
     state = tools.db.get_workspace_decision("金营二期")
@@ -1081,7 +826,7 @@ def test_negative_decisions_accumulate_and_suppress_candidates(tmp_path: Path) -
     tools = alias_governance_make_tools(tmp_path)
     decide(tools, "raw", "candidate-a", status="rejected")
     decide(tools, "raw", "candidate-b", status="rejected")
-    resolved = tools.db.resolve_workspace_canonical("raw", None, register_new=False)
+    resolved = tools.db.resolve_workspace_canonical("raw", None)
     assert set(resolved["rejected_canonicals"]) == {"candidate-a", "candidate-b"}
     with tools.db.connection() as conn:
         rows = conn.execute(
@@ -1161,11 +906,12 @@ def test_rename_moves_memories_and_prevents_old_name_resplit(tmp_path: Path) -> 
     tools = alias_governance_make_tools(tmp_path)
     memory_id = write(tools, "OldName")
     result = tools.memory_govern("rename_workspace_canonical", {
+        "workspace": "default",
         "old": "OldName", "new": "NewName", "authorized": True,
     })
     assert result["ok"] is True
     assert tools.db.get_memory(memory_id)["workspace_canonical"] == "NewName"
-    resolved = tools.db.resolve_workspace_canonical("OldName", None, register_new=False)
+    resolved = tools.db.resolve_workspace_canonical("OldName", None)
     assert resolved["canonical"] == "NewName"
     assert resolved["matched_by"] == "confirmed_alias"
 
@@ -1177,6 +923,7 @@ def test_rename_moves_conflicts_with_their_members(tmp_path: Path) -> None:
     conflict_id = record_conflict(tools, "OldName", left, right)
 
     result = tools.memory_govern("rename_workspace_canonical", {
+        "workspace": "default",
         "old": "OldName", "new": "NewName", "authorized": True,
     })
 
@@ -1192,11 +939,12 @@ def test_migrate_moves_memories_and_prevents_source_resplit(tmp_path: Path) -> N
     tools = alias_governance_make_tools(tmp_path)
     memory_id = write(tools, "Sub2")
     result = tools.memory_govern("migrate_workspace", {
+        "workspace": "default",
         "from": "Sub2", "to": "Main", "authorized": True,
     })
     assert result["ok"] is True
     assert tools.db.get_memory(memory_id)["workspace_canonical"] == "Main"
-    resolved = tools.db.resolve_workspace_canonical("Sub2", None, register_new=False)
+    resolved = tools.db.resolve_workspace_canonical("Sub2", None)
     assert resolved["canonical"] == "Main"
     assert resolved["matched_by"] == "confirmed_alias"
 
@@ -1208,6 +956,7 @@ def test_migrate_moves_conflicts_with_their_members(tmp_path: Path) -> None:
     conflict_id = record_conflict(tools, "Sub2", left, right)
 
     result = tools.memory_govern("migrate_workspace", {
+        "workspace": "default",
         "from": "Sub2", "to": "Main", "authorized": True,
     })
 
@@ -1230,6 +979,7 @@ def test_migrate_conflict_slot_collision_refused_up_front(tmp_path: Path) -> Non
     new_conflict = record_conflict(tools, "New", new_left, new_right)
 
     result = tools.memory_govern("migrate_workspace", {
+        "workspace": "default",
         "from": "Old", "to": "New", "authorized": True,
     })
 
@@ -1249,6 +999,7 @@ def test_migrate_conflict_slot_collision_refused_up_front(tmp_path: Path) -> Non
             "UPDATE conflicts SET status='resolved' WHERE id=?", (old_conflict,),
         )
     retry = tools.memory_govern("migrate_workspace", {
+        "workspace": "default",
         "from": "Old", "to": "New", "authorized": True,
     })
     assert retry["ok"] is True
@@ -1266,6 +1017,7 @@ def test_rename_conflict_slot_collision_refused_up_front(tmp_path: Path) -> None
     new_conflict = record_conflict(tools, "New", new_left, new_right)
 
     result = tools.memory_govern("rename_workspace_canonical", {
+        "workspace": "default",
         "old": "Old", "new": "New", "authorized": True,
     })
 
@@ -1284,6 +1036,7 @@ def test_migrate_different_slot_conflicts_do_not_collide(tmp_path: Path) -> None
     conflict_id = record_conflict(tools, "Old", left, right)
 
     result = tools.memory_govern("migrate_workspace", {
+        "workspace": "default",
         "from": "Old", "to": "New", "authorized": True,
     })
 
@@ -1344,11 +1097,12 @@ def test_normalize_reports_refused_merge_as_skipped_in_plan_and_execute(tmp_path
     assert tools.db.get_memory(winner_left)["workspace_canonical"] == "AgentLane"
     assert any("would collide" in warning for warning in executed["warnings"])
     result = tools.memory_govern("migrate_workspace", {
+        "workspace": "default",
         "from": "mema", "to": "memory-arbiter-mcp", "authorized": True,
     })
     assert result["ok"] is True
     assert result["data"]["memories_updated"] == 0
-    resolved = tools.db.resolve_workspace_canonical("mema", None, register_new=False)
+    resolved = tools.db.resolve_workspace_canonical("mema", None)
     assert resolved["canonical"] == "memory-arbiter-mcp"
 
 
@@ -1357,10 +1111,11 @@ def test_exact_negative_blocks_rename_forwarding(tmp_path: Path) -> None:
     write(tools, "Old")
     decide(tools, "Old", "New", status="rejected")
     result = tools.memory_govern("rename_workspace_canonical", {
+        "workspace": "default",
         "old": "Old", "new": "New", "authorized": True,
     })
     assert result["ok"] is True
-    resolved = tools.db.resolve_workspace_canonical("Old", None, register_new=False)
+    resolved = tools.db.resolve_workspace_canonical("Old", None)
     assert resolved["matched_by"] != "confirmed_alias"
     assert "New" in resolved["rejected_canonicals"]
 
@@ -1370,9 +1125,10 @@ def test_unrelated_negative_does_not_block_rename_forwarding(tmp_path: Path) -> 
     write(tools, "Old")
     decide(tools, "Old", "Other", status="rejected")
     tools.memory_govern("rename_workspace_canonical", {
+        "workspace": "default",
         "old": "Old", "new": "New", "authorized": True,
     })
-    resolved = tools.db.resolve_workspace_canonical("Old", None, register_new=False)
+    resolved = tools.db.resolve_workspace_canonical("Old", None)
     assert resolved["canonical"] == "New"
     with tools.db.connection() as conn:
         rejected = conn.execute(
@@ -1388,6 +1144,7 @@ def test_repoint_is_collision_safe_and_preserves_existing_decision(tmp_path: Pat
     decide(tools, "foo", "Old", status="rejected")
     decide(tools, "foo", "New", status="rejected")
     result = tools.memory_govern("rename_workspace_canonical", {
+        "workspace": "default",
         "old": "Old", "new": "New", "authorized": True,
     })
     assert result["ok"] is True
@@ -1403,6 +1160,7 @@ def test_case_only_rename_leaves_no_self_redirect(tmp_path: Path) -> None:
     tools = alias_governance_make_tools(tmp_path)
     memory_id = write(tools, "ProjectX")
     result = tools.memory_govern("rename_workspace_canonical", {
+        "workspace": "default",
         "old": "ProjectX", "new": "projectx", "authorized": True,
     })
     assert result["ok"] is True
@@ -1431,6 +1189,7 @@ def test_confirm_pending_case_variant_reuses_raw_spelling(tmp_path: Path) -> Non
     tools = alias_governance_make_tools(tmp_path, isolation="strict")
     memory_id = write(tools, "BrandNew")
     result = tools.memory_govern("confirm_pending_workspace", {
+        "workspace": "BrandNew",
         "memory_id": memory_id, "canonical": "brandnew", "authorized": True,
     })
     assert result["ok"] is True
@@ -1449,6 +1208,7 @@ def test_default_pending_cannot_be_confirmed_into_project(tmp_path: Path) -> Non
         source_type="agent_generated", status="pending",
     )
     result = tools.memory_govern("confirm_pending_workspace", {
+        "workspace": "default",
         "memory_id": written["data"]["id"], "canonical": "ProjectX", "authorized": True,
     })
     assert result["ok"] is False
@@ -1460,15 +1220,17 @@ def test_competing_move_does_not_split_memory_and_redirect(tmp_path: Path) -> No
     tools = alias_governance_make_tools(tmp_path)
     memory_id = write(tools, "Old")
     first = tools.memory_govern("rename_workspace_canonical", {
+        "workspace": "default",
         "old": "Old", "new": "A", "authorized": True,
     })
     second = tools.memory_govern("rename_workspace_canonical", {
+        "workspace": "default",
         "old": "Old", "new": "B", "authorized": True,
     })
     assert first["ok"] is True
     assert second["ok"] is False
     assert tools.db.get_memory(memory_id)["workspace_canonical"] == "A"
-    assert tools.db.resolve_workspace_canonical("Old", None, register_new=False)["canonical"] == "A"
+    assert tools.db.resolve_workspace_canonical("Old", None)["canonical"] == "A"
 
 
 def test_confirm_pending_exact_name_activates_without_self_redirect(tmp_path: Path) -> None:
@@ -1476,6 +1238,7 @@ def test_confirm_pending_exact_name_activates_without_self_redirect(tmp_path: Pa
     memory_id = write(tools, "BrandNew")
     assert tools.db.get_memory(memory_id)["status"] == MemoryStatus.PENDING.value
     result = tools.memory_govern("confirm_pending_workspace", {
+        "workspace": "BrandNew",
         "memory_id": memory_id, "canonical": "BrandNew", "authorized": True,
     })
     assert result["ok"] is True
@@ -1487,16 +1250,24 @@ def test_confirm_pending_exact_name_activates_without_self_redirect(tmp_path: Pa
 
 
 def test_confirm_pending_different_name_records_redirect_atomically(tmp_path: Path) -> None:
-    tools = alias_governance_make_tools(tmp_path, isolation="strict")
-    memory_id = write(tools, "abbrev")
+    """redirect 力学（raw≠canonical → confirmed alias 原子落库）在 none 隔离 +
+    显式 pending 写入下钉住——strict 下该形态被第二道校验正确禁止（见
+    test_confirm_pending_strict_forbids_cross_canonical）。"""
+    tools = alias_governance_make_tools(tmp_path, isolation="none")
+    written = tools.memory_write(
+        content="abbrev scope", subject="redirect", workspace="abbrev",
+        source_type="agent_generated", status="pending",
+    )
+    memory_id = written["data"]["id"]
     result = tools.memory_govern("confirm_pending_workspace", {
+        "workspace": "abbrev",
         "memory_id": memory_id, "canonical": "CanonicalProject", "authorized": True,
     })
     assert result["ok"] is True
     record = tools.db.get_memory(memory_id)
     assert record["status"] == MemoryStatus.ACTIVE.value
     assert record["workspace_canonical"] == "CanonicalProject"
-    assert tools.db.resolve_workspace_canonical("abbrev", None, register_new=False)["canonical"] == "CanonicalProject"
+    assert tools.db.resolve_workspace_canonical("abbrev", None)["canonical"] == "CanonicalProject"
 
 
 def test_confirm_pending_rolls_back_decision_assignment_and_activation(tmp_path: Path, monkeypatch) -> None:
@@ -1509,6 +1280,7 @@ def test_confirm_pending_rolls_back_decision_assignment_and_activation(tmp_path:
 
     monkeypatch.setattr(tools.db, "set_memory_workspace_canonical_on_conn", fail)
     result = tools.memory_govern("confirm_pending_workspace", {
+        "workspace": "default",
         "memory_id": memory_id, "canonical": "CanonicalProject", "authorized": True,
     })
     assert result["ok"] is False
@@ -1571,9 +1343,17 @@ def test_negative_decision_filters_real_vector_candidate(tmp_path: Path) -> None
             return SimpleNamespace(embedding=[1.0, 0.0])
 
     embedder = Embedder()
-    tools.db.resolve_workspace_canonical("Target", embedder, register_new=True)
+    # P2 #9: resolve is read-only now — register the fixture canonical
+    # (+vector) the way the write path does: canonical row first, then the
+    # derived vector via the two-step publish API.
+    with tools.db.write_transaction() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO workspace_canonicals(name,created_at) "
+            "VALUES('Target',datetime('now'))",
+        )
+    tools.db.workspaces.publish_workspace_canonical_vector("Target", [1.0, 0.0])
     decide(tools, "raw", "Target", status="rejected")
-    resolved = tools.db.resolve_workspace_canonical("raw", embedder, register_new=False)
+    resolved = tools.db.resolve_workspace_canonical("raw", embedder)
     assert resolved["canonical"] != "Target"
     assert "Target" not in [item["name"] for item in resolved["similar"]]
 
@@ -1768,16 +1548,16 @@ def test_mechanical_variant_reuses_existing_canonical(tmp_path):
         conn.execute("INSERT OR IGNORE INTO workspace_canonicals(name,created_at) VALUES('AgentLane',datetime('now'))")
 
     for raw in ["agent-lane", "AGENTLANE", "agent_lane", "Agent Lane"]:
-        r = db.resolve_workspace_canonical(raw, None, register_new=False)
+        r = db.resolve_workspace_canonical(raw, None)
         assert r["canonical"] == "AgentLane", raw
         assert r["matched_by"] == "mechanical_variant", raw
 
     # Exact spelling still takes the exact tier.
-    exact = db.resolve_workspace_canonical("AgentLane", None, register_new=False)
+    exact = db.resolve_workspace_canonical("AgentLane", None)
     assert exact["matched_by"] == "exact"
 
     # A genuinely different name is NOT folded into the canonical.
-    other = db.resolve_workspace_canonical("agentlanes-cli", None, register_new=False)
+    other = db.resolve_workspace_canonical("agentlanes-cli", None)
     assert other["matched_by"] == "new"
     assert other["canonical"] == "agentlanes-cli"
 
@@ -1788,7 +1568,7 @@ def test_mechanical_variant_does_not_collapse_blanks(tmp_path):
     db = t.db
     with db.write_transaction() as conn:
         conn.execute("INSERT OR IGNORE INTO workspace_canonicals(name,created_at) VALUES('AgentLane',datetime('now'))")
-    r = db.resolve_workspace_canonical("   ", None, register_new=False)
+    r = db.resolve_workspace_canonical("   ", None)
     assert r["canonical"] == "default"
     assert r["matched_by"] == "fallback"
 
@@ -1866,9 +1646,9 @@ def test_deep_doctor_owns_integrity_generation_and_vector_health(tmp_path):
         )
         memory_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
         conn.execute(
-            """INSERT INTO memory_evidence(memory_id,memory_version,content_hash,
-               unit_index,kind,text,start_offset,end_offset,created_at)
-               VALUES(?,1,'hash',0,'text','body',0,4,'2026-01-01T00:00:00Z')""",
+            """INSERT INTO memory_row(memory_id,memory_version,content_hash,
+               row_index,kind,text,start_offset,end_offset,created_at)
+               VALUES(?,1,'hash',0,'sentence','body',0,4,'2026-01-01T00:00:00Z')""",
             (memory_id,),
         )
 
@@ -2010,6 +1790,7 @@ def test_snapshot_after_rename_records_final_registry(tmp_path):
     _write(tools, "a", "projA")
     _write(tools, "b", "projA2")
     renamed = tools.memory_govern("rename_workspace_canonical", {
+        "workspace": "default",
         "old": "projA2", "new": "projA", "reason": "duplicate spelling", "authorized": True,
     })
     assert renamed["ok"] is True
@@ -2131,6 +1912,7 @@ def test_confirm_pending_workspace_with_default_synonym_raw_no_longer_dead_ends(
     # An agent echoing the memory's own workspace as canonical must NOT
     # create a phantom "unknown" canonical — it folds to "default".
     r = tools.memory_govern("confirm_pending_workspace", {
+        "workspace": "default",
         "memory_id": mid, "canonical": "unknown", "authorized": True,
     })
     assert r["ok"] is True, r
@@ -2206,3 +1988,442 @@ def test_tools_forwarder_exists(tmp_path):
     r = tools.memory_confirm_workspaces(authorized=True)
     assert r["ok"] is True
     assert _sidecar(tools).exists()
+
+
+# ── 0.17.1 confirm 清场（prompt suppression 存量治理） ─────────────────────────
+
+def _enqueue_pending_workspace_row(
+    tools: MemoryTools, mid: int, own: str, suspected: str, tag: str,
+) -> str:
+    """Pending workspace row with the FULL detail envelope — 清场解析
+    (current_workspace, suspected_workspace)；detail={} 的行自愈/清场不认。"""
+    import hashlib
+
+    candidate_key_hash = hashlib.sha256(f"confirm-sweep:{tag}".encode("utf-8")).hexdigest()
+    outcome = tools.db.scan_queue.enqueue(
+        kind="workspace",
+        workspace_canonical=own,
+        candidate_key_hash=candidate_key_hash,
+        member_versions=[{"memory_id": mid, "version": 1}],
+        evidence=[],
+        reason="t",
+        severity="normal",
+        source="test",
+        detail={"current_workspace": own, "suspected_workspace": suspected},
+    )
+    assert outcome.get("outcome") == "queued", outcome
+    return candidate_key_hash
+
+
+def _workspace_row_status(tools: MemoryTools, candidate_key_hash: str) -> str:
+    with tools.db.connection() as conn:
+        row = conn.execute(
+            "SELECT status FROM scan_queue WHERE candidate_key_hash=?",
+            (candidate_key_hash,),
+        ).fetchone()
+    assert row is not None
+    return str(row[0])
+
+
+def test_confirm_expires_pending_confirmed_pairs(tmp_path):
+    """confirm 快照落地后：双确认对的 pending workspace 行即时 expired；
+    未确认对（projB→projC，projC 不在快照里）不动。"""
+    tools = review_doctor_make_tools(tmp_path)
+    mid_a = _write(tools, "a", "projA")
+    mid_b = _write(tools, "b", "projB")
+    stale_hash = _enqueue_pending_workspace_row(tools, mid_a, "projA", "projB", "stale")
+    live_hash = _enqueue_pending_workspace_row(tools, mid_b, "projB", "projC", "live")
+
+    r = tools.memory_govern("confirm_workspaces", {"authorized": True})
+    assert r["ok"] is True
+    assert r["data"]["suppressed_pending"] == 1
+    assert _workspace_row_status(tools, stale_hash) == "expired"
+    assert _workspace_row_status(tools, live_hash) == "pending"
+
+
+def test_confirm_sweep_falls_back_to_canonical_column(tmp_path):
+    """R2 F4 补测：detail 缺 current_workspace（旧版/半完整行）时清场回退
+    workspace_canonical 列——半 detail 行不比空 detail 行糟，仍须被治理。"""
+    tools = review_doctor_make_tools(tmp_path)
+    mid_a = _write(tools, "a", "projA")
+    _write(tools, "b", "projB")  # 注册 projB，确认快照须含两端才会清场
+    import hashlib
+
+    candidate_key_hash = hashlib.sha256(b"confirm-sweep:col-fallback").hexdigest()
+    outcome = tools.db.scan_queue.enqueue(
+        kind="workspace",
+        workspace_canonical="projA",
+        candidate_key_hash=candidate_key_hash,
+        member_versions=[{"memory_id": mid_a, "version": 1}],
+        evidence=[], reason="t", severity="normal", source="test",
+        detail={"suspected_workspace": "projB"},  # 无 current_workspace
+    )
+    assert outcome.get("outcome") == "queued", outcome
+
+    r = tools.memory_govern("confirm_workspaces", {"authorized": True})
+    assert r["ok"] is True
+    assert r["data"]["suppressed_pending"] == 1
+    assert _workspace_row_status(tools, candidate_key_hash) == "expired"
+
+
+def test_confirm_expiry_failure_warns_not_fails(tmp_path, monkeypatch):
+    """清场抛错绝不回滚快照：confirmed 仍 true、suppressed_pending=-1、
+    降级 warning（下次 kick 自愈兜底）。"""
+    tools = review_doctor_make_tools(tmp_path)
+    mid = _write(tools, "a", "projA")
+    row_hash = _enqueue_pending_workspace_row(tools, mid, "projA", "projB", "boom")
+
+    def _raising_write_transaction(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(tools.db, "write_transaction", _raising_write_transaction)
+    r = tools.memory_govern("confirm_workspaces", {"authorized": True})
+    assert r["ok"] is True
+    assert r["data"]["confirmed"] is True
+    assert r["data"]["suppressed_pending"] == -1
+    assert any("清场失败" in w for w in r["warnings"]), r["warnings"]
+    assert _sidecar(tools).exists(), "快照不得被清场失败回滚"
+    assert _workspace_row_status(tools, row_hash) == "pending"
+
+
+# ── 0.17.1 追加（2026-10-01）：mechanical_variant AUTO 补判 + rejected 机械通道免疫 ──
+#
+# 方案：ZCodeProject/docs/mema-ws-normalization-cleanup-plan-2026-10-01.md（v4）。
+# G 守卫（变体对拒分）之后，新的 twin rejected 行无法再经治理产生；本节的
+# rejected 行一律直插表内，模拟的是存量行（legacy）——免疫逻辑消费的正是它们。
+
+
+def _insert_legacy_rejected_row(tools, alias: str, canonical: str) -> None:
+    with tools.db.write_transaction() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO workspace_aliases(alias_workspace,canonical,status,updated_at) "
+            "VALUES(?,?,'rejected',datetime('now'))",
+            (_normalize_alias_key(alias), canonical),
+        )
+
+
+def test_rule_decision_mechanical_variant_is_auto():
+    resolved = {"matched_by": "mechanical_variant", "canonical": "AgentLane",
+                "similar": [], "rejected_canonicals": []}
+    d = wr.rule_decision("agent-lane", resolved, {"title": "t", "first_para": "内容"})
+    assert d["decision"] == "AUTO"
+    assert d["reason"] == "mechanical_variant"
+    assert d["canonical"] == "AgentLane"
+
+
+def test_rejected_legacy_row_blocks_mechanical_fold(tmp_path):
+    """被拒原名（legacy rejected 行）不再被 1b 机械折叠进被拒桶（C 层1）。"""
+    t = rules_make_tools(tmp_path, "none")
+    db = t.db
+    with db.write_transaction() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO workspace_canonicals(name,created_at) "
+            "VALUES('AgentLane',datetime('now'))"
+        )
+    _insert_legacy_rejected_row(t, "agent-lane", "AgentLane")
+    r = db.resolve_workspace_canonical("agent-lane", None)
+    assert r["matched_by"] == "new"
+    assert r["canonical"] == "agent-lane"
+    assert "AgentLane" in r["rejected_canonicals"]
+
+
+def test_rejected_ghost_variant_second_hop_blocks_fold(tmp_path):
+    """幽灵变体（agent-lane 被拒后写 agent_lane）经机械键第二跳吃到免疫（C 层2）。"""
+    t = rules_make_tools(tmp_path, "none")
+    db = t.db
+    with db.write_transaction() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO workspace_canonicals(name,created_at) "
+            "VALUES('AgentLane',datetime('now'))"
+        )
+    _insert_legacy_rejected_row(t, "agent-lane", "AgentLane")
+    r = db.resolve_workspace_canonical("agent_lane", None)
+    assert r["matched_by"] == "new"
+    assert r["canonical"] == "agent_lane"
+    assert "AgentLane" in r["rejected_canonicals"]
+
+
+def test_rejected_twin_does_not_block_exact_canonical(tmp_path):
+    """桶本名 exact 命中不受 rejected 影响，规则层 AUTO（合法写入）。"""
+    t = rules_make_tools(tmp_path, "none")
+    db = t.db
+    with db.write_transaction() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO workspace_canonicals(name,created_at) "
+            "VALUES('AgentLane',datetime('now'))"
+        )
+    _insert_legacy_rejected_row(t, "agent-lane", "AgentLane")
+    r = db.resolve_workspace_canonical("AgentLane", None)
+    assert r["matched_by"] == "exact"
+    d = wr.rule_decision("AgentLane", r, {"title": "t", "first_para": "x"})
+    assert d["decision"] == "AUTO"
+
+
+def test_confirmed_ghost_variant_still_folds(tmp_path):
+    """confirmed 幽灵变体不参与第二跳，仍走 1b 折叠（第二跳只消费 rejected）。"""
+    t = rules_make_tools(tmp_path, "none")
+    db = t.db
+    ok, errors = db.workspaces.record_workspace_decision(
+        "agent-lane", "AgentLane", status="confirmed",
+    )
+    assert ok, errors
+    r = db.resolve_workspace_canonical("agent_lane", None)
+    assert r["matched_by"] == "mechanical_variant"
+    assert r["canonical"] == "AgentLane"
+
+
+def test_multiple_rejected_twin_rows_all_aggregated(tmp_path):
+    """同机械键多行 rejected 全量聚合（真实库 agent-chancellor 双行形状，R2-P0c）。"""
+    t = rules_make_tools(tmp_path, "none")
+    db = t.db
+    with db.write_transaction() as conn:
+        for name in ("AgentLane", "MemoryBank"):
+            conn.execute(
+                "INSERT OR IGNORE INTO workspace_canonicals(name,created_at) "
+                "VALUES(?,datetime('now'))",
+                (name,),
+            )
+    _insert_legacy_rejected_row(t, "agent-chancellor", "AgentLane")
+    _insert_legacy_rejected_row(t, "agent-chancellor", "MemoryBank")
+    r = db.resolve_workspace_canonical("agent_chancellor", None)
+    assert "AgentLane" in r["rejected_canonicals"]
+    assert "MemoryBank" in r["rejected_canonicals"]
+    assert r["matched_by"] == "new"
+    assert r["canonical"] == "agent_chancellor"
+
+
+def test_direct_rejected_hit_aggregates_sibling_spellings(tmp_path):
+    """P2 #5：直中（alias key 精确命中拒绝行）也聚合机械兄弟拼写的拒绝——
+    separate "agent-lane"→X 与 "agent_lane"→Y 后再解析 "agent-lane"，
+    X/Y 同时进抑制名单，向量并桶被拒。"""
+    pytest.importorskip("sqlite_vec")
+    t = alias_governance_make_tools(tmp_path, vec=True)
+    if not t.db.state.sqlite_vec_available:
+        pytest.skip("sqlite-vec unavailable")
+
+    class Embedder:
+        embedding_space_id = "test"
+        dim = 2
+
+        def embed_text(self, prefix="", body=""):
+            return SimpleNamespace(embedding=[1.0, 0.0])
+
+    embedder = Embedder()
+    with t.db.write_transaction() as conn:
+        for target in ("AlphaBucket", "BetaBucket"):
+            conn.execute(
+                "INSERT OR IGNORE INTO workspace_canonicals(name,created_at) "
+                "VALUES(?,datetime('now'))", (target,),
+            )
+    for target in ("AlphaBucket", "BetaBucket"):
+        t.db.workspaces.publish_workspace_canonical_vector(target, [1.0, 0.0])
+    ok1, e1 = t.db.workspaces.record_workspace_decision(
+        "agent-lane", "AlphaBucket", status="rejected",
+    )
+    ok2, e2 = t.db.workspaces.record_workspace_decision(
+        "agent_lane", "BetaBucket", status="rejected",
+    )
+    assert ok1 and ok2, (e1, e2)
+
+    r = t.db.resolve_workspace_canonical("agent-lane", embedder)
+    # both spellings' rejections aggregated on the direct hit
+    assert "AlphaBucket" in r["rejected_canonicals"]
+    assert "BetaBucket" in r["rejected_canonicals"]
+    # the vector merge into the (distance-0) rejected targets is refused
+    assert r["matched_by"] == "new"
+    assert r["canonical"] == "agent-lane"
+    assert {s["name"] for s in r["similar"]} == set()
+
+
+def test_ghost_hop_does_not_redirect_unrelated_registered_twin(tmp_path):
+    """跨身份 rejected（foo-bar→ProjectX）不误伤已注册的孪生拼写 foo_bar（exact 优先）。"""
+    t = rules_make_tools(tmp_path, "none")
+    db = t.db
+    with db.write_transaction() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO workspace_canonicals(name,created_at) "
+            "VALUES('foo_bar',datetime('now'))"
+        )
+    ok, errors = db.workspaces.record_workspace_decision(
+        "foo-bar", "ProjectX", status="rejected",
+    )
+    assert ok, errors
+    r = db.resolve_workspace_canonical("foo_bar", None)
+    assert r["matched_by"] == "exact"
+    assert r["canonical"] == "foo_bar"
+
+
+def test_separate_refuses_mechanical_twin_pair(tmp_path):
+    """G 守卫：同一机械身份的变体对 separate 直接拒绝（owner 2026-10-01 拍板）。"""
+    t = rules_make_tools(tmp_path, "none")
+    db = t.db
+    with db.write_transaction() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO workspace_canonicals(name,created_at) "
+            "VALUES('AgentLane',datetime('now'))"
+        )
+    result = t.memory_govern("separate_workspace_alias", {
+        "workspace": "default",
+        "alias": "agent-lane", "canonical": "AgentLane",
+        "reason": "try to split", "authorized": True,
+    })
+    assert result["ok"] is False, result["data"]
+    assert "spelling variants" in result["data"]["error"]
+    # 幽灵拼写同样被拒
+    ok2, errors2 = db.workspaces.record_workspace_decision(
+        "agent_lane", "AgentLane", status="rejected",
+    )
+    assert not ok2 and errors2
+    with db.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM workspace_aliases").fetchone()[0] == 0
+    # confirmed 方向不受守卫影响（ twin 确认=折叠语义，合法）
+    ok3, errors3 = db.workspaces.record_workspace_decision(
+        "agent-lane", "AgentLane", status="confirmed",
+    )
+    assert ok3, errors3
+
+
+def test_strict_rejected_name_goes_pending(tmp_path):
+    """strict 下被拒原名落 new → strict_block → PENDING + confirm 流程（新桶须确认）。"""
+    t = rules_make_tools(tmp_path, "strict")
+    db = t.db
+    with db.write_transaction() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO workspace_canonicals(name,created_at) "
+            "VALUES('AgentLane',datetime('now'))"
+        )
+    _insert_legacy_rejected_row(t, "agent-lane", "AgentLane")
+    r = t.memory_write(
+        content="x", subject="s", workspace="agent-lane",
+        source_type="agent_generated",
+    )
+    assert r["ok"], r
+    data = r["data"]
+    assert data["workspace_canonical"] == "agent-lane"
+    assert data.get("action_required") == "confirm_new_workspace"
+    assert db.get_memory(data["id"])["status"] == MemoryStatus.PENDING.value
+
+
+def test_strict_mechanical_variant_reuses_active(tmp_path):
+    """strict 下机械变体（确定性身份）直接 ACTIVE 复用，不 ASK 不 PENDING。"""
+    t = rules_make_tools(tmp_path, "strict")
+    db = t.db
+    with db.write_transaction() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO workspace_canonicals(name,created_at) "
+            "VALUES('AgentLane',datetime('now'))"
+        )
+    r = t.memory_write(
+        content="x", subject="s", workspace="agent-lane",
+        source_type="agent_generated",
+    )
+    assert r["ok"], r
+    data = r["data"]
+    assert data["workspace_decision"] == "AUTO"
+    assert data["workspace_canonical"] == "AgentLane"
+    assert db.get_memory(data["id"])["status"] == MemoryStatus.ACTIVE.value
+
+
+def test_migrate_drops_twin_contradicting_rejection_with_warning(tmp_path):
+    """R2-P1：migrate repoint 不得制造孪生 rejected 行——会咬合劈桶的行丢弃+警告。"""
+    t = rules_make_tools(tmp_path, "none")
+    db = t.db
+    register(t, "OldProj", "agent-lane")
+    # 跨身份合法 rejected（agent_lane ↛ OldProj，G 允许创建）
+    _insert_legacy_rejected_row(t, "agent_lane", "OldProj")
+    updated, warnings, _committed = db.workspaces.migrate_workspace("OldProj", "agent-lane")
+    assert updated >= 0
+    assert any("dropped while repointing" in w and "spelling variant" in w for w in warnings), warnings
+    # 行已丢弃（不再存在会咬合的孪生 rejected），折叠语义恢复
+    r = db.resolve_workspace_canonical("agent_lane", None)
+    assert r["matched_by"] == "mechanical_variant"
+    assert r["canonical"] == "agent-lane"
+    # 非孪生 rejected 行照常跟随迁移
+    _insert_legacy_rejected_row(t, "unrelated", "agent-lane")
+    _u2, w2, _c2 = db.workspaces.migrate_workspace("agent-lane", "MemoryBank")
+    assert not any("dropped while repointing" in w for w in w2), w2
+    with db.connection() as conn:
+        rows = [
+            (str(row["alias_workspace"]), str(row["canonical"]), str(row["status"]))
+            for row in conn.execute(
+                "SELECT alias_workspace,canonical,status FROM workspace_aliases"
+            )
+        ]
+    assert ("unrelated", "MemoryBank", "rejected") in rows
+
+
+def test_multiple_rejected_rows_across_spellings_all_aggregated(tmp_path):
+    """同机械键**不同拼写** alias 的多行 rejected 全量聚合（R2-P2 变异实测钉性缺口）。"""
+    t = rules_make_tools(tmp_path, "none")
+    db = t.db
+    with db.write_transaction() as conn:
+        for name in ("AgentLane", "MemoryBank"):
+            conn.execute(
+                "INSERT OR IGNORE INTO workspace_canonicals(name,created_at) "
+                "VALUES(?,datetime('now'))",
+                (name,),
+            )
+    _insert_legacy_rejected_row(t, "agent-chancellor", "AgentLane")
+    _insert_legacy_rejected_row(t, "agent_chancellor", "MemoryBank")
+    # 原名带空格形态：精确键双 miss，只可能经第二跳聚合
+    r = db.resolve_workspace_canonical("agent chancellor", None)
+    assert "AgentLane" in r["rejected_canonicals"]
+    assert "MemoryBank" in r["rejected_canonicals"]
+    assert r["matched_by"] == "new"
+
+
+def test_workspace_required_on_govern_actions_surface(tmp_path: Path) -> None:
+    """C1 必传（owner 2026-10-03）：五个改桶动作缺/空 workspace 在 validation
+    层打回，报错带 workspaces 列表指路；move/separate 补钉（remember/confirm/
+    rename 已入 golden 语料）。"""
+    tools = alias_governance_make_tools(tmp_path, isolation="none")
+    for action, payload in (
+        ("separate_workspace_alias", {"alias": "agent-lane", "canonical": "AgentLane", "authorized": True}),
+        ("move_memories_workspace", {"memory_ids": [1], "new_workspace": "ws", "authorized": True}),
+    ):
+        missing = tools.memory_govern(action, dict(payload))
+        assert missing["ok"] is False, action
+        assert missing["data"]["field"] == "workspace"
+        assert "memory_review(view='workspaces')" in missing["data"]["reason"]
+        empty = tools.memory_govern(action, {**payload, "workspace": "  "})
+        assert empty["ok"] is False, action
+        assert empty["data"]["field"] == "workspace"
+
+
+def test_memory_review_workspaces_view(tmp_path: Path) -> None:
+    """C2：workspaces 列表——计数/别名/空桶标注/排序/limit 单 SQL 口径。"""
+    tools = alias_governance_make_tools(tmp_path, isolation="none")
+    write(tools, "Alpha")  # pending（none 下 generic 新名走 ASK→pending 或 active，断言口径放宽）
+    write(tools, "Beta")
+    result = tools.memory_review("workspaces", {"limit": 50})
+    assert result["ok"] is True
+    ws = {b["canonical"]: b for b in result["data"]["workspaces"]}
+    assert "Alpha" in ws and "Beta" in ws
+    alpha = ws["Alpha"]
+    for key in ("active_count", "pending_count", "alias_count", "last_write_at", "empty"):
+        assert key in alpha
+    limited = tools.memory_review("workspaces", {"limit": 1})
+    assert limited["ok"] is True
+    assert limited["data"]["count"] == 1
+
+
+def test_memory_review_workspaces_strict_admitted_only(tmp_path: Path) -> None:
+    """C2 strict ACL：workspaces 视图只见 admitted 集；无 canonical=denied 优先。"""
+    tools = alias_governance_make_tools(tmp_path, isolation="strict")
+    tools.settings.workspace = "Alpha"
+    write(tools, "Alpha")
+    write(tools, "Beta")
+    with tools.db.connection() as conn:
+        pending = conn.execute(
+            "SELECT id FROM memories WHERE workspace='Alpha' AND status='pending'"
+        ).fetchone()
+    if pending:
+        tools.memory_govern("confirm_pending_workspace", {
+            "workspace": "Alpha", "memory_id": pending[0],
+            "canonical": "Alpha", "authorized": True,
+        })
+    result = tools.memory_review("workspaces", {"workspace": "Alpha"})
+    assert result["ok"] is True
+    names = {b["canonical"] for b in result["data"]["workspaces"]}
+    assert "Alpha" in names
+    assert "Beta" not in names, "strict 调用者不得看见 scope 外桶"

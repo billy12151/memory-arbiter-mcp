@@ -41,7 +41,7 @@ def _scan(tools: MemoryTools, data: dict | None = None) -> dict:
 
 def test_default_page_is_lightweight(vec_tools: MemoryTools) -> None:
     _write_pair(vec_tools, "deploy region is eu-west-1")
-    assert vec_tools.wait_evidence_worker_drained(timeout=5)
+    assert vec_tools.wait_semantic_worker_drained(timeout=5)
 
     page = _scan(vec_tools)
     candidates = page["candidates"]
@@ -60,7 +60,7 @@ def test_default_page_is_lightweight(vec_tools: MemoryTools) -> None:
 
 def test_include_quotes_restores_full_envelope(vec_tools: MemoryTools) -> None:
     _write_pair(vec_tools, "deploy region is eu-west-1")
-    assert vec_tools.wait_evidence_worker_drained(timeout=5)
+    assert vec_tools.wait_semantic_worker_drained(timeout=5)
 
     page = _scan(vec_tools, {"include_quotes": True})
     candidates = page["candidates"]
@@ -85,7 +85,7 @@ def test_lightweight_page_size_bound(vec_tools: MemoryTools) -> None:
             content=f"clean library row {index} with padding text " * 40,
             subject=f"row-{index}", tags=[], workspace="w",
         )
-    assert vec_tools.wait_evidence_worker_drained(timeout=10)
+    assert vec_tools.wait_semantic_worker_drained(timeout=10)
 
     page = _scan(vec_tools, {"batch": 50})
     size = len(json.dumps(page, ensure_ascii=False).encode("utf-8"))

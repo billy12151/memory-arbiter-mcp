@@ -2,13 +2,32 @@
 
 from __future__ import annotations
 
+import sqlite3
+
 from pathlib import Path
 
 from memory_arbiter.config import Settings
 from memory_arbiter.db import MemoryDB
 from memory_arbiter.models import ConflictMember, ConflictValueGroup, MemoryRecord
-from memory_arbiter.semantic_conflict import normalize_value
+from memory_arbiter.semantic_conflict import (
+    decide_evidence, normalize_value, notice_dedupe_key,
+)
 from memory_arbiter.tools import MemoryTools
+from memory_arbiter.db_generation import (
+    CONFLICT_DETECTOR_VERSION,
+    CURRENT_SCHEMA_GENERATION,
+    detect_database_generation,
+)
+from memory_arbiter.evidence import evidence_content_hash
+from memory_arbiter.rowseg import segment_rows
+from memory_arbiter.vnext_migration import (
+    _configured_embedding_space_id,
+    build_conflict_only,
+    _copy_preserved_tables,
+    _fingerprint,
+    _mark_conflict_rebuild_ready,
+    inspect,
+)
 
 
 def _db(tmp_path: Path) -> MemoryDB:
@@ -47,6 +66,62 @@ def _record(db: MemoryDB, members: list[ConflictMember], *, expected_revision=No
         status=status, expected_revision=expected_revision,
     )
 
+
+
+def _pass_cos_gate(monkeypatch, cos: float = 0.85):
+    """Gate-v2 G4: pass every hand-built hit through the cosine band
+    (embedder-agnostic — patches the gates module, which the detection loop
+    imports at call time)."""
+    import memory_arbiter.pipeline.gates as _gates
+    monkeypatch.setattr(
+        _gates, "candidate_cos_gate",
+        lambda own, hits, vecs: ([(h, cos) for h in hits], [], []),
+    )
+
+
+def _mark_current_space(db: MemoryDB, settings: Settings) -> str:
+    pytest.importorskip("sqlite_vec")
+    # Lazy vec-table semantics (0.15.0): the vec0 tables exist only after the
+    # first successful embedder build. Hand-injecting vectors below mirrors
+    # that build: create the tables at dim 2, then record the same-dim space.
+    assert db.ensure_vec_tables(2) == []
+    space_id = _configured_embedding_space_id(settings, 2)
+    assert space_id is not None
+    with db.connection() as conn:
+        memories = [dict(row) for row in conn.execute(
+            "SELECT id,version,content,subject,status FROM memories WHERE status!='deleted'"
+        )]
+    for memory in memories:
+        # 0.17.0 C5: rows are the evidence channel — publish_rows is the one
+        # true publisher (unit tables are never written).
+        rows = segment_rows(
+            str(memory.get("subject") or ""), str(memory.get("content") or ""),
+        )
+        embeddings = [[0.0, 1.0] for _row in rows]
+        published = db.evidence.publish_rows(
+            int(memory["id"]), int(memory.get("version") or 1),
+            evidence_content_hash(str(memory.get("content") or "")), rows, embeddings,
+        )
+        assert published.get("published") is True
+    with db.connection() as conn:
+        canonicals = [
+            str(row["name"])
+            for row in conn.execute("SELECT name FROM workspace_canonicals ORDER BY id")
+            if str(row["name"] or "").casefold() != "default"
+        ]
+    for canonical in canonicals:
+        assert db.workspaces.publish_workspace_canonical_vector(
+            canonical, [0.0, 1.0],
+        ) == []
+    with db.write_transaction() as conn:
+        conn.execute("DELETE FROM _vec_index_meta")
+        conn.executemany(
+            "INSERT INTO _vec_index_meta(key,value) VALUES(?,?)",
+            (("state", "ready"), ("active_space_id", space_id)),
+        )
+    return space_id
+
+from memory_arbiter.db_generation import detect_database_generation
 
 def test_fresh_schema_has_single_conflict_table_and_group_indexes(tmp_path: Path) -> None:
     db = _db(tmp_path)
@@ -852,14 +927,13 @@ import pytest
 import tests.test_vnext_evidence as tv
 from memory_arbiter.evidence import evidence_content_hash
 from memory_arbiter.models import ConflictMember, ConflictValueGroup
-from memory_arbiter.semantic_conflict import ModelSignal
 
 
 def _write_pair(tools, meta: dict, left: str = "database is mysql",
                 right: str = "database is sqlite") -> tuple[dict, dict]:
     peer = tools.memory_write(content=left, subject="a", tags=[], metadata=meta)["data"]
     new = tools.memory_write(content=right, subject="b", tags=[], metadata=meta)["data"]
-    assert tools.wait_evidence_worker_drained(timeout=2)
+    assert tools.wait_semantic_worker_drained(timeout=2)
     return peer, new
 
 
@@ -874,40 +948,39 @@ def _hit(peer_id: int, text: str, *, row_id: int = 1, distance: float = 0.1,
     }
 
 
-def test_notice_value_groups_tolerate_missing_parsed_keys(tmp_path: Path, monkeypatch) -> None:
-    """A notice_ready gate with value keys missing from parsed must not KeyError."""
+def test_notice_value_groups_carry_quote_sides(tmp_path: Path, monkeypatch) -> None:
+    """0.17.1: judged notices carry the two ROW TEXTS as the value sides —
+    no extraction, so value_groups hold the quotes themselves (empty
+    normalised value, quote as display). The old missing-parsed-keys
+    tolerance died with the extraction paradigm (nothing parses)."""
     tools = tv.make_tools(tmp_path)
     tools.settings.semantic_conflict_on_write = "off"
     meta = {"entity": "MyProject", "scope": "Production"}
-    peer, new = _write_pair(tools, meta)
-    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: [_hit(peer["id"], "database is mysql", metadata=dict(meta))])
+    peer, new = _write_pair(tools, meta, left="database mysql 8 and 16", right="database sqlite 3 and 4")
+    monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: [_hit(peer["id"], "database mysql 8 and 16", metadata=dict(meta))])
+    _pass_cos_gate(monkeypatch)
 
     class Backend:
         @staticmethod
-        def classify_pair(left, right, *, deadline_monotonic=None):
-            # A well-formed signal whose parsed dict omits the value keys.
-            parsed = {"attribute_a": "数据库选型", "attribute_b": "数据库选型"}
-            return ModelSignal(True, "attribute_value_extraction", None, "", parsed, None)
+        def judge_pair(text_a, text_b):
+            from memory_arbiter.semantic_judge import PairVerdict
+            return PairVerdict(
+                "conflict", {"conflict": 0.95, "no_conflict": 0.03, "possible_conflict": 0.02},
+                "numeric_value", "mdeberta-v4m:test",
+            )
     monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: Backend())
-    gate = SimpleNamespace(
-        state="notice_ready", reason="bidirectional_conflict",
-        attribute="数据库选型", value_a="sqlite", value_b="mysql",
-    )
-    monkeypatch.setattr(
-        "memory_arbiter.pipeline.evidence.evaluate_single_direction_extraction", lambda *a, **k: gate,
-    )
 
     result = tools._process_semantic_conflict_job(new["id"], tv._job_snapshot(tools, new["id"]))
 
     assert result["outcome"] == "notices_created"
     notice = tools.db.list_semantic_notices(status="open", limit=10)[0]
     groups = notice["payload"]["value_groups"]
-    # Display values fall back to the gate's normalised values.
-    assert [group["display_value"] for group in groups] == ["sqlite", "mysql"]
-    # B-C4: the notice slot_key is stored in canonical entity/scope form.
-    assert notice["payload"]["slot_key"] == {
-        "entity": "myproject", "attribute": "数据库选型", "scope": "production",
-    }
+    assert [g["display_value"] for g in groups] == [
+        "database sqlite 3 and 4", "database mysql 8 and 16",
+    ]
+    payload = notice["payload"]
+    assert payload["model_signal"]["label"] == "conflict"
+    assert payload["model_signal"]["model_version"].startswith("mdeberta-v4m:")
 
 
 def test_same_reason_degradation_counted_once_per_task(tmp_path: Path, monkeypatch) -> None:
@@ -916,28 +989,35 @@ def test_same_reason_degradation_counted_once_per_task(tmp_path: Path, monkeypat
     tools.settings.semantic_conflict_on_write = "off"
     meta = {"entity": "svc", "scope": "production"}
     peers = [
-        tools.memory_write(content=f"database is {value}", subject=value, tags=[], metadata=meta)["data"]
+        tools.memory_write(
+            content=f"database {value} 8 and 16", subject=value, tags=[], metadata=meta,
+        )["data"]
         for value in ("mysql", "postgres")
     ]
-    new = tools.memory_write(content="database is sqlite", subject="sqlite", tags=[], metadata=meta)["data"]
-    assert tools.wait_evidence_worker_drained(timeout=2)
+    new = tools.memory_write(
+        content="database sqlite 3 and 4", subject="sqlite", tags=[], metadata=meta,
+    )["data"]
+    assert tools.wait_semantic_worker_drained(timeout=2)
     hits = [
-        _hit(peers[0]["id"], "database is mysql", row_id=1, distance=0.1, metadata=dict(meta)),
-        _hit(peers[1]["id"], "database is postgres", row_id=2, distance=0.2, metadata=dict(meta)),
+        _hit(peers[0]["id"], "database mysql 8 and 16", row_id=1, distance=0.1, metadata=dict(meta)),
+        _hit(peers[1]["id"], "database postgres 8 and 16", row_id=2, distance=0.2, metadata=dict(meta)),
     ]
-    monkeypatch.setattr(tools.db, "evidence_knn", lambda *a, **k: list(hits))
+    monkeypatch.setattr(tools.db, "row_knn", lambda *a, **k: list(hits))
+    _pass_cos_gate(monkeypatch)
 
     class BadOutput:
         @staticmethod
-        def classify_pair(left, right, *, deadline_monotonic=None):
-            return ModelSignal(False, "invalid_schema", None, "", None, "bad output")
+        def judge_pair(text_a, text_b):
+            from memory_arbiter.semantic_judge import PairVerdict
+            # both pairs fail with the SAME technical reason
+            return PairVerdict("no_conflict", {}, None, "mdeberta:unavailable", error="bad output")
     monkeypatch.setattr(tools, "_ensure_semantic_backend", lambda: BadOutput())
 
     result = tools._process_semantic_conflict_job(new["id"], tv._job_snapshot(tools, new["id"]))
 
     assert result["status"] == "incomplete"
-    assert result["reason"] == "qwen_invalid_output"
-    assert result["reasons_seen"] == ["qwen_invalid_output"]
+    assert result["reason"] == "judge_backend_error"
+    assert result["reasons_seen"] == ["judge_backend_error"]
     assert tools._check_degradation_count == 1
 
 
@@ -968,90 +1048,11 @@ def _slot_member(memory_id: int, value: str) -> dict:
 
 
 @pytest.mark.parametrize("stored_entity,stored_scope", [
-    ("MyProject", "Production"),   # legacy raw (pre-canon) storage form
-    ("myproject", "production"),   # canonical storage form
+    # Gate-v2 G3: slot identity is workspace + own subject now — both sides
+    # build the canon form directly, so the old raw-vs-canon mismatch
+    # (pre-canon legacy rows) has no metadata source to diverge from.
+    ("default", "a"),
 ])
-def test_applying_suppression_matches_raw_and_canon_slot_forms(
-    tmp_path: Path, monkeypatch, stored_entity: str, stored_scope: str,
-) -> None:
-    """Suppression hits when either the canon or the raw slot form matches the
-    stored applying group, regardless of metadata casing."""
-    tools = tv.make_tools(tmp_path)
-    tools.settings.semantic_conflict_on_write = "off"
-    meta = {"entity": "MyProject", "scope": "Production"}
-    a, b = _write_pair(tools, meta, left="连接池上限为 10。", right="连接池上限为 20。")
-    monkeypatch.setattr(tools, "_ensure_semantic_backend", tv._strict_pair_backend)
-
-    recorded = tools.memory_repair("record_conflict", {
-        "slot_key": {"entity": stored_entity, "attribute": "连接池上限", "scope": stored_scope},
-        "members": [_slot_member(a["id"], "10"), _slot_member(b["id"], "20")],
-        "value_groups": [
-            ConflictValueGroup("10", "10", (f"{a['id']}@1",)).to_dict(),
-            ConflictValueGroup("20", "20", (f"{b['id']}@1",)).to_dict(),
-        ],
-        "detector_version": "d1", "prompt_version": "p1", "source": "scan",
-        "reason": "pool size conflict", "status": "open",
-    })
-    conflict_id = recorded["data"]["conflict_id"]
-    tools.memory("judge", {
-        "conflict_id": conflict_id, "expected_revision": 1, "chosen_value": "20",
-        "decided_by": "user", "ref": "chat", "reason": "confirmed",
-        "apply_plan": [{"memory_id": a["id"], "action": "update_current_claim"},
-                       {"memory_id": b["id"], "action": "use_as_resolution"}],
-        "resolution_memory_id": b["id"], "authorized": True,
-    })
-    # Storage canonises slot_key at record time; a group stored BEFORE that
-    # canonicalisation existed may still carry the raw form — inject it
-    # directly to simulate such a legacy row.
-    import json as _json
-    legacy_slot = {"entity": stored_entity, "attribute": "连接池上限", "scope": stored_scope}
-    with tools.db.write_transaction() as conn:
-        conn.execute(
-            "UPDATE conflicts SET slot_key=? WHERE id=?",
-            (_json.dumps(legacy_slot, ensure_ascii=False, sort_keys=True), conflict_id),
-        )
-
-    tools.db.edit_memory_intent(a["id"], new_content="连接池上限为 30。", reason="apply")
-    updated = tools.db.get_memory(a["id"])
-    monkeypatch.setattr(
-        tools.db, "evidence_knn", lambda *a_, **k: [_hit(b["id"], "连接池上限为 20。")],
-    )
-    snapshot = {
-        "memory_id": a["id"], "version": updated["version"],
-        "content_hash": evidence_content_hash(updated["content"]),
-        "trusted_applying_context": {
-            "conflict_id": conflict_id, "revision": 2, "memory_id": a["id"],
-            "action": "update_current_claim", "chosen_value": "20",
-        },
-    }
-
-    result = tools._process_semantic_conflict_job(a["id"], snapshot)
-
-    # The pair was examined and slot-suppressed (not an error, no new notice).
-    assert result["outcome"] == "checked_no_notice"
-    fresh = [n for n in tools.db.list_semantic_notices(status="open")
-             if {n.get("memory_id"), n.get("peer_id")} == {a["id"], b["id"]}]
-    assert fresh == []
-
-
-# ── from test_evidence_conflict.py ──
-# helper _tools renamed: _evidence_tools (collision with test_product_conflict_groups.py)
-
-from pathlib import Path
-
-from memory_arbiter.config import Settings
-from memory_arbiter.semantic_conflict import (
-    AttributeValueExtraction,
-    coexistence_veto,
-    decide_evidence,
-    evaluate_single_direction_extraction,
-    extraction_from_text,
-    model_signal_from_text,
-    notice_dedupe_key,
-    value_is_grounded,
-)
-from memory_arbiter.tools import MemoryTools
-
 
 def _evidence_tools(tmp_path: Path, **overrides) -> MemoryTools:
     values = {
@@ -1070,20 +1071,6 @@ def test_deterministic_routes_are_explainable() -> None:
     assert decide_evidence("database connection pool", "database connection policy").action == "check"
 
 
-def test_qwen_protocol_is_strict_bounded_four_field_extraction() -> None:
-    raw = '{"attribute_a":"数据库选型","value_a":"MySQL","attribute_b":"数据库选型","value_b":"SQLite"}'
-    accepted = model_signal_from_text(raw)
-    assert accepted.candidate is True
-    extraction, error = extraction_from_text(raw)
-    assert error is None and extraction is not None
-    for invalid in (
-        '{"attribute_a":"数据库选型","value_a":"MySQL","attribute_b":"数据库选型"}',
-        '{"attribute_a":"数据库选型","value_a":"MySQL","attribute_b":"数据库选型","value_b":"SQLite","conflict":true}',
-        '{"attribute_a":"数据库选型","value_a":3,"attribute_b":"数据库选型","value_b":"SQLite"}',
-    ):
-        parsed, parse_error = extraction_from_text(invalid)
-        assert parsed is None and parse_error
-
 
 def test_notice_dedupe_is_symmetric_and_version_pinned() -> None:
     assert notice_dedupe_key(1, 2, 3, 4, "semantic_evidence") == notice_dedupe_key(
@@ -1092,13 +1079,6 @@ def test_notice_dedupe_is_symmetric_and_version_pinned() -> None:
     assert notice_dedupe_key(1, 2, 3, 4, "semantic_evidence") != notice_dedupe_key(
         1, 2, 4, 4, "semantic_evidence"
     )
-
-
-def test_check_degrades_to_no_notice_without_qwen(tmp_path: Path) -> None:
-    tools = _evidence_tools(tmp_path)
-    assert tools._ensure_semantic_backend() is None
-    decision = decide_evidence("database connection pool", "database connection policy")
-    assert decision.action == "check"
 
 
 def test_notice_freshness_uses_only_memory_versions(tmp_path: Path) -> None:
@@ -1117,81 +1097,6 @@ def test_notice_freshness_uses_only_memory_versions(tmp_path: Path) -> None:
     notice = tools.db.read_semantic_notice(created["notice_id"])
     assert notice["freshness"]["fresh"] is False
 
-
-def test_single_direction_mirror_grounding_and_notice_gate() -> None:
-    """Single-direction gate (owner 2026-09-17): one clean extraction —
-    attribute mirror + different values + grounding — lands the notice;
-    attribute drift inside the ONE extraction stays vetoed."""
-    forward = AttributeValueExtraction("数据库选型", "MySQL", "数据库选型", "SQLite")
-    result = evaluate_single_direction_extraction(forward,
-        {"quote": "生产数据库使用 MySQL。"},
-        {"quote": "生产数据库使用 SQLite。"}
-    )
-    assert result.state == "notice_ready"
-    drifting = AttributeValueExtraction("部署架构", "MySQL", "数据库选型", "SQLite")
-    rejected = evaluate_single_direction_extraction(drifting,
-        {"quote": "生产数据库使用 MySQL。"}, {"quote": "生产数据库使用 SQLite。"}
-    )
-    assert rejected.state == "review_candidate"
-    assert rejected.reason == "not_same_attribute_different_value"
-
-
-def test_grounding_is_mechanical_and_coexistence_reasons_are_stable() -> None:
-    assert value_is_grounded("5s", "接口超时为 5 秒。")
-    assert value_is_grounded("PostgreSQL", "数据库采用 pgsql。")
-    assert not value_is_grounded("关系数据库", "数据库采用 PostgreSQL。")
-    assert coexistence_veto(
-        {"quote": "测试环境数据库使用 MySQL"},
-        {"quote": "生产环境数据库使用 SQLite"},
-    ) == "coexist_environment_mismatch"
-    assert coexistence_veto(
-        {"quote": "v1 API timeout 5s"}, {"quote": "v2 API timeout 10s"},
-    ) == "coexist_version_mismatch"
-
-
-# ── 2026-08-21 review round: semantic-layer fixes ───────────────────────────
-
-def test_unknown_sentinel_is_extraction_failure() -> None:
-    """The protocol-legal '__unknown__' marker never becomes a usable field."""
-    raw = '{"attribute_a":"数据库","value_a":"__unknown__","attribute_b":"数据库","value_b":"SQLite"}'
-    extraction, error = extraction_from_text(raw)
-    assert extraction is None
-    assert error == "unknown_field"
-    signal = model_signal_from_text(raw)
-    # Distinguished from a protocol violation so diagnostics separate model
-    # output from technical failure.
-    assert signal.candidate_type == "unknown_field"
-    assert signal.candidate is False
-
-
-def test_top_level_array_output_is_rejected() -> None:
-    raw = '[{"attribute_a":"db","value_a":"MySQL","attribute_b":"db","value_b":"SQLite"}]'
-    extraction, error = extraction_from_text(raw)
-    assert extraction is None
-    assert error is not None and error.startswith("invalid_schema")
-
-
-def test_bare_agent_marker_does_not_trigger_evolution_veto() -> None:
-    # "由" as a passive/agent marker with no replacement wording must not veto.
-    assert coexistence_veto(
-        {"quote": "新网关由运维分配"}, {"quote": "端口是 8080"},
-    ) is None
-    # Real replacement wording still vetoes.
-    assert coexistence_veto(
-        {"quote": "旧网关已迁移到新集群"}, {"quote": "当前使用新集群"},
-    ) == "coexist_explicit_evolution"
-
-
-def test_unit_spelling_variants_normalize_equal_at_post_gate() -> None:
-    # 8GB vs 8G is a restated duplicate, not a conflict, once units compact.
-    result = evaluate_single_direction_extraction(AttributeValueExtraction("内存", "8GB", "内存", "8G"),
-        {"quote": "内存 8GB"}, {"quote": "内存 8G"}
-    )
-    assert result.state == "review_candidate"
-    assert result.reason == "not_same_attribute_different_value"
-
-
-# ── 2026-08-21 review round 2: normalization edge cases ─────────────────────
 
 def test_decimal_point_preserved_in_normalization() -> None:
     from memory_arbiter.semantic_conflict import normalize_value
@@ -1212,31 +1117,6 @@ def test_normalize_value_strips_approximator_prefix_and_measure_ge() -> None:
     assert normalize_value("近 90 天") != normalize_value("180天")
     assert normalize_value("5个工作日") != normalize_value("72小时")
 
-
-def test_bidirectional_mirror_tolerates_direction_fillers() -> None:
-    """cf-oppo-10/12: both directions extract the same conflict with
-    direction-dependent surface forms ("90天" vs "近 90 天"); the strict
-    mirror must now read them as consistent, and the CJK-unit grounding must
-    ground "90天" in "近 90 天" — reaching notice_ready."""
-    forward = AttributeValueExtraction("无下单记录", "90天", "无下单记录", "180天")
-    reverse = AttributeValueExtraction("无下单记录", "近 180 天", "无下单记录", "近 90 天")
-    result = evaluate_single_direction_extraction(forward,
-        {"quote": "新客定义为近 90 天无下单记录的账户。"},
-        {"quote": "新客定义为近 180 天无下单记录的账户。"}
-    )
-    assert result.state == "notice_ready"
-    forward = AttributeValueExtraction("承诺时效", "5个工作日", "承诺时效", "72小时")
-    reverse = AttributeValueExtraction("承诺时效", "72小时", "承诺时效", "5工作日")
-    result = evaluate_single_direction_extraction(forward,
-        {"quote": "对美专线清关承诺 5 个工作日内完成。"},
-        {"quote": "对美专线清关承诺 72 小时内完成。"}
-    )
-    assert result.state == "notice_ready"
-
-
-# ── 2026-09-17 (owner): 工作日/自然日/英文天单位进换算表（cf-oppo-12） ──────
-# 死因曾为：单位正则不认「个工作日」→ B 值退化裸 5、骨架残留「个工作日」→
-# 骨架字面不同 → 短句余弦卡 0.96 门下 → 直判 None。单位进表后值/骨架双修复。
 
 def test_workday_calendar_day_units_convert() -> None:
     from memory_arbiter.semantic_conflict import canonical_unit_value as cuv
@@ -1260,40 +1140,6 @@ def test_cf_oppo_12_direct_path_lands_after_workday_unit() -> None:
     hit = direct_value_verdict(left, right, decision)
     assert hit is not None and hit[1] == "259200000ms" and hit[2] == "432000000ms"
 
-
-def test_version_value_pair_vetoes_as_release_evolution() -> None:
-    """2026-09-17 (owner): 双侧值均为版本号形态 = 版本演进，过滤门否决
-    （cf-coexist-27-29「v0.2.1 vs v0.2.2 发版记录」单向误报的修复）。
-    单点数值（2.5 速率类）、职级、金额、百分比、单侧版本不得误伤。"""
-    from memory_arbiter.semantic_conflict import coexistence_veto
-    fwd = AttributeValueExtraction("版本号", "v0.2.1", "版本号", "v0.2.2")
-    assert coexistence_veto({"quote": "v0.2.1 发版"}, {"quote": "v0.2.2 发版"}, fwd, None) \
-        == "coexist_version_value_evolution"
-    unprefixed = AttributeValueExtraction("版本", "0.16.6", "版本", "0.16.7")
-    assert coexistence_veto({"quote": "a"}, {"quote": "b"}, unprefixed, None) \
-        == "coexist_version_value_evolution"
-    for ext in (
-        AttributeValueExtraction("速率", "2.5", "速率", "3.0"),
-        AttributeValueExtraction("定级", "P6", "定级", "P5"),
-        AttributeValueExtraction("上限", "600元", "上限", "400元"),
-        AttributeValueExtraction("阈值", "0.3%", "阈值", "1.5%"),
-        AttributeValueExtraction("版本", "0.2.1", "版本", "MySQL"),
-    ):
-        assert coexistence_veto({"quote": "x"}, {"quote": "y"}, ext, None) is None
-    # 无抽取的两参调用（直判路径）不受影响
-    assert coexistence_veto({"quote": "v0.2.1"}, {"quote": "v0.2.2"}) is None
-
-
-# ── strict mirror boundary cases (2026-09-16) ─────────────────────────────
-# owner ruling: the bidirectional mirror stays STRICT (4-field cross equality
-# after normalization) — relaxing it to value-only consistency was tried and
-# reverted the same day: it rescued drift cases but also admits direction-
-# dependent attribute changes, which are exactly the coexistence shape the
-# gate exists to veto. Write-time compute and notice noise are bounded by
-# design; recall gaps from attribute-granularity drift (cf-oppo-01/12) are
-# accepted until an owner-approved, noise-calibrated proposal lands.
-
-# ── 2026-09-16 (owner): exact unit conversion ─────────────────────────────
 
 def test_unit_canonical_conversion() -> None:
     from memory_arbiter.semantic_conflict import canonical_unit_value, normalize_value
@@ -1406,99 +1252,6 @@ def test_english_pairs_rule_layer() -> None:
     assert verdict is not None and verdict[1] == "10" and verdict[2] == "99"
 
 
-def test_single_direction_lands_granularity_shape() -> None:
-    """cf-oppo-01 shape, single-direction era (owner 2026-09-17): the forward
-    extraction is mirror-clean at ONE granularity — it lands. The reverse
-    extraction at a different granularity used to veto it; that veto was the
-    falsified bidirectional mirror and is retired."""
-    forward = AttributeValueExtraction(
-        "数据库选型", "PostgreSQL 单主架构", "数据库选型", "MySQL 双主架构")
-    result = evaluate_single_direction_extraction(forward,
-        {"quote": "金营平台生产库使用 PostgreSQL 单主架构，只读副本两个。"},
-        {"quote": "金营平台生产库使用 MySQL 双主架构，主从延迟容忍 500ms。"}
-    )
-    assert result.state == "notice_ready"
-
-
-def test_mirror_dropped_unit_stays_vetoed() -> None:
-    """cf-oppo-12 shape, single-direction era (owner 2026-09-17): one clean
-    extraction with both values grounded lands the notice — the reverse
-    drift that used to veto it no longer exists (that veto was the falsified
-    bidirectional mirror)."""
-    forward = AttributeValueExtraction("承诺时效", "5个工作日", "承诺时效", "72小时")
-    result = evaluate_single_direction_extraction(forward,
-        {"quote": "对美专线清关承诺 5 个工作日内完成。"},
-        {"quote": "对美专线清关承诺 72 小时内完成。"}
-    )
-    assert result.state == "notice_ready"
-
-
-def test_mirror_still_catches_hallucination() -> None:
-    """Single-direction era: a clean forward extraction with grounded values
-    lands the notice — the reverse-extraction hallucination check is retired
-    with the bidirectional mirror (grounding on the surviving extraction is
-    the hallucination defence now)."""
-    forward = AttributeValueExtraction("无下单记录", "90天", "无下单记录", "180天")
-    result = evaluate_single_direction_extraction(forward,
-        {"quote": "新客定义为近 90 天无下单记录的账户。"},
-        {"quote": "新客定义为近 180 天无下单记录的账户。"}
-    )
-    assert result.state == "notice_ready"
-
-
-def test_unknown_sentinel_rejection_is_case_insensitive() -> None:
-    raw = '{"attribute_a":"db","value_a":"__UNKNOWN__","attribute_b":"db","value_b":"SQLite"}'
-    extraction, error = extraction_from_text(raw)
-    assert extraction is None
-    assert error == "unknown_field"
-
-
-def test_prose_prefixed_array_is_rejected() -> None:
-    raw = 'Result: [ {"attribute_a":"db","value_a":"MySQL","attribute_b":"db","value_b":"SQLite"} ]'
-    extraction, error = extraction_from_text(raw)
-    assert extraction is None
-    assert error is not None and error.startswith("invalid_schema")
-
-
-def test_evolution_veto_covers_bian_wei_family() -> None:
-    assert coexistence_veto(
-        {"quote": "网关由 A 变为 B"}, {"quote": "当前网关是 B"},
-    ) == "coexist_explicit_evolution"
-    assert coexistence_veto(
-        {"quote": "旧配置调整为新值"}, {"quote": "现在使用新值"},
-    ) == "coexist_explicit_evolution"
-
-
-# ── from test_conflict_upgrade.py ──
-# helper _memory renamed: _upgrade_memory (collision with test_conflict_groups.py)
-
-
-import json
-import sqlite3
-from pathlib import Path
-
-import pytest
-
-from memory_arbiter.config import Settings
-from memory_arbiter.db import MemoryDB
-from memory_arbiter.db_generation import (
-    CONFLICT_DETECTOR_VERSION,
-    CURRENT_SCHEMA_GENERATION,
-    detect_database_generation,
-)
-from memory_arbiter.evidence import evidence_content_hash, local_text_units
-from memory_arbiter.models import MemoryRecord
-from memory_arbiter.tools import MemoryTools
-from memory_arbiter.vnext_migration import (
-    _configured_embedding_space_id,
-    build_conflict_only,
-    _copy_preserved_tables,
-    _fingerprint,
-    _mark_conflict_rebuild_ready,
-    inspect,
-)
-
-
 def _settings(path: Path, tmp_path: Path) -> Settings:
     return Settings(db_path=path, backup_jsonl=tmp_path / "backup.jsonl")
 
@@ -1511,47 +1264,6 @@ def _same_space_settings(path: Path, tmp_path: Path) -> Settings:
         backup_jsonl=tmp_path / "backup.jsonl",
         embedding_model_path=model,
     )
-
-
-def _mark_current_space(db: MemoryDB, settings: Settings) -> str:
-    pytest.importorskip("sqlite_vec")
-    # Lazy vec-table semantics (0.15.0): the vec0 tables exist only after the
-    # first successful embedder build. Hand-injecting vectors below mirrors
-    # that build: create the tables at dim 2, then record the same-dim space.
-    assert db.ensure_vec_tables(2) == []
-    space_id = _configured_embedding_space_id(settings, 2)
-    assert space_id is not None
-    with db.connection() as conn:
-        memories = [dict(row) for row in conn.execute(
-            "SELECT id,version,content,subject,status FROM memories WHERE status!='deleted'"
-        )]
-    for memory in memories:
-        units = local_text_units(
-            str(memory.get("subject") or ""), str(memory.get("content") or ""),
-        )
-        embeddings = [[0.0, 1.0] for _unit in units]
-        published = db.evidence.publish(
-            int(memory["id"]), int(memory.get("version") or 1),
-            evidence_content_hash(str(memory.get("content") or "")), units, embeddings,
-        )
-        assert published.get("published") is True
-    with db.connection() as conn:
-        canonicals = [
-            str(row["name"])
-            for row in conn.execute("SELECT name FROM workspace_canonicals ORDER BY id")
-            if str(row["name"] or "").casefold() != "default"
-        ]
-    for canonical in canonicals:
-        assert db.workspaces.publish_workspace_canonical_vector(
-            canonical, [0.0, 1.0],
-        ) == []
-    with db.write_transaction() as conn:
-        conn.execute("DELETE FROM _vec_index_meta")
-        conn.executemany(
-            "INSERT INTO _vec_index_meta(key,value) VALUES(?,?)",
-            (("state", "ready"), ("active_space_id", space_id)),
-        )
-    return space_id
 
 
 def _upgrade_memory(defaults: dict[str, object]) -> MemoryRecord:
@@ -1683,7 +1395,7 @@ def test_startup_does_not_repair_interrupted_table_migration(tmp_path: Path) -> 
         conn.execute("ALTER TABLE workspace_aliases RENAME TO workspace_aliases_legacy")
     reopened = MemoryDB(_settings(path, tmp_path))
     assert reopened.db_available is True
-    assert reopened.resolve_workspace_canonical("raw", None, register_new=False)["canonical"] == "raw"
+    assert reopened.resolve_workspace_canonical("raw", None)["canonical"] == "raw"
     with reopened.connection() as conn:
         assert conn.execute(
             "SELECT 1 FROM sqlite_master WHERE name='workspace_aliases_legacy'"
@@ -1732,98 +1444,6 @@ def test_full_build_checkpoint_failure_marks_target_failed(
     with sqlite3.connect(target_path) as conn:
         state = dict(conn.execute("SELECT key,value FROM migration_state"))
     assert state["phase"] == "failed"
-
-
-def test_scan_gate_requires_matching_epoch_detector_boundary_and_live_set(tmp_path: Path) -> None:
-    path = tmp_path / "db.sqlite3"
-    settings = _settings(path, tmp_path)
-    db = MemoryDB(settings)
-    memory_id, _ = db.insert_memory(_upgrade_memory(settings.defaults()), "project")
-    assert memory_id is not None
-    state = _mark_conflict_rebuild_ready(db)
-    visible = db.conflict_scan_state()
-    assert visible["required"] is True
-    assert visible["detector_version"] == CONFLICT_DETECTOR_VERSION
-
-    # Completion is not a caller assertion: without persisted pages it fails,
-    # even when epoch/detector/boundary are otherwise correct.
-    assert db.complete_conflict_scan(
-        epoch=state["conflict_scan_epoch"], detector_version=CONFLICT_DETECTOR_VERSION,
-        boundary=visible["boundary"],
-    ) is False
-    assert db.complete_conflict_scan(
-        epoch="wrong", detector_version=CONFLICT_DETECTOR_VERSION,
-        boundary=visible["boundary"],
-    ) is False
-    assert db.complete_conflict_scan(
-        epoch=state["conflict_scan_epoch"], detector_version="old-detector",
-        boundary=visible["boundary"],
-    ) is False
-
-    with db.write_transaction() as conn:
-        conn.execute("UPDATE memories SET status='superseded' WHERE id=?", (memory_id,))
-    assert db.complete_conflict_scan(
-        epoch=state["conflict_scan_epoch"], detector_version=CONFLICT_DETECTOR_VERSION,
-        boundary=visible["boundary"],
-    ) is False
-
-    with db.write_transaction() as conn:
-        conn.execute("UPDATE memories SET status='active' WHERE id=?", (memory_id,))
-    assert db.record_conflict_scan_page(
-        epoch=state["conflict_scan_epoch"],
-        detector_version=CONFLICT_DETECTOR_VERSION,
-        boundary=visible["boundary"],
-        after_memory_id=0,
-        next_anchor_memory_id=None,
-        anchors_scanned=1,
-        workspace=None,
-    ) is True
-    assert db.complete_conflict_scan(
-        epoch=state["conflict_scan_epoch"], detector_version=CONFLICT_DETECTOR_VERSION,
-        boundary=visible["boundary"],
-    ) is True
-    assert db.conflict_scan_state()["required"] is False
-    assert db.complete_conflict_scan(
-        epoch=state["conflict_scan_epoch"], detector_version=CONFLICT_DETECTOR_VERSION,
-        boundary=visible["boundary"],
-    ) is False
-
-
-def test_scan_candidates_pages_persist_progress_and_clear_gate(tmp_path: Path) -> None:
-    path = tmp_path / "db.sqlite3"
-    settings = _settings(path, tmp_path)
-    db = MemoryDB(settings)
-    for index in range(3):
-        memory_id, _ = db.insert_memory(
-            MemoryRecord.from_input(
-                {"content": f"配置值为 {index}。", "subject": "配置", "workspace": "project"},
-                settings.defaults(),
-            ),
-            "project",
-        )
-        assert memory_id is not None
-    _mark_conflict_rebuild_ready(db)
-    tools = MemoryTools(settings=settings, db=db)
-    # The scan path is exercised without requiring sqlite-vec in this gate test.
-    tools.db.state.sqlite_vec_available = True
-    tools.db.scan_rule_candidates = lambda **kwargs: {
-        "anchors_scanned": min(2, 3 - int(kwargs["after_memory_id"])),
-        "next_anchor_memory_id": 2 if int(kwargs["after_memory_id"]) == 0 else None,
-        "candidates": [],
-        "counts": {},
-    }
-
-    first = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 2})
-    assert first["data"]["conflict_scan_progress"]["complete"] is False
-    assert db.conflict_scan_state()["required"] is True
-    # Skipping the persisted cursor is rejected and cannot clear the gate.
-    skipped = tools.memory_repair("scan_candidates", {"anchor_memory_id": 1, "batch": 2})
-    assert skipped["data"]["conflict_scan_progress_rejected"] is True
-    assert db.conflict_scan_state()["required"] is True
-
-    final = tools.memory_repair("scan_candidates", {"anchor_memory_id": 2, "batch": 2})
-    assert final["data"]["conflict_scan_completed"] is True
-    assert db.conflict_scan_state()["required"] is False
 
 
 def test_previous_generation_is_refused_until_destructive_upgrade(tmp_path: Path) -> None:
@@ -1916,7 +1536,7 @@ def test_previous_evidence_generation_rebuilds_only_conflict_domain(tmp_path: Pa
     with sqlite3.connect(target_path) as conn:
         state = dict(conn.execute("SELECT key,value FROM migration_state"))
         columns = {row[1] for row in conn.execute("PRAGMA table_info(conflicts)")}
-        assert conn.execute("SELECT COUNT(*) FROM memory_evidence").fetchone()[0] == 2
+        assert conn.execute("SELECT COUNT(*) FROM memory_row").fetchone()[0] == 2
         assert conn.execute("SELECT COUNT(*) FROM conflicts").fetchone()[0] == 0
         assert conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='semantic_notices'"
@@ -1955,7 +1575,7 @@ def test_previous_generation_with_old_embedding_space_preserves_then_marks_misma
         )
         source_vectors = [
             tuple(row) for row in conn.execute(
-                "SELECT id,parent_status,hex(embedding) FROM memory_evidence_vec ORDER BY id"
+                "SELECT id,parent_status,hex(embedding) FROM memory_row_vec ORDER BY id"
             ).fetchall()
         ]
     settings = source_settings
@@ -1976,7 +1596,7 @@ def test_previous_generation_with_old_embedding_space_preserves_then_marks_misma
         conn.enable_load_extension(False)
         state = dict(conn.execute("SELECT key,value FROM _vec_index_meta"))
         target_vectors = conn.execute(
-            "SELECT id,parent_status,hex(embedding) FROM memory_evidence_vec ORDER BY id"
+            "SELECT id,parent_status,hex(embedding) FROM memory_row_vec ORDER BY id"
         ).fetchall()
     assert state["state"] == "mismatch"
     assert state["active_space_id"] == "old-pipeline-space"
@@ -2016,11 +1636,11 @@ def test_previous_generation_with_incomplete_same_space_index_defers_to_doctor(
     assert memory_id is not None
     _mark_current_space(source, settings)
     with source.write_transaction() as conn:
-        evidence_id = conn.execute(
-            "SELECT id FROM memory_evidence WHERE memory_id=? ORDER BY id LIMIT 1",
+        row_id = conn.execute(
+            "SELECT id FROM memory_row WHERE memory_id=? ORDER BY id LIMIT 1",
             (memory_id,),
         ).fetchone()[0]
-        conn.execute("DELETE FROM memory_evidence_vec WHERE id=?", (evidence_id,))
+        conn.execute("DELETE FROM memory_row_vec WHERE id=?", (row_id,))
         conn.execute(
             "UPDATE migration_state SET value='local_text_evidence_v1' "
             "WHERE key='schema_generation'"
@@ -2057,125 +1677,6 @@ def test_previous_generation_with_stale_same_space_evidence_defers_to_doctor(
 
     assert plan["upgrade_mode"] == "conflict_only"
     assert plan["schema_migration"]["vector_effect"] == "preserve"
-
-
-def test_previous_generation_with_wrong_vector_dimension_defers_to_deep_doctor(
-    tmp_path: Path,
-) -> None:
-    pytest.importorskip("sqlite_vec")
-    source_path = tmp_path / "previous.sqlite3"
-    target_path = tmp_path / "current.sqlite3"
-    source_settings = _same_space_settings(source_path, tmp_path)
-    source = MemoryDB(source_settings)
-    _mark_current_space(source, source_settings)
-    with source.write_transaction() as conn:
-        conn.execute(
-            "UPDATE migration_state SET value='local_text_evidence_v1' "
-            "WHERE key='schema_generation'"
-        )
-    mismatched_settings = Settings(
-        db_path=source_path,
-        backup_jsonl=tmp_path / "backup.jsonl",
-        embedding_model_path=source_settings.embedding_model_path,
-    )
-    # Forged identity: the library's vectors are 2-dim (published above), the
-    # recorded space id is computed as if the active dim were 3.
-    forged_space = _configured_embedding_space_id(mismatched_settings, 3)
-    assert forged_space is not None
-    with source.write_transaction() as conn:
-        conn.execute(
-            "UPDATE _vec_index_meta SET value=? WHERE key='active_space_id'",
-            (forged_space,),
-        )
-
-    plan = inspect(source_path, target_path, mismatched_settings)
-
-    assert plan["upgrade_mode"] == "conflict_only"
-    assert plan["schema_migration"]["vector_effect"] == "preserve"
-
-
-def test_generation_switch_marker_is_atomic_with_scan_metadata(tmp_path: Path) -> None:
-    path = tmp_path / "db.sqlite3"
-    db = MemoryDB(_settings(path, tmp_path))
-    _mark_conflict_rebuild_ready(db)
-    with sqlite3.connect(path) as conn:
-        state = dict(conn.execute("SELECT key,value FROM migration_state"))
-    assert state["schema_generation"] == CURRENT_SCHEMA_GENERATION
-    assert state["migration_completed_at"]
-    assert "phase" not in state
-    assert state["conflict_scan_required"] == "true"
-    assert state["conflict_scan_detector_version"] == CONFLICT_DETECTOR_VERSION
-    boundary = json.loads(state["conflict_scan_boundary"])
-    assert boundary["active_count"] == 0
-    assert boundary["max_memory_id"] == 0
-    assert len(boundary["active_set_digest"]) == 64
-
-
-def test_status_and_doctor_expose_pending_rebuild_scan(tmp_path: Path) -> None:
-    path = tmp_path / "db.sqlite3"
-    settings = _settings(path, tmp_path)
-    db = MemoryDB(settings)
-    _mark_conflict_rebuild_ready(db)
-    tools = MemoryTools(settings=settings, db=db)
-    status = tools.memory_status()["data"]
-    assert status["conflict_scan_required"] is True
-    assert status["conflict_scan"]["detector_version"] == CONFLICT_DETECTOR_VERSION
-    findings = tools.memory_doctor_overview()["data"]["findings"]
-    scan = next(item for item in findings if item["check_id"] == "conflicts.scan_required")
-    assert scan["status"] == "warn"
-
-
-def test_write_between_upgrade_and_scan_rearms_instead_of_wedging(tmp_path: Path) -> None:
-    """Spec §15.7/§15.8.24 recovery: a live-boundary drift re-arms the epoch so a
-    fresh full scan can still clear conflict_scan_required, instead of wedging."""
-    path = tmp_path / "db.sqlite3"
-    settings = _settings(path, tmp_path)
-    db = MemoryDB(settings)
-    first_id, _ = db.insert_memory(_upgrade_memory(settings.defaults()), "project")
-    assert first_id is not None
-    original = _mark_conflict_rebuild_ready(db)
-    original_boundary = db.conflict_scan_state()["boundary"]
-
-    # A memory write after upgrade drifts the live active-set boundary: pages
-    # recorded against the original boundary are now rejected.
-    second_id, _ = db.insert_memory(
-        MemoryRecord.from_input(
-            {"content": "另一个配置。", "subject": "配置", "workspace": "project"},
-            settings.defaults(),
-        ),
-        "project",
-    )
-    assert second_id is not None
-    assert db.record_conflict_scan_page(
-        epoch=original["conflict_scan_epoch"],
-        detector_version=CONFLICT_DETECTOR_VERSION,
-        boundary=original_boundary,
-        after_memory_id=0, next_anchor_memory_id=None, anchors_scanned=2,
-        workspace=None,
-    ) is False
-    assert db.conflict_scan_state()["required"] is True
-
-    # Re-arm against the current live set, then a full scan of the new boundary
-    # clears the flag.
-    assert db.rearm_conflict_scan_if_drifted() is True
-    rearmed = db.conflict_scan_state()
-    assert rearmed["required"] is True
-    assert rearmed["epoch"] != original["conflict_scan_epoch"]
-    assert rearmed["progress"] is None
-    assert db.record_conflict_scan_page(
-        epoch=rearmed["epoch"],
-        detector_version=CONFLICT_DETECTOR_VERSION,
-        boundary=rearmed["boundary"],
-        after_memory_id=0, next_anchor_memory_id=None, anchors_scanned=2,
-        workspace=None,
-    ) is True
-    assert db.complete_conflict_scan(
-        epoch=rearmed["epoch"], detector_version=CONFLICT_DETECTOR_VERSION,
-        boundary=rearmed["boundary"],
-    ) is True
-    assert db.conflict_scan_state()["required"] is False
-    # No re-arm happens when the boundary is already consistent.
-    assert db.rearm_conflict_scan_if_drifted() is False
 
 
 def test_conflict_only_validation_failure_marks_phase_failed(tmp_path: Path, monkeypatch) -> None:
@@ -2257,25 +1758,6 @@ import threading
 import time
 from pathlib import Path
 
-from memory_arbiter.semantic_conflict import (
-    IsolatedGGUFSemanticBackend,
-    ModelSignal,
-    WorkspaceCandidateSignal,
-)
-
-
-def _responsive_child(conn, config):
-    try:
-        while True:
-            request = conn.recv()
-            if request.get("command") == "shutdown":
-                return
-            conn.send({
-                "ok": True,
-                "result": ModelSignal(True, "replacement", 0.9, "{}", {"pid": os.getpid()}),
-            })
-    except (EOFError, OSError):
-        return
 
 
 def _blocking_child(conn, config):
@@ -2287,250 +1769,6 @@ def _blocking_child(conn, config):
         time.sleep(10)
     except (EOFError, OSError):
         return
-
-
-def _serial_probe_child(conn, config):
-    try:
-        while True:
-            request = conn.recv()
-            if request.get("command") == "load":
-                conn.send({"ok": True, "result": {"loaded": True}})
-                continue
-            time.sleep(0.08)
-            conn.send({"ok": True, "result": ModelSignal(True, "replacement", 0.9, "{}", {"pid": os.getpid()})})
-    except (EOFError, OSError):
-        return
-
-
-def _fair_probe_child(conn, config):
-    try:
-        while True:
-            request = conn.recv()
-            if request.get("command") == "load":
-                conn.send({"ok": True, "result": {"loaded": True}})
-                continue
-            time.sleep(0.025)
-            if request.get("command") == "classify_pair":
-                result = ModelSignal(True, "replacement", 0.9, "{}", {"kind": "notice"})
-            else:
-                result = WorkspaceCandidateSignal("canonical", "alias", 0.9, "same")
-            conn.send({"ok": True, "result": result})
-    except (EOFError, OSError):
-        return
-
-
-def _workspace_probe_child(conn, config):
-    try:
-        while True:
-            request = conn.recv()
-            if request.get("command") == "load":
-                conn.send({"ok": True, "result": {"loaded": True}})
-                continue
-            if request.get("command") == "classify_pair":
-                time.sleep(10)
-            conn.send({
-                "ok": True,
-                "result": WorkspaceCandidateSignal("canonical", "alias", 0.9, "same"),
-            })
-    except (EOFError, OSError):
-        return
-
-
-def _first_generation_blocks_child(conn, config):
-    marker = Path(config["model_path"]).with_suffix(".started")
-    first_generation = not marker.exists()
-    marker.touch(exist_ok=True)
-    try:
-        while True:
-            request = conn.recv()
-            if request.get("command") == "load":
-                conn.send({"ok": True, "result": {"loaded": True}})
-                continue
-            if first_generation:
-                time.sleep(10)
-            conn.send({"ok": True, "result": ModelSignal(True, "replacement", 0.9, "{}", {"pid": os.getpid()})})
-    except (EOFError, OSError):
-        return
-
-
-def _backend(tmp_path: Path, target, timeout=500) -> IsolatedGGUFSemanticBackend:
-    model = tmp_path / "fake.gguf"
-    model.write_bytes(b"fake")
-    return IsolatedGGUFSemanticBackend(
-        model, hard_timeout_ms=timeout, process_target=target,
-    )
-
-
-def _status_piggyback_child(conn, config):
-    """Child that reports retry counters in the classify_pair envelope (the
-    0.15.11 production child does this so the parent's status() can surface
-    them without a blocking status RPC)."""
-    calls = 0
-    try:
-        while True:
-            request = conn.recv()
-            if request.get("command") == "load":
-                conn.send({"ok": True, "result": {"loaded": True}})
-                continue
-            calls += 1
-            conn.send({
-                "ok": True,
-                "result": ModelSignal(True, "replacement", 0.9, "{}", {"pid": os.getpid()}),
-                "backend_status": {"pair_retried": calls, "pair_retry_recovered": calls - 1},
-            })
-    except (EOFError, OSError):
-        return
-
-
-def test_process_backend_surfaces_child_retry_counters(tmp_path: Path) -> None:
-    backend = _backend(tmp_path, _status_piggyback_child)
-    before = backend.status()
-    assert before["pair_retried"] is None  # no pair completed yet
-    assert backend.classify_pair({}, {}).candidate_type == "replacement"
-    after = backend.status()
-    assert after["pair_retried"] == 1
-    assert after["pair_retry_recovered"] == 0
-    assert backend.classify_pair({}, {}).candidate_type == "replacement"
-    assert backend.status()["pair_retried"] == 2
-    assert backend.status()["pair_retry_recovered"] == 1
-    backend.unload()
-
-
-def test_process_backend_reuses_one_resident_child(tmp_path: Path) -> None:
-    backend = _backend(tmp_path, _responsive_child)
-    first = backend.classify_pair({}, {})
-    first_pid = first.parsed["pid"]
-    second = backend.classify_pair({}, {})
-    assert second.parsed["pid"] == first_pid
-    assert backend.status()["max_concurrency"] == 1
-    assert backend.unload(timeout=1)["ok"] is True
-
-
-def test_process_backend_hard_timeout_terminates_child(tmp_path: Path) -> None:
-    backend = _backend(tmp_path, _blocking_child, timeout=100)
-    result = backend.classify_pair({}, {})
-    assert result.candidate is False
-    assert "hard timeout" in (result.error or "")
-    status = backend.status()
-    assert status["model_state"] == "unloaded"
-    assert status["timed_out_jobs"] == 1
-    assert status["child_restarts"] == 1
-
-
-def test_process_backend_concurrent_callers_are_serialized(tmp_path: Path) -> None:
-    backend = _backend(tmp_path, _serial_probe_child, timeout=1000)
-    results = []
-    started = time.monotonic()
-    threads = [threading.Thread(target=lambda: results.append(backend.classify_pair({}, {}))) for _ in range(2)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join(timeout=3)
-    elapsed = time.monotonic() - started
-    assert len(results) == 2
-    assert elapsed >= 0.14
-    assert backend.status()["max_concurrency"] == 1
-    backend.force_terminate()
-    assert backend.status()["child_pid"] is None
-
-
-def test_scheduler_discards_expired_workspace_and_preserves_notice_budget(tmp_path: Path) -> None:
-    backend = _backend(tmp_path, _fair_probe_child, timeout=1000)
-    blocker = threading.Thread(target=lambda: backend.classify_pair({}, {}))
-    blocker.start()
-    deadline = time.monotonic() + 1
-    while backend.status()["inflight"] != 1 and time.monotonic() < deadline:
-        time.sleep(0.005)
-
-    started = time.monotonic()
-    expired = backend.suggest_workspace_candidate(
-        "raw", {}, ["canonical"], deadline_monotonic=time.monotonic() + 0.005,
-    )
-    elapsed = time.monotonic() - started
-    assert expired.candidate is None
-    assert "deadline" in (expired.error or "")
-    assert elapsed < 0.05
-
-    notice = backend.classify_pair({}, {})
-    assert notice.candidate is True
-    blocker.join(1)
-    assert not blocker.is_alive()
-    backend.force_terminate()
-
-
-def test_scheduler_is_fair_under_continuous_workspace_and_notice_load(tmp_path: Path) -> None:
-    backend = _backend(tmp_path, _fair_probe_child, timeout=1000)
-    barrier = threading.Barrier(9)
-    completed: list[str] = []
-    lock = threading.Lock()
-
-    def run(kind: str) -> None:
-        barrier.wait()
-        if kind == "workspace":
-            result = backend.suggest_workspace_candidate(
-                "raw", {}, ["canonical"], deadline_monotonic=time.monotonic() + 2,
-            )
-            ok = result.candidate == "canonical"
-        else:
-            ok = backend.classify_pair({}, {}).candidate
-        if ok:
-            with lock:
-                completed.append(kind)
-
-    threads = [threading.Thread(target=run, args=(kind,)) for kind in (["workspace", "notice"] * 4)]
-    for thread in threads:
-        thread.start()
-    barrier.wait()
-    for thread in threads:
-        thread.join(3)
-    assert completed.count("workspace") == 4
-    assert completed.count("notice") == 4
-    assert max(
-        max(i for i, kind in enumerate(completed) if kind == "workspace"),
-        max(i for i, kind in enumerate(completed) if kind == "notice"),
-    ) < 8
-    backend.force_terminate()
-
-
-def test_disable_closes_admission_before_unload_timeout(tmp_path: Path) -> None:
-    backend = _backend(tmp_path, _workspace_probe_child, timeout=5_000)
-    started = threading.Event()
-
-    def run_inference():
-        started.set()
-        backend.classify_pair({}, {})
-
-    thread = threading.Thread(target=run_inference)
-    thread.start()
-    assert started.wait(1)
-    deadline = time.monotonic() + 2
-    while backend.status()["inflight"] != 1 and time.monotonic() < deadline:
-        time.sleep(0.01)
-
-    disabled = backend.unload(timeout=0.01, disable=True)
-    assert disabled["timeout"] is True
-    assert backend.status()["disabled"] is True
-
-    suggest_started = time.monotonic()
-    suggestion = backend.suggest_workspace_candidate("raw", {}, ["canonical"])
-    assert time.monotonic() - suggest_started < 0.5
-    assert suggestion.candidate is None
-    assert suggestion.error == "semantic backend disabled"
-    backend.force_terminate()
-    thread.join(2)
-    assert not thread.is_alive()
-
-
-def test_process_backend_recovers_with_new_generation_after_timeout(tmp_path: Path) -> None:
-    backend = _backend(tmp_path, _first_generation_blocks_child, timeout=100)
-    first = backend.classify_pair({}, {})
-    assert first.candidate is False
-    second = backend.classify_pair({}, {})
-    assert second.candidate is True
-    status = backend.status()
-    assert status["generation"] == 2
-    assert status["timed_out_jobs"] == 1
-    backend.force_terminate()
 
 
 def test_bare_candidate_promoted_when_rerecorded_as_open(tmp_path: Path) -> None:
@@ -2591,11 +1829,32 @@ def test_pre_qwen_vetoes_ops_marker_and_decision_vs_observation() -> None:
                            "单笔退款超过 500 元就需要财务复核。").reason == "numeric_value_candidate"
 
 
+def test_chinese_duration_folds_to_same_value() -> None:
+    """0.17.0 P2-1.2：中文时长词预折——「半秒 vs 500毫秒」曾因归一化失败
+    误报为冲突（基线 ny-neg-samevalue 活体证据）；第 1-5 轮 spike 铁证
+    D1 型（值都抽对、全死在归一化）。"""
+    from memory_arbiter.semantic_conflict import normalize_value
+    for left, right in [
+        ("半秒", "500毫秒"), ("半秒", "0.5s"), ("半秒", "500ms"),
+        ("一刻钟", "15分钟"), ("一刻钟", "900000ms"), ("半小时", "30分钟"),
+        ("两秒", "2秒"), ("两秒", "2000ms"), ("十点", "10点"),
+        ("三小时", "180分钟"),
+    ]:
+        assert normalize_value(left) == normalize_value(right), (left, right)
+    # 不等仍是冲突：十点 vs 两点
+    assert normalize_value("十点") != normalize_value("两点")
+    assert normalize_value("半秒") != normalize_value("三秒")
+    # 散文不折：折算只作用于整值锚定形态
+    from memory_arbiter.semantic_conflict import _fold_chinese_duration
+    assert _fold_chinese_duration("大约半秒的延迟") == "大约半秒的延迟"
+
+
+
 def test_pre_qwen_veto_process_records() -> None:
     """2026-09-17（owner 原则延伸）：过程记录（review 轮次/设计→发版/
     重启复验）在 Qwen 之前过滤——单向实测三个穿透形态的收口。业务
     对象 id 的值对立（任务 id=123 预算 5000 vs 500）必须保活。"""
-    from memory_arbiter.semantic_conflict import decide_evidence
+    from memory_arbiter.semantic_conflict import _PROCESS_REVERIFY_RE, decide_evidence
     assert decide_evidence(
         "id=609 adversarial review findings after implementation: backend import",
         "Follow-up review for id=609 after attempted fixes: environment confirmed",
@@ -2613,3 +1872,51 @@ def test_pre_qwen_veto_process_records() -> None:
     assert d.reason == "numeric_value_candidate"
     assert decide_evidence("单笔退款超过 5000 元需要财务复核。",
                            "单笔退款超过 500 元就需要财务复核。").reason == "numeric_value_candidate"
+    # 0.17.0 P2-1.1：裸「复审」是政策语句不是评审记录——第 11 轮生产误杀
+    # （"每半年复审"配置对永远到不了 Qwen）；带语境的评审记录仍 veto。
+    assert decide_evidence(
+        "网关证书每半年复审一次，由安全组执行。",
+        "网关证书每季度复审一次，由安全组执行。",
+    ).reason != "process_record"
+    assert decide_evidence(
+        "方案复审结论：通过，可进入实施。",
+        "方案复审记录归档于 id=77。",
+    ).reason == "process_record"
+    # 同组排查：裸「复验」与 "pre-verify" 不再误杀
+    assert decide_evidence(
+        "灰度复验通过后全量放开。",
+        "灰度复验通过后按计划推进。",
+    ).reason != "process_record"
+    assert "pre-verify" not in _PROCESS_REVERIFY_RE.pattern  # 边界在位
+    assert not _PROCESS_REVERIFY_RE.search("we pre-verify the checksum")
+
+
+def test_lineage_version_evolution_veto_e1() -> None:
+    """0.17.0 P2-6.3（E1）：双侧自报不同谱系版本=取代演进，不按冲突报；
+    E2（产品版本差异）与无谱系对不受影响。"""
+    from memory_arbiter.semantic_conflict import decide_evidence
+    assert decide_evidence(
+        "缓存 TTL 设计文档 v1.0：本地缓存 TTL 5 分钟，按业务域配置。",
+        "缓存 TTL 设计文档 v2.0 取代 v1.0：TTL 调整为 10 分钟。",
+    ).reason == "lineage_version_evolution"
+    assert decide_evidence(
+        "限流规则第一版：单机 100 QPS。",
+        "限流规则第 2 版：单机 200 QPS。",
+    ).reason == "lineage_version_evolution"
+    # E2：同谱系语境下的产品版本差异仍是候选（不 veto）
+    d = decide_evidence(
+        "网关设计文档定稿：产品版本要求 1.0，协议走 gRPC。",
+        "网关设计文档定稿：产品版本要求 2.0，协议走 REST。",
+    )
+    assert d.reason != "lineage_version_evolution"
+    # 无谱系对：原行为不变
+    assert decide_evidence("连接池上限为 10。", "连接池上限为 99。").reason == "numeric_value_candidate"
+    # 对抗 review P1-1 反例：标记词+十进制数值是中文配置句式，不是版本号
+    assert decide_evidence("熔断方案 1.5 秒超时。", "熔断方案 2.0 秒超时。").reason == "numeric_value_candidate"
+    assert decide_evidence("上传规格 0.5mb 上限。", "上传规格 2.5mb 上限。").reason == "numeric_value_candidate"
+    # v 前缀整数（无点）也生效
+    assert decide_evidence(
+        "方案 v1 上线后参数 X 为 5。", "方案 v2 上线后参数 X 为 9。",
+    ).reason == "lineage_version_evolution"
+
+

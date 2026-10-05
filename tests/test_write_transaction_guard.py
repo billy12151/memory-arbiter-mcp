@@ -75,7 +75,7 @@ def test_body_failure_still_rolls_back(tmp_path: Path) -> None:
 
 def test_post_commit_failure_after_insert_reports_ok_with_warning(tmp_path: Path) -> None:
     """Adversarial round 2: an exception in post-commit processing (e.g. the
-    semantic worker reserve) AFTER the insert committed must not be reported
+    semantic worker enqueue) AFTER the insert committed must not be reported
     as {written: False} — the row is durable, so a failure response makes the
     caller retry and duplicate the memory. The write degrades to an ok
     response carrying the new memory id plus a warning."""
@@ -89,10 +89,13 @@ def test_post_commit_failure_after_insert_reports_ok_with_warning(tmp_path: Path
     baseline = tools.memory_write(content="baseline", subject="s0", tags=[])
     assert baseline["ok"] is True
 
-    def boom(task_id):
+    # 0.17.0 C2 worker merge: the write path's post-commit entry is the ONE
+    # semantic-job enqueue (indexing + detection live in that job); the old
+    # separate evidence-worker reserve hook is gone.
+    def boom(memory_id, snapshot):
         raise RuntimeError("injected worker fault")
 
-    tools._semantic_worker.reserve = boom
+    tools._semantic_worker.enqueue = boom
     failed = tools.memory_write(content="important fact", subject="dup-test", tags=[])
 
     assert failed["ok"] is True, failed

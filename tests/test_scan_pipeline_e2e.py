@@ -112,7 +112,7 @@ def _run_e2e(tools: MemoryTools) -> None:
                 subject=f"偏好素材{serial}", workspace="mema-twin", tags=[],
             )
             assert res.get("ok"), res
-    assert tools.wait_evidence_worker_drained(timeout=120)
+    assert tools.wait_semantic_worker_drained(timeout=120)
     assert tools.wait_semantic_worker_drained(timeout=120)
 
     # ── 1) write-time: internal-first detection ─────────────────────────
@@ -212,16 +212,18 @@ def _run_e2e(tools: MemoryTools) -> None:
             for i in ws_items
         ]})
         assert submit["ok"], submit
-    _kick(tools, max_memories=500, time_budget_s=180.0)
+    # 0.17.0 P2-6.2：慢车道按墙钟轮转会在后续 kick 发现新对（设计意图=
+    # 全覆盖），零变化断言关掉它，只测水位幂等不变量。
+    _kick(tools, max_memories=500, time_budget_s=180.0, slow_lane=False)
     with tools.db.connection() as conn:
         before = conn.execute("SELECT COUNT(*) FROM scan_queue").fetchone()[0]
-    kick2 = _kick(tools, max_memories=500, time_budget_s=180.0)
+    kick2 = _kick(tools, max_memories=500, time_budget_s=180.0, slow_lane=False)
     assert kick2["complete"] is True
     with tools.db.connection() as conn:
         after = conn.execute("SELECT COUNT(*) FROM scan_queue").fetchone()[0]
     assert after == before, "零变化第二轮不得新增队列项"
     tools.memory("update", {"memory_id": a, "new_content": "生产环境数据库端口设置为 5434。", "reason": "e2e edit"})
-    assert tools.wait_evidence_worker_drained(timeout=120)
+    assert tools.wait_semantic_worker_drained(timeout=120)
     assert tools.wait_semantic_worker_drained(timeout=120)
     _kick(tools, max_memories=500, time_budget_s=180.0)
     with tools.db.connection() as conn:

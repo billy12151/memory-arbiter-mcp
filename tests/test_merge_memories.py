@@ -317,6 +317,7 @@ def _confirm_pending(tools: MemoryTools, memory_id: int) -> None:
     if record["status"] != "pending":
         return
     confirmed = tools.memory_govern("confirm_pending_workspace", {
+        "workspace": record.get("workspace_canonical") or record.get("workspace") or "default",
         "memory_id": memory_id,
         "canonical": record["workspace_canonical"] or record["workspace"],
         "authorized": True,
@@ -388,7 +389,7 @@ def test_scan_duplicates_pool_default_off_and_opt_in(vec_tools: MemoryTools) -> 
     tools = vec_tools
     _write_for_scan(tools, "release version 1.2.3 is shipped")
     _write_dup_bypass(tools, "release version 1.2.3 is shipped")
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
 
     baseline = tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 50, "k": 10, "include_quotes": True})
     assert baseline["ok"] is True, baseline
@@ -421,7 +422,7 @@ def test_scan_duplicates_pool_cap_and_truncation(vec_tools: MemoryTools) -> None
             # write gate would otherwise absorb it and shrink the pool below
             # the cap the fixture exists to exercise.
             _write_dup_bypass(tools, f"cap probe identical statement number {index % 2}")
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     result = tools.memory_repair("scan_candidates", {
         "anchor_memory_id": 0, "batch": 1, "k": 10, "include_duplicates": True, "include_quotes": True,
     })
@@ -454,7 +455,7 @@ def test_scan_duplicates_pool_full_rehit_does_not_flag_truncation(vec_tools: Mem
     _write_for_scan(tools, "shared statement alpha\n\nshared statement alpha")
     _write_for_scan(tools, "shared statement alpha")
     _write_dup_bypass(tools, "shared statement alpha")
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     result = tools.memory_repair("scan_candidates", {
         "anchor_memory_id": 0, "batch": 1, "k": 10, "include_duplicates": True, "include_quotes": True,
     })

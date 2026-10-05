@@ -22,15 +22,29 @@ from .timeutil import utc_now_iso
 # byte-fallback character landing exactly on the cut boundary can shift the
 # cut by one trailing token — the same tail-truncation regime as before), so
 # the space id must NOT rotate.
-# ⚠️ P1-T5 audit obligation: read.py's table-first outline serves preview
-# heads/offsets straight from memory_evidence; any change that alters unit
-# segmentation — a bump here OR any edit to local_text_units/分段逻辑 itself
-# — MUST re-run scripts/audit_outline_table_parity.py on a real-DB copy and
-# keep the mismatch rate at zero before shipping.
+# (0.17.0 C4: the P1-T5 unit-parity audit obligation retired with the unit
+# tables — outline serves from memory_row now; rowseg owns segmentation.)
+# v3 (owner 2026-09-25, UNRELEASED — superseded before ship): task prefixes
+# on every call, then query×query — both rotated the space (2→3).
+# v2 remains the released (0.16.12) definition and STAYS the version: the
+# final 0.17.0 form (owner 2026-09-26) is storage-side BARE — byte-identical
+# embed text to what 0.16.12 produced (_summary_embed_text /
+# _subject_tags_embed_text unchanged, EMBED_PREFIX_STS="") — so upgrading
+# user libraries keep every stored vector with NO forced re-embed. The
+# query-side prefix is runtime-only (queries embed at search time). New row
+# vectors backfill as new-schema coverage, not a space rotation. WARNING for
+# the next person: prefix constants are NOT part of compute_embedding_space_id
+# (model_digest/dim/version/config only) — any future change that alters
+# STORAGE-side embed text must bump this version by hand or stale vectors
+# hide behind an unchanged space id.
 EMBEDDING_PIPELINE_VERSION = 2
 
 EncodeFn = Callable[[str], list[float]]
 TokenizeFn = Callable[[str], list[int]]
+# Batched encode for the index path (C1): one llama embed(list) call; the
+# library splits across n_batch internally (spike 2026-09-23: 16 items ×
+# 44 tokens = 704 crossing n_batch=512 lost zero items, zero empty vectors).
+EncodeBatchFn = Callable[[list[str]], list[list[float]]]
 # Rebuilds a CPU-only (encode, tokenize) pair from scratch; returns instead
 # of raising so the caller can treat failure as "no degrade possible".
 CpuRebuildFn = Callable[[], tuple["EncodeFn", "TokenizeFn"]]
@@ -38,6 +52,14 @@ CpuRebuildFn = Callable[[], tuple["EncodeFn", "TokenizeFn"]]
 # ManagedEmbedder.close for why interpreter-teardown finalization is not
 # enough).
 CloseFn = Callable[[], None]
+
+# C1: texts longer than this go through embed_text one-by-one (its exact
+# binary-search token-budget truncation); everything else goes through one
+# batched embed(list) call. Keeps both routes' truncation semantics
+# identical: batched items never reach the library's internal n_batch
+# truncation (500 chars ≈ ≤512 tokens even for CJK), long items get the
+# per-item budget. Wall clock spike: 35 items 506→293ms (1.73x).
+EMBED_TEXTS_SPLIT_CHARS = 500
 
 
 @dataclass
@@ -95,6 +117,11 @@ class ManagedEmbedder:
     # GPU→CPU degrade also runs under this lock (only embed_text calls it),
     # so a rebuild can never race a concurrent encode.
     _embed_lock: threading.Lock = field(default_factory=threading.Lock)
+    # C1: batched encode closure from the SAME live instance as encode_raw.
+    # None on fakes (tests) or after a GPU→CPU degrade (the rebuild only
+    # produces single-item closures; embed_texts then degrades to per-item
+    # embed_text — correctness first, the batch is an optimization).
+    encode_batch: "EncodeBatchFn | None" = None
 
     def token_budget(self) -> int:
         """Max tokens one embed_text call may send to the model.
@@ -204,6 +231,78 @@ class ManagedEmbedder:
                 used_tokens=used_tokens,
             )
 
+    def embed_texts(
+        self, texts: list[str], prefix: str = "",
+    ) -> list[EmbedResult]:
+        """Batched embed for the index path (C1).
+
+        One ``embed(list)`` call for items at or under
+        EMBED_TEXTS_SPLIT_CHARS; embed_text one-by-one for longer items so
+        truncation semantics are identical on both routes. A batch failure
+        (exception, count mismatch, empty vector) retries once on the same
+        instance, then falls through to per-item embed_text — a never-raises
+        surface whose empty-embedding sentinel pins the failing item, so one
+        bad item never takes down the whole job. original/used token counts
+        are 0 on the batched route (no per-item tokenize — that cost is what
+        the batch exists to avoid).
+        Thread-safety: the batch call runs under the same ``_embed_lock``.
+        """
+        results: list[EmbedResult | None] = [None] * len(texts)
+        short_idx = [
+            i for i, t in enumerate(texts)
+            if len(t) + len(prefix) <= EMBED_TEXTS_SPLIT_CHARS and t.strip()
+            # 前缀计入 batch 预算（对抗 review P2-1）：500 字 CJK+前缀
+            # 触 n_batch 截尾会与 per-item 回退分叉
+        ]
+        if short_idx and self.encode_batch is not None:
+            # batch 路由与 embed_text 同一拼接语义（prefix+"\n"+text）——
+            # 对抗 review P1：两条路产出必须逐位同空间（batch 成功/回退一致）
+            batch_texts = [
+                (prefix + "\n" + texts[i]) if prefix else texts[i]
+                for i in short_idx
+            ]
+            vectors = self._encode_batch_with_retry(batch_texts)
+            if vectors is not None:
+                for i, vec in zip(short_idx, vectors):
+                    results[i] = EmbedResult(
+                        embedding=vec, truncated=False,
+                        original_tokens=0, used_tokens=0,
+                    )
+        for i in range(len(texts)):
+            if results[i] is None:
+                results[i] = self.embed_text(prefix=prefix, body=texts[i])
+        return [r for r in results if r is not None]
+
+    def _encode_batch_with_retry(self, batch: list[str]) -> "list[list[float]] | None":
+        """One retry, then give the batch up (caller degrades per-item)."""
+        for _attempt in (1, 2):
+            try:
+                with self._embed_lock:
+                    vectors = self.encode_batch(list(batch))  # type: ignore[misc]
+                if len(vectors) == len(batch) and all(vectors):
+                    return vectors
+                self.last_encode_error = (
+                    f"batch embed returned {len(vectors)}/{len(batch)} vectors"
+                    if len(vectors) != len(batch)
+                    else "batch embed returned empty vectors"
+                )
+            except Exception as exc:
+                self.last_encode_error = str(exc)
+                # R2 review P1: the degrade must run under _embed_lock (its
+                # docstring contract). The batch except fires AFTER the with
+                # block released the lock on the propagating exception, so an
+                # unlocked degrade closed the live GPU instance under any
+                # concurrent embed_text (use-after-free / torn closure swap).
+                with self._embed_lock:
+                    if self._maybe_degrade_to_cpu(str(exc)):
+                        # The rebuild swapped encode_raw/tokenize to the fresh CPU
+                        # instance; the batch closure still points at the closed
+                        # GPU one, so drop it — the next round exits via the
+                        # encode_batch-is-None path and the caller goes per-item.
+                        self.encode_batch = None
+                        return None
+        return None
+
     def close(self) -> None:
         """Deterministically free the live llama-cpp instance (shutdown path).
 
@@ -270,6 +369,9 @@ class ManagedEmbedder:
             return False
         self.encode_raw = encode
         self.tokenize = tokenize
+        # C1: the batch closure belongs to the closed GPU instance; drop it so
+        # embed_texts degrades to per-item calls on the fresh CPU instance.
+        self.encode_batch = None
         self.gpu_backed = False
         self.device_degraded_at = utc_now_iso()
         self.warnings.append(
@@ -352,7 +454,7 @@ def build_embedder(
                 kwargs["n_gpu_layers"] = -1
             return Llama(**kwargs)
 
-        def make_closures(instance: Any) -> tuple[EncodeFn, TokenizeFn]:
+        def make_closures(instance: Any) -> tuple[EncodeFn, TokenizeFn, EncodeBatchFn]:
             def encode(text: str) -> list[float]:
                 data = instance.create_embedding(text)["data"][0]["embedding"]
                 if not isinstance(data, list):
@@ -363,10 +465,24 @@ def build_embedder(
                         out.append(float(x))
                 return out
 
+            def encode_many(items: list[str]) -> list[list[float]]:
+                # C1: one library call for the whole list; llama-cpp-python
+                # splits across n_batch internally (spike-proven for items
+                # crossing the boundary). Output order matches input.
+                data = instance.create_embedding(list(items))["data"]
+                out: list[list[float]] = []
+                for entry in data:
+                    vec = entry["embedding"] if isinstance(entry, dict) else None
+                    if not isinstance(vec, list):
+                        out.append([])
+                        continue
+                    out.append([float(x) for x in vec if isinstance(x, (int, float))])
+                return out
+
             def tokenize(text: str) -> list[int]:
                 return [int(token) for token in instance.tokenize(text.encode("utf-8"), add_bos=False)]
 
-            return encode, tokenize
+            return encode, tokenize, encode_many
 
         def make_close(instance: Any) -> CloseFn:
             def close() -> None:
@@ -381,6 +497,10 @@ def build_embedder(
             gpu_backend = bool(llama_cpp.llama_supports_gpu_offload())
         except Exception:
             gpu_backend = False
+        # 训练让路开关（owner 2026-09-28）：MEMORY_ARBITER_EMBED_CPU=1 强制 CPU，
+        # 不碰 GPU（同机另一会话训练模型时避免 Metal 争用）。
+        if os.environ.get("MEMORY_ARBITER_EMBED_CPU") == "1":
+            gpu_backend = False
 
         llm: Any = None
         used_gpu = False
@@ -393,7 +513,7 @@ def build_embedder(
         if llm is None:
             llm = construct(False)
 
-        encode, tokenize = make_closures(llm)
+        encode, tokenize, encode_many = make_closures(llm)
 
         try:
             sample = encode("dimension probe")
@@ -409,7 +529,7 @@ def build_embedder(
             make_close(llm)()  # release the faulted GPU instance, mirroring the runtime degrade path
             llm = construct(False)
             used_gpu = False
-            encode, tokenize = make_closures(llm)
+            encode, tokenize, encode_many = make_closures(llm)
             sample = encode("dimension probe")
         dim = len(sample)
 
@@ -441,6 +561,7 @@ def build_embedder(
         return ManagedEmbedder(
             encode_raw=encode,
             tokenize=tokenize,
+            encode_batch=encode_many,
             model_digest=model_digest,
             embedding_space_id=space_id,
             n_ctx=n_ctx,
@@ -450,7 +571,9 @@ def build_embedder(
             warnings=warnings,
             gpu_backed=used_gpu,
             _close_instance=make_close(llm),
-            _cpu_rebuild=(lambda: make_closures(construct(False))) if used_gpu else None,
+            # [:2] keeps CpuRebuildFn's 2-tuple contract; the CPU replacement
+            # offers no batch closure (degrade → per-item embed_text, by design).
+            _cpu_rebuild=(lambda: make_closures(construct(False))[:2]) if used_gpu else None,
         ), warnings
     except Exception as exc:
         warnings.append(f"GGUF embedder load failed: {exc}; auto-embedding disabled.")

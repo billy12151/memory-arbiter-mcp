@@ -94,10 +94,6 @@ class CallerWorkspace:
     #: when set. Empty for non-strict callers (they never hard-scope by it).
     admitted: tuple[str, ...] = ()
 
-    @property
-    def strict(self) -> bool:
-        return self.isolation == "strict"
-
     def scope_canonicals(self) -> tuple[str, ...]:
         """Admitted set for strict SQL/visibility scoping.
 

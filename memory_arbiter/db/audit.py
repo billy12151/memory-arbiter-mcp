@@ -29,6 +29,96 @@ class AuditStore:
     def __init__(self, db: "MemoryDB"):
         self._db = db
 
+    # ---- governance_audit (0.17.1 P2 #7) -----------------------------------
+
+    @staticmethod
+    def record_governance_action_on_conn(
+        conn: sqlite3.Connection,
+        action: str,
+        reason: "str | None" = None,
+        detail: "dict[str, Any] | None" = None,
+    ) -> None:
+        """Append one bucket-level governance row on the caller's transaction.
+
+        Bucket-level actions (rename/migrate/confirm_pending) carry no
+        memory_id and no lifecycle status, so this table is deliberately
+        invisible to the normalize_audit consumers (rollback_auto_move,
+        doctor). Best-effort inside a committed transaction: a missing legacy
+        table is tolerated (additive boot creates it for every new session).
+        """
+        try:
+            conn.execute(
+                "INSERT INTO governance_audit(created_at, action, reason, detail_json) "
+                "VALUES (?, ?, ?, ?)",
+                (
+                    utc_now_iso(),
+                    str(action),
+                    (str(reason) if reason else None),
+                    json.dumps(detail or {}, ensure_ascii=False),
+                ),
+            )
+        except sqlite3.Error:
+            pass
+
+    def record_governance_action(
+        self,
+        action: str,
+        reason: "str | None" = None,
+        detail: "dict[str, Any] | None" = None,
+    ) -> None:
+        """Standalone-transaction variant for already-committed actions."""
+        if not self._db._db_available or not self._db.state.sqlite_writable:
+            return
+        try:
+            with self._db.write_transaction() as conn:
+                self.record_governance_action_on_conn(conn, action, reason, detail)
+        except sqlite3.Error:
+            pass
+
+    def recent_governance_actions(
+        self, limit: int = 20, scope: "set[str] | tuple[str, ...] | None" = None,
+    ) -> list[dict[str, Any]]:
+        """Newest governance rows first; detail_json parsed into ``detail``.
+
+        ``scope`` filters rows to those touching a workspace in the set (the
+        known detail keys carry the old/new canonicals); None returns all.
+        """
+        if not self._db._db_available:
+            return []
+        try:
+            with self._db.connection() as conn:
+                rows = conn.execute(
+                    "SELECT id, created_at, action, reason, detail_json "
+                    "FROM governance_audit ORDER BY id DESC LIMIT ?",
+                    (int(limit),),
+                ).fetchall()
+        except sqlite3.Error:
+            return []
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                detail = json.loads(str(row["detail_json"] or "{}"))
+            except (ValueError, TypeError):
+                detail = {}
+            if not isinstance(detail, dict):
+                detail = {}
+            if scope is not None:
+                touched = {
+                    str(detail.get(key))
+                    for key in ("old_canonical", "new_canonical", "from", "to", "canonical")
+                    if detail.get(key) is not None
+                }
+                if not (touched & set(scope)):
+                    continue
+            out.append({
+                "id": int(row["id"]),
+                "created_at": row["created_at"],
+                "action": row["action"],
+                "reason": row["reason"],
+                "detail": detail,
+            })
+        return out
+
     def get_memory_summaries(self, memory_ids: list[int]) -> dict[int, dict[str, Any]]:
         db = self._db
         if not memory_ids or not db._db_available:
@@ -116,8 +206,8 @@ class AuditStore:
                     else None
                 ),
                 "semantic_model": (
-                    str(settings.semantic_conflict_model_path)
-                    if settings.semantic_conflict_model_path is not None
+                    str(settings.semantic_conflict_mdeberta_ckpt)
+                    if settings.semantic_conflict_mdeberta_ckpt is not None
                     else None
                 ),
             }

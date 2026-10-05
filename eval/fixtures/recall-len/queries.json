@@ -1,0 +1,461 @@
+{
+ "corpus_version": "recall-v3-len",
+ "queries": [
+  {
+   "qid": "L01",
+   "kind": "paraphrase",
+   "query": "What did the AgentLane run monitor UI push include and why did MCP results go plaintext-only?",
+   "lang": "en"
+  },
+  {
+   "qid": "L02",
+   "kind": "paraphrase",
+   "query": "When was memory-arbiter 0.14.1 released and what did the semantic timing fix cover?",
+   "lang": "en"
+  },
+  {
+   "qid": "L03",
+   "kind": "paraphrase",
+   "query": "What is the plan-mode policy for low-risk continuation and the execution review loop?",
+   "lang": "en"
+  },
+  {
+   "qid": "L04",
+   "kind": "paraphrase",
+   "query": "How did the JD socrates local proxy switch to the v1 compatibility layer?",
+   "lang": "en"
+  },
+  {
+   "qid": "L05",
+   "kind": "paraphrase",
+   "query": "What is the route-split setup of the JD socrates proxy on port 47821?",
+   "lang": "en"
+  },
+  {
+   "qid": "L06",
+   "kind": "paraphrase",
+   "query": "How was the Claude Code context length 40001 error through the JD proxy fixed?",
+   "lang": "en"
+  },
+  {
+   "qid": "L07",
+   "kind": "paraphrase",
+   "query": "What caused the ZCode proxy 40002 extended thinking failures and how were they fixed?",
+   "lang": "en"
+  },
+  {
+   "qid": "L08",
+   "kind": "paraphrase",
+   "query": "What was the update notice UX decision about 7-day suppression without ack?",
+   "lang": "en"
+  },
+  {
+   "qid": "L09",
+   "kind": "paraphrase",
+   "query": "mema Team v1 工程实施方案经过两轮对抗审查后的结论是什么？",
+   "lang": "zh"
+  },
+  {
+   "qid": "L10",
+   "kind": "paraphrase",
+   "query": "memory-arbiter v0.3.0 公司群推广文案定稿时有哪些要点？",
+   "lang": "mixed"
+  },
+  {
+   "qid": "L11",
+   "kind": "paraphrase",
+   "query": "README 的 The Bigger Picture 概念段是随哪个版本发的？",
+   "lang": "mixed"
+  },
+  {
+   "qid": "L12",
+   "kind": "paraphrase",
+   "query": "飞天小虾私有桥接自检那条记录是干什么的？",
+   "lang": "zh"
+  },
+  {
+   "qid": "L13",
+   "kind": "paraphrase",
+   "query": "plan-mode-mcp v0.1.0 的代码审查结论如何，有没有 P0 级问题？",
+   "lang": "mixed"
+  },
+  {
+   "qid": "L14",
+   "kind": "paraphrase",
+   "query": "Agnes 图片和视频 skill 的本地下载输出规则改成了什么样？",
+   "lang": "mixed"
+  },
+  {
+   "qid": "L15",
+   "kind": "paraphrase",
+   "query": "0.9 本地规则文档更新加了哪些 structured claims 冲突处理口径？",
+   "lang": "mixed"
+  },
+  {
+   "qid": "L16",
+   "kind": "paraphrase",
+   "query": "mema 和迷码指的是什么工具？",
+   "lang": "zh"
+  },
+  {
+   "qid": "L17",
+   "kind": "paraphrase",
+   "query": "workspace 归一为什么不能只靠向量相似度，还需要什么？",
+   "lang": "mixed"
+  },
+  {
+   "qid": "L18",
+   "kind": "paraphrase",
+   "query": "patent-writer 的工具与环境里模型 fallback 链是怎样的？",
+   "lang": "mixed"
+  },
+  {
+   "qid": "L19",
+   "kind": "paraphrase",
+   "query": "给其他系统装 memory-arbiter 应该优先引用哪份安装文档？",
+   "lang": "mixed"
+  },
+  {
+   "qid": "L20",
+   "kind": "paraphrase",
+   "query": "v0.8 工具收敛后日常只用哪几个接口，memory_split 保留成什么定位？",
+   "lang": "mixed"
+  },
+  {
+   "qid": "L21",
+   "kind": "paraphrase",
+   "query": "memory-arbiter 宣传物料的事实核验快照核到了哪些版本状态？",
+   "lang": "mixed"
+  },
+  {
+   "qid": "L22",
+   "kind": "paraphrase",
+   "query": "MCP 工具描述英文化在哪个版本上线，护栏怎么处理的？",
+   "lang": "zh"
+  },
+  {
+   "qid": "L23",
+   "kind": "paraphrase",
+   "query": "plan-mode-mcp 的 SKILL.md 精简版为什么刻意不写 approve_plan？",
+   "lang": "mixed"
+  },
+  {
+   "qid": "L24",
+   "kind": "paraphrase",
+   "query": "doctor 报的最新已知版本 0.9.5 比当前 0.9.8 旧，根因查出来是什么？",
+   "lang": "zh"
+  },
+  {
+   "qid": "L25",
+   "kind": "paraphrase",
+   "query": "v0.10.3 和 v0.10.4 的发布顺序为什么对调？",
+   "lang": "zh"
+  },
+  {
+   "qid": "L26",
+   "kind": "paraphrase",
+   "query": "workspace 语义归一方案里 strict 隔离下拿不准的写入怎么处理？",
+   "lang": "mixed"
+  },
+  {
+   "qid": "L27",
+   "kind": "paraphrase",
+   "query": "workspace resolver 的评测里为什么最终选了 rule-first 而不是 Qwen 裁决？",
+   "lang": "mixed"
+  },
+  {
+   "qid": "L28",
+   "kind": "paraphrase",
+   "query": "mema 腾讯云部署做了哪些安全加固？",
+   "lang": "zh"
+  },
+  {
+   "qid": "L29",
+   "kind": "paraphrase",
+   "query": "mema-core 的 CI 强制门覆盖哪些 Python 版本？",
+   "lang": "mixed"
+  },
+  {
+   "qid": "L30",
+   "kind": "paraphrase",
+   "query": "新建子 Agent 时配置注册要动哪两个地方？",
+   "lang": "zh"
+  },
+  {
+   "qid": "L31",
+   "kind": "paraphrase",
+   "query": "v0.2.3 发版时 README 的一句话定位改成了什么？",
+   "lang": "mixed"
+  },
+  {
+   "qid": "L32",
+   "kind": "paraphrase",
+   "query": "patent-writer 的文档入库规范里四层架构各放什么？",
+   "lang": "mixed"
+  },
+  {
+   "qid": "L33",
+   "kind": "paraphrase",
+   "query": "memory_edit 的版本链机制包含哪些工具和数据结构？",
+   "lang": "mixed"
+  },
+  {
+   "qid": "L34",
+   "kind": "paraphrase",
+   "query": "PyPI token 撤销跟踪最后的建议是什么？",
+   "lang": "mixed"
+  },
+  {
+   "qid": "L35",
+   "kind": "paraphrase",
+   "query": "dogfooding 方法论里为什么说诊断工具自闭环是黄金形态？",
+   "lang": "mixed"
+  },
+  {
+   "qid": "L36",
+   "kind": "paraphrase",
+   "query": "v0.8 分段和向量层是怎么绑定的，split_enabled 开关去哪了？",
+   "lang": "mixed"
+  },
+  {
+   "qid": "L37",
+   "kind": "paraphrase",
+   "query": "连续三个版本漏建 GitHub Release 的坑是怎么发现和补救的？",
+   "lang": "mixed"
+  },
+  {
+   "qid": "L38",
+   "kind": "paraphrase",
+   "query": "plan-mode 二期的 plan 持久化和跨 session resume 实现了什么？",
+   "lang": "mixed"
+  },
+  {
+   "qid": "L39",
+   "kind": "paraphrase",
+   "query": "v0.8.6 修了 memory_edit 的什么问题？",
+   "lang": "mixed"
+  },
+  {
+   "qid": "L40",
+   "kind": "paraphrase",
+   "query": "inactive 向量的幽灵召回问题是怎么修的？",
+   "lang": "mixed"
+  },
+  {
+   "qid": "L41",
+   "kind": "paraphrase",
+   "query": "jd-opus-proxy 怎么拿到并注入 JingleAI 的 Cookie？",
+   "lang": "mixed"
+  },
+  {
+   "qid": "L42",
+   "kind": "paraphrase",
+   "query": "mema v0.10.0 发布后复评的结论是什么？",
+   "lang": "mixed"
+  },
+  {
+   "qid": "L43",
+   "kind": "paraphrase",
+   "query": "Qwen 单模型语义冲突测试里 1.5B gate 策略表现如何？",
+   "lang": "mixed"
+  },
+  {
+   "qid": "L44",
+   "kind": "paraphrase",
+   "query": "M1 方案（id=647）的就绪度审查结论是什么？",
+   "lang": "zh"
+  },
+  {
+   "qid": "L45",
+   "kind": "paraphrase",
+   "query": "mema 开源与商业化的边界是怎么定的？",
+   "lang": "zh"
+  },
+  {
+   "qid": "L46",
+   "kind": "paraphrase",
+   "query": "mema 备案下来后 SEO 要做哪些站长平台收录？",
+   "lang": "mixed"
+  },
+  {
+   "qid": "L47",
+   "kind": "paraphrase",
+   "query": "memory_govern 为什么所有状态变更都要求 authorized=true？",
+   "lang": "mixed"
+  },
+  {
+   "qid": "L48",
+   "kind": "paraphrase",
+   "query": "营销链路里各业务线的活动推广页都用什么系统？",
+   "lang": "zh"
+  },
+  {
+   "qid": "L49",
+   "kind": "paraphrase",
+   "query": "v0.2.5 修的 CJK 查询被 strict phrase 勒死是什么 bug？",
+   "lang": "mixed"
+  },
+  {
+   "qid": "L50",
+   "kind": "paraphrase",
+   "query": "v0.3.0 的宽召回加软重排是为了治理什么问题？",
+   "lang": "zh"
+  },
+  {
+   "qid": "L51",
+   "kind": "paraphrase",
+   "query": "AgentRail 为什么决定保持独立 CLI，OpenClaw 扮演什么角色？",
+   "lang": "mixed"
+  },
+  {
+   "qid": "L52",
+   "kind": "paraphrase",
+   "query": "plan-mode-mcp v0.2.1 的竞品调研结论有哪些？",
+   "lang": "mixed"
+  },
+  {
+   "qid": "L53",
+   "kind": "paraphrase",
+   "query": "银行营销的新需求和续期分别走哪个系统？",
+   "lang": "zh"
+  },
+  {
+   "qid": "L54",
+   "kind": "paraphrase",
+   "query": "国补活动为什么金营不做一键配置？",
+   "lang": "zh"
+  },
+  {
+   "qid": "L55",
+   "kind": "paraphrase",
+   "query": "金营平台提需人提交后还能撤回吗？",
+   "lang": "zh"
+  },
+  {
+   "qid": "L56",
+   "kind": "paraphrase",
+   "query": "用户希望被怎么称呼，职业背景是什么？",
+   "lang": "zh"
+  },
+  {
+   "qid": "L57",
+   "kind": "paraphrase",
+   "query": "架构工作规范里工程实现固定委托给谁？",
+   "lang": "zh"
+  },
+  {
+   "qid": "L58",
+   "kind": "paraphrase",
+   "query": "金营平台的 PO 分别是谁，二期截止什么时候？",
+   "lang": "zh"
+  },
+  {
+   "qid": "L59",
+   "kind": "paraphrase",
+   "query": "小金库-消费和小金库超级攒怎么区分？",
+   "lang": "zh"
+  },
+  {
+   "qid": "L60",
+   "kind": "paraphrase",
+   "query": "金营二期资源位搭建和投放每月总耗时多少？",
+   "lang": "zh"
+  },
+  {
+   "qid": "L61",
+   "kind": "paraphrase",
+   "query": "金营需求统一收口切量的批次是怎么规划的？",
+   "lang": "zh"
+  },
+  {
+   "qid": "L62",
+   "kind": "paraphrase",
+   "query": "金融带货知识库里 VOP、VSP、锦鲤三种模式有什么区别？",
+   "lang": "zh"
+  },
+  {
+   "qid": "L63",
+   "kind": "paraphrase",
+   "query": "patent-writer 冲突处理规范里带 ✅ 的条目怎么处理？",
+   "lang": "mixed"
+  },
+  {
+   "qid": "L64",
+   "kind": "paraphrase",
+   "query": "金融带货角色确认要和领导对齐哪几个核心问题？",
+   "lang": "zh"
+  },
+  {
+   "qid": "L65",
+   "kind": "paraphrase",
+   "query": "金营一期建设成果里哪些还没完成？",
+   "lang": "zh"
+  },
+  {
+   "qid": "L66",
+   "kind": "paraphrase",
+   "query": "智能配券 12 个横向场景里量级排第一的是哪个？",
+   "lang": "zh"
+  },
+  {
+   "qid": "L67",
+   "kind": "paraphrase",
+   "query": "金营二期切量 v4 底表里切量原则是什么？",
+   "lang": "zh"
+  },
+  {
+   "qid": "L68",
+   "kind": "paraphrase",
+   "query": "京东 VOP 的定位是什么？",
+   "lang": "zh"
+  },
+  {
+   "qid": "L69",
+   "kind": "paraphrase",
+   "query": "金融带货专项的内部管控收口目标包括什么？",
+   "lang": "zh"
+  },
+  {
+   "qid": "L70",
+   "kind": "paraphrase",
+   "query": "金融带货工作路线图里张志维和潘韵佳怎么分工？",
+   "lang": "zh"
+  },
+  {
+   "qid": "L71",
+   "kind": "paraphrase",
+   "query": "专利交底书的技术联系人默认填什么？",
+   "lang": "zh"
+  },
+  {
+   "qid": "L72",
+   "kind": "paraphrase",
+   "query": "VOP 实操手册里 API 限流的错误码是多少？",
+   "lang": "zh"
+  },
+  {
+   "qid": "L73",
+   "kind": "paraphrase_crosslang",
+   "query": "计划模式里低风险任务的继续执行和执行后审查是什么策略？",
+   "lang": "zh"
+  },
+  {
+   "qid": "L74",
+   "kind": "paraphrase_crosslang",
+   "query": "更新提醒为什么 7 天内不重复弹，ack 是怎么定的？",
+   "lang": "zh"
+  },
+  {
+   "qid": "L75",
+   "kind": "paraphrase_crosslang",
+   "query": "Claude Code 过代理报上下文长度超限是怎么解决的？",
+   "lang": "mixed"
+  },
+  {
+   "qid": "L76",
+   "kind": "paraphrase_crosslang",
+   "query": "Which system do bank marketing renewals go through versus new requirements?",
+   "lang": "en"
+  }
+ ]
+}

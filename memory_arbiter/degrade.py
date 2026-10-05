@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 
 @dataclass
@@ -12,11 +12,10 @@ class DegradeState:
     fts5_available: bool = False
     sqlite_writable: bool = True
     jsonl_backup_active: bool = False
-    notice_provider: Callable[[], list[dict[str, Any]]] | None = None
-
-    @property
-    def degraded(self) -> bool:
-        return bool(self.warnings) or self.mode != "sqlite_vec"
+    # B5（0.17.1 优化批）：降级写入的观测时间戳。jsonl_backup_active 是
+    # 单向闩（置 True 恒伴 sqlite_writable=False，全仓无复位点），故不改
+    # 其语义，只补"最后一次用 JSONL 是什么时候"（status 输出可见）。
+    jsonl_backup_last_used_at: str | None = None
 
     def warn(self, message: str) -> None:
         if message not in self.warnings:
@@ -39,11 +38,6 @@ class DegradeState:
             "data": data,
         }
         notices = list(extra_notices or [])
-        if ok and self.notice_provider is not None:
-            try:
-                notices.extend(self.notice_provider())
-            except Exception:
-                pass
         if notices:
             resp["notices"] = notices
         return resp

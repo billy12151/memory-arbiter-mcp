@@ -138,6 +138,7 @@ def test_move_into_twin_redirects_even_authorized(tmp_path: Path) -> None:
     )["data"]
     with request_identity_scope(RequestIdentity(client="claude-code", agent_id="agent-a")):
         moved = tools.memory_govern("move_memories_workspace", {
+            "workspace": "default",
             "memory_ids": [written["id"]], "new_workspace": "mema-twin",
             "reason": "owner said so", "authorized": True,
         })
@@ -154,6 +155,7 @@ def test_move_into_twin_by_twin_passes(tmp_path: Path) -> None:
     )["data"]
     with request_identity_scope(RequestIdentity(client="mema-twin", agent_id="mema-twin")):
         moved = tools.memory_govern("move_memories_workspace", {
+            "workspace": "default",
             "memory_ids": [written["id"]], "new_workspace": "mema-twin",
             "reason": "twin reorganizing", "authorized": True,
         })
@@ -175,6 +177,9 @@ def test_pending_activation_into_twin_redirects(tmp_path: Path) -> None:
         status = record.get("status")
         if status == "pending":
             result = tools.memory_govern("confirm_pending_workspace", {
+                # 改道行 canonical 列=mema-twin-dev（第一道校验），安全 confirm
+                # 用原名（第二道校验的 twin 等价豁免 + redirect tail 落 -dev）
+                "workspace": "mema-twin-dev",
                 "memory_id": written["id"], "canonical": "mema-twin",
                 "reason": "confirm", "authorized": True,
             })
@@ -258,3 +263,83 @@ def test_boot_migration_moves_non_twin_residents(tmp_path: Path) -> None:
         # Idempotent: a second boot is a no-op.
         applied2 = additive.ensure_additive_structures(conn)
     assert not any("twin_redirect_migration" in item for item in applied2)
+
+
+def test_confirm_poison_form_rejected_none_isolation(tmp_path) -> None:
+    """P1-3 防毒守卫（R2 改宽形态）：raw=mema-twin 时 confirm 到任何非原名
+    canonical 一律拒——毒化的资产是 alias 键本身（confirmed mema-twin→X 会让
+    alias 命中先于 identity 改道，整体劫持 twin 写入）。none 隔离构造（strict
+    下第二道校验先拦，守卫零覆盖——R2 点名）。"""
+    tools = make_tools(tmp_path)
+    # none 隔离下 twin 写入会 AUTO 改道落 active——毒化前提是 pending 行，
+    # 用显式 status="pending" 构造（与 registry 测试同款形态）
+    written = tools.memory_write(
+        content="twin probe", workspace="mema-twin", subject="twin",
+        source_type="agent_generated", status="pending",
+    )["data"]
+    for bad_canonical in ("mema-twin-dev", "project-x"):
+        rejected = tools.memory_govern("confirm_pending_workspace", {
+            "workspace": "mema-twin", "memory_id": written["id"],
+            "canonical": bad_canonical, "authorized": True,
+        })
+        assert rejected["ok"] is False, bad_canonical
+        assert "protected_bucket_redirect" in str(rejected["data"]), bad_canonical
+    with tools.db.connection() as conn:
+        poison = conn.execute(
+            "SELECT count(*) FROM workspace_aliases WHERE alias_workspace='mema-twin'"
+        ).fetchone()[0]
+    assert poison == 0, "毒别名不得落库"
+
+
+def test_confirm_safe_form_redirects_to_dev(tmp_path) -> None:
+    """安全形态：confirm 原名（键相等 no-op）→ redirect tail 落 mema-twin-dev。"""
+    tools = make_tools(tmp_path)
+    # none 隔离下 twin 写入会 AUTO 改道落 active——毒化前提是 pending 行，
+    # 用显式 status="pending" 构造（与 registry 测试同款形态）
+    written = tools.memory_write(
+        content="twin probe", workspace="mema-twin", subject="twin",
+        source_type="agent_generated", status="pending",
+    )["data"]
+    confirmed = tools.memory_govern("confirm_pending_workspace", {
+        "workspace": "mema-twin", "memory_id": written["id"],
+        "canonical": "mema-twin", "authorized": True,
+    })
+    assert confirmed["ok"] is True, confirmed
+    record = tools.db.get_memory(written["id"])
+    assert record["workspace_canonical"] == "mema-twin-dev"
+    with tools.db.connection() as conn:
+        poison = conn.execute(
+            "SELECT count(*) FROM workspace_aliases WHERE alias_workspace='mema-twin'"
+        ).fetchone()[0]
+    assert poison == 0
+
+
+def test_confirm_poison_case_variant_blocked(tmp_path) -> None:
+    """R3 P1 回归钉：大小写变体（"Mema-Twin"）不得绕过防毒守卫——
+    twin_redirect_target 规范化比较后，守卫对变体 raw 同样触发，毒行
+    （alias 键 casefold 后=保护键）不得落库。"""
+    tools = make_tools(tmp_path)
+    written = tools.memory_write(
+        content="twin probe", workspace="Mema-Twin", subject="twin",
+        source_type="agent_generated", status="pending",
+    )["data"]
+    rejected = tools.memory_govern("confirm_pending_workspace", {
+        "workspace": "Mema-Twin", "memory_id": written["id"],
+        "canonical": "mema-twin-dev", "authorized": True,
+    })
+    assert rejected["ok"] is False
+    assert "protected_bucket_redirect" in str(rejected["data"])
+    with tools.db.connection() as conn:
+        poison = conn.execute(
+            "SELECT count(*) FROM workspace_aliases WHERE alias_workspace='mema-twin'"
+        ).fetchone()[0]
+    assert poison == 0
+
+
+def test_redirect_target_normalizes_case() -> None:
+    from memory_arbiter.twin_redirect import twin_redirect_target
+
+    assert twin_redirect_target("Mema-Twin", client="x", agent_id="y") == "mema-twin-dev"
+    assert twin_redirect_target("  MEMA-TWIN ", client="x", agent_id="y") == "mema-twin-dev"
+    assert twin_redirect_target("mema-twin", client="mema-twin", agent_id=None) is None
+    assert twin_redirect_target("mema-twin-dev", client="x", agent_id="y") is None

@@ -111,7 +111,8 @@
      "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
-      "internal_pending": 0
+      "internal_pending": 0,
+      "conflict_backlog_pending": 0
      },
      "fix_hint": null
     },
@@ -184,6 +185,16 @@
       "new": [],
       "sidecar": "<PATH>"
      },
+     "fix_hint": null
+    },
+    {
+     "check_id": "rows.coverage",
+     "dimension": "rows",
+     "severity": "info",
+     "status": "pass",
+     "title": "rows.coverage",
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     }
    ],
@@ -307,7 +318,8 @@
      "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
-      "internal_pending": 0
+      "internal_pending": 0,
+      "conflict_backlog_pending": 0
      },
      "fix_hint": null
     },
@@ -380,6 +392,16 @@
       "new": [],
       "sidecar": "<PATH>"
      },
+     "fix_hint": null
+    },
+    {
+     "check_id": "rows.coverage",
+     "dimension": "rows",
+     "severity": "info",
+     "status": "pass",
+     "title": "rows.coverage",
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -592,7 +614,8 @@
      "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
-      "internal_pending": 0
+      "internal_pending": 0,
+      "conflict_backlog_pending": 0
      },
      "fix_hint": null
     },
@@ -665,6 +688,16 @@
       "new": [],
       "sidecar": "<PATH>"
      },
+     "fix_hint": null
+    },
+    {
+     "check_id": "rows.coverage",
+     "dimension": "rows",
+     "severity": "info",
+     "status": "pass",
+     "title": "rows.coverage",
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     }
    ],
@@ -788,7 +821,8 @@
      "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
-      "internal_pending": 0
+      "internal_pending": 0,
+      "conflict_backlog_pending": 0
      },
      "fix_hint": null
     },
@@ -861,6 +895,16 @@
       "new": [],
       "sidecar": "<PATH>"
      },
+     "fix_hint": null
+    },
+    {
+     "check_id": "rows.coverage",
+     "dimension": "rows",
+     "severity": "info",
+     "status": "pass",
+     "title": "rows.coverage",
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -1073,7 +1117,8 @@
      "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
-      "internal_pending": 0
+      "internal_pending": 0,
+      "conflict_backlog_pending": 0
      },
      "fix_hint": null
     },
@@ -1146,6 +1191,16 @@
       "new": [],
       "sidecar": "<PATH>"
      },
+     "fix_hint": null
+    },
+    {
+     "check_id": "rows.coverage",
+     "dimension": "rows",
+     "severity": "info",
+     "status": "pass",
+     "title": "rows.coverage",
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     }
    ],
@@ -1269,7 +1324,8 @@
      "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
-      "internal_pending": 0
+      "internal_pending": 0,
+      "conflict_backlog_pending": 0
      },
      "fix_hint": null
     },
@@ -1342,6 +1398,16 @@
       "new": [],
       "sidecar": "<PATH>"
      },
+     "fix_hint": null
+    },
+    {
+     "check_id": "rows.coverage",
+     "dimension": "rows",
+     "severity": "info",
+     "status": "pass",
+     "title": "rows.coverage",
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -1561,7 +1627,8 @@
      "evidence": {
       "pending": 1,
       "backlog": 2,
-      "internal_pending": 1
+      "internal_pending": 1,
+      "conflict_backlog_pending": 0
      },
      "fix_hint": null
     },
@@ -1634,6 +1701,16 @@
       "new": [],
       "sidecar": "<PATH>"
      },
+     "fix_hint": null
+    },
+    {
+     "check_id": "rows.coverage",
+     "dimension": "rows",
+     "severity": "info",
+     "status": "pass",
+     "title": "rows.coverage",
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     }
    ],
@@ -1764,7 +1841,8 @@
      "evidence": {
       "pending": 1,
       "backlog": 2,
-      "internal_pending": 1
+      "internal_pending": 1,
+      "conflict_backlog_pending": 0
      },
      "fix_hint": null
     },
@@ -1837,6 +1915,16 @@
       "new": [],
       "sidecar": "<PATH>"
      },
+     "fix_hint": null
+    },
+    {
+     "check_id": "rows.coverage",
+     "dimension": "rows",
+     "severity": "info",
+     "status": "pass",
+     "title": "rows.coverage",
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -2064,7 +2152,8 @@
      "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
-      "internal_pending": 0
+      "internal_pending": 0,
+      "conflict_backlog_pending": 0
      },
      "fix_hint": null
     },
@@ -2137,6 +2226,16 @@
       "new": [],
       "sidecar": "<PATH>"
      },
+     "fix_hint": null
+    },
+    {
+     "check_id": "rows.coverage",
+     "dimension": "rows",
+     "severity": "info",
+     "status": "pass",
+     "title": "rows.coverage",
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     }
    ],
@@ -2275,7 +2374,8 @@
      "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
-      "internal_pending": 0
+      "internal_pending": 0,
+      "conflict_backlog_pending": 0
      },
      "fix_hint": null
     },
@@ -2348,6 +2448,16 @@
       "new": [],
       "sidecar": "<PATH>"
      },
+     "fix_hint": null
+    },
+    {
+     "check_id": "rows.coverage",
+     "dimension": "rows",
+     "severity": "info",
+     "status": "pass",
+     "title": "rows.coverage",
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -2575,7 +2685,8 @@
      "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
-      "internal_pending": 0
+      "internal_pending": 0,
+      "conflict_backlog_pending": 0
      },
      "fix_hint": null
     },
@@ -2648,6 +2759,16 @@
       "new": [],
       "sidecar": "<PATH>"
      },
+     "fix_hint": null
+    },
+    {
+     "check_id": "rows.coverage",
+     "dimension": "rows",
+     "severity": "info",
+     "status": "pass",
+     "title": "rows.coverage",
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     }
    ],
@@ -2786,7 +2907,8 @@
      "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
-      "internal_pending": 0
+      "internal_pending": 0,
+      "conflict_backlog_pending": 0
      },
      "fix_hint": null
     },
@@ -2859,6 +2981,16 @@
       "new": [],
       "sidecar": "<PATH>"
      },
+     "fix_hint": null
+    },
+    {
+     "check_id": "rows.coverage",
+     "dimension": "rows",
+     "severity": "info",
+     "status": "pass",
+     "title": "rows.coverage",
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -3087,7 +3219,8 @@
      "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
-      "internal_pending": 0
+      "internal_pending": 0,
+      "conflict_backlog_pending": 0
      },
      "fix_hint": null
     },
@@ -3160,6 +3293,16 @@
       "new": [],
       "sidecar": "<PATH>"
      },
+     "fix_hint": null
+    },
+    {
+     "check_id": "rows.coverage",
+     "dimension": "rows",
+     "severity": "info",
+     "status": "pass",
+     "title": "rows.coverage",
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     }
    ],
@@ -3299,7 +3442,8 @@
      "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
-      "internal_pending": 0
+      "internal_pending": 0,
+      "conflict_backlog_pending": 0
      },
      "fix_hint": null
     },
@@ -3372,6 +3516,16 @@
       "new": [],
       "sidecar": "<PATH>"
      },
+     "fix_hint": null
+    },
+    {
+     "check_id": "rows.coverage",
+     "dimension": "rows",
+     "severity": "info",
+     "status": "pass",
+     "title": "rows.coverage",
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -3610,7 +3764,8 @@
      "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
-      "internal_pending": 0
+      "internal_pending": 0,
+      "conflict_backlog_pending": 0
      },
      "fix_hint": null
     },
@@ -3683,6 +3838,16 @@
       "new": [],
       "sidecar": "<PATH>"
      },
+     "fix_hint": null
+    },
+    {
+     "check_id": "rows.coverage",
+     "dimension": "rows",
+     "severity": "info",
+     "status": "pass",
+     "title": "rows.coverage",
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     }
    ],
@@ -3832,7 +3997,8 @@
      "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
-      "internal_pending": 0
+      "internal_pending": 0,
+      "conflict_backlog_pending": 0
      },
      "fix_hint": null
     },
@@ -3905,6 +4071,16 @@
       "new": [],
       "sidecar": "<PATH>"
      },
+     "fix_hint": null
+    },
+    {
+     "check_id": "rows.coverage",
+     "dimension": "rows",
+     "severity": "info",
+     "status": "pass",
+     "title": "rows.coverage",
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -4117,7 +4293,8 @@
      "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
-      "internal_pending": 0
+      "internal_pending": 0,
+      "conflict_backlog_pending": 0
      },
      "fix_hint": null
     },
@@ -4204,6 +4381,16 @@
      "status": "warn",
      "title": "config.warnings",
      "detail": "deprecated key ignored: legacy.option",
+     "evidence": {},
+     "fix_hint": null
+    },
+    {
+     "check_id": "rows.coverage",
+     "dimension": "rows",
+     "severity": "info",
+     "status": "pass",
+     "title": "rows.coverage",
+     "detail": "row vector coverage unknown (table unavailable)",
      "evidence": {},
      "fix_hint": null
     }
@@ -4328,7 +4515,8 @@
      "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
-      "internal_pending": 0
+      "internal_pending": 0,
+      "conflict_backlog_pending": 0
      },
      "fix_hint": null
     },
@@ -4415,6 +4603,16 @@
      "status": "warn",
      "title": "config.warnings",
      "detail": "deprecated key ignored: legacy.option",
+     "evidence": {},
+     "fix_hint": null
+    },
+    {
+     "check_id": "rows.coverage",
+     "dimension": "rows",
+     "severity": "info",
+     "status": "pass",
+     "title": "rows.coverage",
+     "detail": "row vector coverage unknown (table unavailable)",
      "evidence": {},
      "fix_hint": null
     },
@@ -4628,7 +4826,8 @@
      "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
-      "internal_pending": 0
+      "internal_pending": 0,
+      "conflict_backlog_pending": 0
      },
      "fix_hint": null
     },
@@ -4695,6 +4894,16 @@
      "status": "pass",
      "title": "workspace.review",
      "detail": "workspace registry unavailable; review skipped",
+     "evidence": {},
+     "fix_hint": null
+    },
+    {
+     "check_id": "rows.coverage",
+     "dimension": "rows",
+     "severity": "info",
+     "status": "pass",
+     "title": "rows.coverage",
+     "detail": "row vector coverage unknown (table unavailable)",
      "evidence": {},
      "fix_hint": null
     }
@@ -4845,7 +5054,8 @@
      "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
-      "internal_pending": 0
+      "internal_pending": 0,
+      "conflict_backlog_pending": 0
      },
      "fix_hint": null
     },
@@ -4918,6 +5128,16 @@
       "new": [],
       "sidecar": "<PATH>"
      },
+     "fix_hint": null
+    },
+    {
+     "check_id": "rows.coverage",
+     "dimension": "rows",
+     "severity": "info",
+     "status": "pass",
+     "title": "rows.coverage",
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     }
    ],
@@ -5041,7 +5261,8 @@
      "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
-      "internal_pending": 0
+      "internal_pending": 0,
+      "conflict_backlog_pending": 0
      },
      "fix_hint": null
     },
@@ -5114,6 +5335,16 @@
       "new": [],
       "sidecar": "<PATH>"
      },
+     "fix_hint": null
+    },
+    {
+     "check_id": "rows.coverage",
+     "dimension": "rows",
+     "severity": "info",
+     "status": "pass",
+     "title": "rows.coverage",
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     }
    ],
@@ -5243,7 +5474,8 @@
      "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
-      "internal_pending": 0
+      "internal_pending": 0,
+      "conflict_backlog_pending": 0
      },
      "fix_hint": null
     },
@@ -5316,6 +5548,16 @@
       "new": [],
       "sidecar": "<PATH>"
      },
+     "fix_hint": null
+    },
+    {
+     "check_id": "rows.coverage",
+     "dimension": "rows",
+     "severity": "info",
+     "status": "pass",
+     "title": "rows.coverage",
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     }
    ],
@@ -5445,7 +5687,8 @@
      "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
-      "internal_pending": 0
+      "internal_pending": 0,
+      "conflict_backlog_pending": 0
      },
      "fix_hint": null
     },
@@ -5518,6 +5761,16 @@
       "new": [],
       "sidecar": "<PATH>"
      },
+     "fix_hint": null
+    },
+    {
+     "check_id": "rows.coverage",
+     "dimension": "rows",
+     "severity": "info",
+     "status": "pass",
+     "title": "rows.coverage",
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     }
    ],
@@ -5641,7 +5894,8 @@
      "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
-      "internal_pending": 0
+      "internal_pending": 0,
+      "conflict_backlog_pending": 0
      },
      "fix_hint": null
     },
@@ -5714,6 +5968,16 @@
       "new": [],
       "sidecar": "<PATH>"
      },
+     "fix_hint": null
+    },
+    {
+     "check_id": "rows.coverage",
+     "dimension": "rows",
+     "severity": "info",
+     "status": "pass",
+     "title": "rows.coverage",
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     }
    ],
@@ -5837,7 +6101,8 @@
      "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
-      "internal_pending": 0
+      "internal_pending": 0,
+      "conflict_backlog_pending": 0
      },
      "fix_hint": null
     },
@@ -5910,6 +6175,16 @@
       "new": [],
       "sidecar": "<PATH>"
      },
+     "fix_hint": null
+    },
+    {
+     "check_id": "rows.coverage",
+     "dimension": "rows",
+     "severity": "info",
+     "status": "pass",
+     "title": "rows.coverage",
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     }
    ],
@@ -6046,7 +6321,8 @@
      "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
-      "internal_pending": 0
+      "internal_pending": 0,
+      "conflict_backlog_pending": 0
      },
      "fix_hint": null
     },
@@ -6119,6 +6395,16 @@
       "new": [],
       "sidecar": "<PATH>"
      },
+     "fix_hint": null
+    },
+    {
+     "check_id": "rows.coverage",
+     "dimension": "rows",
+     "severity": "info",
+     "status": "pass",
+     "title": "rows.coverage",
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     }
    ],
@@ -6242,7 +6528,8 @@
      "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
-      "internal_pending": 0
+      "internal_pending": 0,
+      "conflict_backlog_pending": 0
      },
      "fix_hint": null
     },
@@ -6315,6 +6602,16 @@
       "new": [],
       "sidecar": "<PATH>"
      },
+     "fix_hint": null
+    },
+    {
+     "check_id": "rows.coverage",
+     "dimension": "rows",
+     "severity": "info",
+     "status": "pass",
+     "title": "rows.coverage",
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     }
    ],
@@ -6438,7 +6735,8 @@
      "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
-      "internal_pending": 0
+      "internal_pending": 0,
+      "conflict_backlog_pending": 0
      },
      "fix_hint": null
     },
@@ -6511,6 +6809,16 @@
       "new": [],
       "sidecar": "<PATH>"
      },
+     "fix_hint": null
+    },
+    {
+     "check_id": "rows.coverage",
+     "dimension": "rows",
+     "severity": "info",
+     "status": "pass",
+     "title": "rows.coverage",
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     }
    ],
@@ -6647,7 +6955,8 @@
      "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
-      "internal_pending": 0
+      "internal_pending": 0,
+      "conflict_backlog_pending": 0
      },
      "fix_hint": null
     },
@@ -6720,6 +7029,16 @@
       "new": [],
       "sidecar": "<PATH>"
      },
+     "fix_hint": null
+    },
+    {
+     "check_id": "rows.coverage",
+     "dimension": "rows",
+     "severity": "info",
+     "status": "pass",
+     "title": "rows.coverage",
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     }
    ],
@@ -6843,7 +7162,8 @@
      "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
-      "internal_pending": 0
+      "internal_pending": 0,
+      "conflict_backlog_pending": 0
      },
      "fix_hint": null
     },
@@ -6916,6 +7236,16 @@
       "new": [],
       "sidecar": "<PATH>"
      },
+     "fix_hint": null
+    },
+    {
+     "check_id": "rows.coverage",
+     "dimension": "rows",
+     "severity": "info",
+     "status": "pass",
+     "title": "rows.coverage",
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -7128,7 +7458,8 @@
      "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
-      "internal_pending": 0
+      "internal_pending": 0,
+      "conflict_backlog_pending": 0
      },
      "fix_hint": null
     },
@@ -7201,6 +7532,16 @@
       "new": [],
       "sidecar": "<PATH>"
      },
+     "fix_hint": null
+    },
+    {
+     "check_id": "rows.coverage",
+     "dimension": "rows",
+     "severity": "info",
+     "status": "pass",
+     "title": "rows.coverage",
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -7413,7 +7754,8 @@
      "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
-      "internal_pending": 0
+      "internal_pending": 0,
+      "conflict_backlog_pending": 0
      },
      "fix_hint": null
     },
@@ -7486,6 +7828,16 @@
       "new": [],
       "sidecar": "<PATH>"
      },
+     "fix_hint": null
+    },
+    {
+     "check_id": "rows.coverage",
+     "dimension": "rows",
+     "severity": "info",
+     "status": "pass",
+     "title": "rows.coverage",
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -7698,7 +8050,8 @@
      "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
-      "internal_pending": 0
+      "internal_pending": 0,
+      "conflict_backlog_pending": 0
      },
      "fix_hint": null
     },
@@ -7771,6 +8124,16 @@
       "new": [],
       "sidecar": "<PATH>"
      },
+     "fix_hint": null
+    },
+    {
+     "check_id": "rows.coverage",
+     "dimension": "rows",
+     "severity": "info",
+     "status": "pass",
+     "title": "rows.coverage",
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -7983,7 +8346,8 @@
      "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
-      "internal_pending": 0
+      "internal_pending": 0,
+      "conflict_backlog_pending": 0
      },
      "fix_hint": null
     },
@@ -8056,6 +8420,16 @@
       "new": [],
       "sidecar": "<PATH>"
      },
+     "fix_hint": null
+    },
+    {
+     "check_id": "rows.coverage",
+     "dimension": "rows",
+     "severity": "info",
+     "status": "pass",
+     "title": "rows.coverage",
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -8293,7 +8667,8 @@
      "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
-      "internal_pending": 0
+      "internal_pending": 0,
+      "conflict_backlog_pending": 0
      },
      "fix_hint": null
     },
@@ -8366,6 +8741,16 @@
       "new": [],
       "sidecar": "<PATH>"
      },
+     "fix_hint": null
+    },
+    {
+     "check_id": "rows.coverage",
+     "dimension": "rows",
+     "severity": "info",
+     "status": "pass",
+     "title": "rows.coverage",
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -8603,7 +8988,8 @@
      "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
-      "internal_pending": 0
+      "internal_pending": 0,
+      "conflict_backlog_pending": 0
      },
      "fix_hint": null
     },
@@ -8676,6 +9062,16 @@
       "new": [],
       "sidecar": "<PATH>"
      },
+     "fix_hint": null
+    },
+    {
+     "check_id": "rows.coverage",
+     "dimension": "rows",
+     "severity": "info",
+     "status": "pass",
+     "title": "rows.coverage",
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -8908,7 +9304,8 @@
      "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
-      "internal_pending": 0
+      "internal_pending": 0,
+      "conflict_backlog_pending": 0
      },
      "fix_hint": null
     },
@@ -8981,6 +9378,16 @@
       "new": [],
       "sidecar": "<PATH>"
      },
+     "fix_hint": null
+    },
+    {
+     "check_id": "rows.coverage",
+     "dimension": "rows",
+     "severity": "info",
+     "status": "pass",
+     "title": "rows.coverage",
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -9218,7 +9625,8 @@
      "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
-      "internal_pending": 0
+      "internal_pending": 0,
+      "conflict_backlog_pending": 0
      },
      "fix_hint": null
     },
@@ -9291,6 +9699,16 @@
       "new": [],
       "sidecar": "<PATH>"
      },
+     "fix_hint": null
+    },
+    {
+     "check_id": "rows.coverage",
+     "dimension": "rows",
+     "severity": "info",
+     "status": "pass",
+     "title": "rows.coverage",
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -9528,7 +9946,8 @@
      "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
-      "internal_pending": 0
+      "internal_pending": 0,
+      "conflict_backlog_pending": 0
      },
      "fix_hint": null
     },
@@ -9601,6 +10020,16 @@
       "new": [],
       "sidecar": "<PATH>"
      },
+     "fix_hint": null
+    },
+    {
+     "check_id": "rows.coverage",
+     "dimension": "rows",
+     "severity": "info",
+     "status": "pass",
+     "title": "rows.coverage",
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -9838,7 +10267,8 @@
      "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
-      "internal_pending": 0
+      "internal_pending": 0,
+      "conflict_backlog_pending": 0
      },
      "fix_hint": null
     },
@@ -9911,6 +10341,16 @@
       "new": [],
       "sidecar": "<PATH>"
      },
+     "fix_hint": null
+    },
+    {
+     "check_id": "rows.coverage",
+     "dimension": "rows",
+     "severity": "info",
+     "status": "pass",
+     "title": "rows.coverage",
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -10148,7 +10588,8 @@
      "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
-      "internal_pending": 0
+      "internal_pending": 0,
+      "conflict_backlog_pending": 0
      },
      "fix_hint": null
     },
@@ -10221,6 +10662,16 @@
       "new": [],
       "sidecar": "<PATH>"
      },
+     "fix_hint": null
+    },
+    {
+     "check_id": "rows.coverage",
+     "dimension": "rows",
+     "severity": "info",
+     "status": "pass",
+     "title": "rows.coverage",
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -10453,7 +10904,8 @@
      "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
-      "internal_pending": 0
+      "internal_pending": 0,
+      "conflict_backlog_pending": 0
      },
      "fix_hint": null
     },
@@ -10529,6 +10981,16 @@
      "fix_hint": null
     },
     {
+     "check_id": "rows.coverage",
+     "dimension": "rows",
+     "severity": "info",
+     "status": "pass",
+     "title": "rows.coverage",
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
+     "fix_hint": null
+    },
+    {
      "check_id": "database.quick_check",
      "dimension": "database",
      "severity": "info",
@@ -10557,11 +11019,11 @@
      "severity": "warning",
      "status": "warn",
      "title": "vector.space",
-     "detail": "state=unmanaged, active=none, configured=fb687cae9fe683997a2455daebd7e858449bf3cff88c8e8f1b91bd5b74e216e9",
+     "detail": "state=unmanaged, active=none, configured=<SPACE_ID>",
      "evidence": {
       "state": "unmanaged",
       "active_space_id": null,
-      "configured_space_id": "fb687cae9fe683997a2455daebd7e858449bf3cff88c8e8f1b91bd5b74e216e9"
+      "configured_space_id": "<SPACE_ID>"
      },
      "fix_hint": null
     },
@@ -10763,7 +11225,8 @@
      "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
-      "internal_pending": 0
+      "internal_pending": 0,
+      "conflict_backlog_pending": 0
      },
      "fix_hint": null
     },
@@ -10839,6 +11302,16 @@
      "fix_hint": null
     },
     {
+     "check_id": "rows.coverage",
+     "dimension": "rows",
+     "severity": "info",
+     "status": "pass",
+     "title": "rows.coverage",
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
+     "fix_hint": null
+    },
+    {
      "check_id": "database.quick_check",
      "dimension": "database",
      "severity": "info",
@@ -10867,11 +11340,11 @@
      "severity": "warning",
      "status": "warn",
      "title": "vector.space",
-     "detail": "state=unmanaged, active=none, configured=acdea70c92ae866636617f52058ba8b3cfadccdeaf843eba8fd15bad4f42e571",
+     "detail": "state=unmanaged, active=none, configured=<SPACE_ID>",
      "evidence": {
       "state": "unmanaged",
       "active_space_id": null,
-      "configured_space_id": "acdea70c92ae866636617f52058ba8b3cfadccdeaf843eba8fd15bad4f42e571"
+      "configured_space_id": "<SPACE_ID>"
      },
      "fix_hint": null
     },
@@ -11073,7 +11546,8 @@
      "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
-      "internal_pending": 0
+      "internal_pending": 0,
+      "conflict_backlog_pending": 0
      },
      "fix_hint": null
     },
@@ -11146,6 +11620,16 @@
       "new": [],
       "sidecar": "<PATH>"
      },
+     "fix_hint": null
+    },
+    {
+     "check_id": "rows.coverage",
+     "dimension": "rows",
+     "severity": "info",
+     "status": "pass",
+     "title": "rows.coverage",
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {
@@ -11383,7 +11867,8 @@
      "detail": "0 suspected item(s) awaiting agent judgment (0 pending, 0 internal contradictions); when convenient, let the agent read the queue (memory_repair task='scan_queue', action='page')",
      "evidence": {
       "backlog": 0,
-      "internal_pending": 0
+      "internal_pending": 0,
+      "conflict_backlog_pending": 0
      },
      "fix_hint": null
     },
@@ -11456,6 +11941,16 @@
       "new": [],
       "sidecar": "<PATH>"
      },
+     "fix_hint": null
+    },
+    {
+     "check_id": "rows.coverage",
+     "dimension": "rows",
+     "severity": "info",
+     "status": "pass",
+     "title": "rows.coverage",
+     "detail": "row vector coverage unknown (table unavailable)",
+     "evidence": {},
      "fix_hint": null
     },
     {

@@ -60,13 +60,15 @@ def test_similarity_boundary_pairs_from_calibration() -> None:
     assert classify_pair(qa, qc, route=SIM) == "clear"
 
 
-def test_entity_layer_clears_different_subjects() -> None:
-    qa = "发布时间是下周五"
-    qb = "发布时间是下周五"
-    assert classify_pair(qa, qb, route=SIM, entity_a="项目A", entity_b="项目B") == "clear"
-    # Same entity or one-sided/absent entity never clears by itself.
-    assert classify_pair(qa, qb, route=SIM, entity_a="项目A", entity_b="项目A") == "keep"
-    assert classify_pair(qa, qb, route=SIM, entity_a="项目A", entity_b=None) == "keep"
+def test_entity_layer_removed_with_its_data_source() -> None:
+    # 2026-10-05 审查：owner-⑪ entity 层随数据源（metadata.entity，0.17.0
+    # G3 退役）一并移除——生产调用点从未传参，分支不可达且 docstring 宣称
+    # "free to run" 失实。钉死：签名不再接受 entity 参数。
+    import inspect
+
+    sig = inspect.signature(classify_pair)
+    assert "entity_a" not in sig.parameters
+    assert "entity_b" not in sig.parameters
 
 
 def test_garbage_is_a_label_not_a_verdict() -> None:

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .acl import workspace_scope_sql
+from .acl import raw_workspace, visible_memory, workspace_scope_sql
 from .config import Settings, _find_config_file
 from .config_registry import CONFIG_DESCRIPTORS, grouped_descriptors
 from .tools import MemoryTools
@@ -56,6 +57,53 @@ class ConsoleAPI:
             return {"error": "isolation=strict requires an explicit workspace query", "_http_status": 400}
         return None
 
+    def _memory_scope(
+        self,
+        caller: Any,
+        workspace: str | None,
+        expr: str = "COALESCE(NULLIF(workspace_canonical, ''), workspace)",
+        alias: str | None = None,
+    ) -> tuple[str, list[str]]:
+        """Workspace-scoping WHERE fragment for hand-written memories-table SQL.
+
+        Single home for the former four inline copies (overview's
+        by_workspace_active, _status_counts, _recent_browse, memory_graph) of:
+        isolation branch (strict → the caller's admitted canonical set;
+        isolation=none with an explicitly supplied workspace → that one
+        canonical; anything else → unscoped) + ``workspace_scope_sql`` over
+        the canonical-with-raw-fallback expression. Returns ``(clause,
+        params)``; ``("", [])`` when no scoping applies — call sites must then
+        use the clause-less SQL variant, exactly like the former inline else
+        branches. ``workspace_scope_sql`` maps an empty canonical/admitted set
+        to ``("", [])`` itself, so the result is identical to the old
+        ``... and caller.canonical`` guards.
+
+        ``alias`` (e.g. ``"m"``) prefixes the ``workspace`` /
+        ``workspace_canonical`` columns in ``expr`` for JOINed queries.
+
+        Parameter-order contract: ``params`` are POSITIONAL (``?`` binds).
+        sqlite3 refuses to mix named and positional parameters in one
+        statement, and every call site also binds unrelated positional values
+        (ids, tags, LIMIT/OFFSET), so named binds are not an option here.
+        ``params`` must therefore be spliced into the execute tuple at exactly
+        the placeholder positions the clause text occupies — build each tuple
+        with the scope params adjacent to the ``{scope_sql}`` interpolation
+        site (trailing scope clause → trailing scope params, before LIMIT).
+        """
+        isolation = caller.isolation
+        explicit_none_scope = (
+            isolation == "none" and bool(str(workspace or "").strip())
+        )
+        if not (isolation == "strict" or explicit_none_scope):
+            return "", []
+        if alias:
+            expr = re.sub(r"\bworkspace_canonical\b", f"{alias}.workspace_canonical", expr)
+            expr = re.sub(r"\bworkspace\b", f"{alias}.workspace", expr)
+        return workspace_scope_sql(
+            expr,
+            caller.scope_canonicals() if isolation == "strict" else caller.canonical,
+        )
+
     def overview(self, workspace: str | None = None) -> dict[str, Any]:
         missing_ws = self._strict_workspace_required(workspace)
         if missing_ws is not None:
@@ -70,6 +118,31 @@ class ConsoleAPI:
         doctor = self._payload(self.tools.memory_doctor_overview(deep=False))
         counts = self._status_counts(workspace=workspace)
         by_workspace = {k: v.get("count", 0) for k, v in (audit.get("workspaces") or {}).items()}
+        # by_workspace counts every non-deleted memory (audit_summary semantics:
+        # active + superseded + retired + …), which confuses next to the
+        # "active" metric — pair it with per-workspace active counts.
+        by_workspace_active: dict[str, int] = {}
+        try:
+            active_scope_sql, active_scope_params = self._memory_scope(caller, workspace)
+            if active_scope_sql:
+                active_sql = (
+                    "SELECT COALESCE(NULLIF(workspace_canonical, ''), workspace) AS ws, COUNT(*) AS c "
+                    f"FROM memories WHERE status='active' AND {active_scope_sql} GROUP BY ws"
+                )
+                # scope params bind 1:1 with {active_scope_sql}'s placeholders
+                active_params: list[str] = active_scope_params
+            else:
+                active_sql = (
+                    "SELECT COALESCE(NULLIF(workspace_canonical, ''), workspace) AS ws, COUNT(*) AS c "
+                    "FROM memories WHERE status='active' GROUP BY ws"
+                )
+                active_params = []
+            with self.tools.db.connection() as conn:
+                by_workspace_active = {
+                    str(row["ws"]): int(row["c"]) for row in conn.execute(active_sql, active_params).fetchall()
+                }
+        except sqlite3.Error:
+            by_workspace_active = {}
         by_source_type: dict[str, int] = {}
         for ws_data in (audit.get("workspaces") or {}).values():
             for source, count in (ws_data.get("by_source_type") or {}).items():
@@ -108,6 +181,7 @@ class ConsoleAPI:
             "backup_jsonl": status.get("backup_jsonl"),
             "counts": counts,
             "by_workspace": by_workspace,
+            "by_workspace_active": by_workspace_active,
             "by_source_type": by_source_type,
             "doctor_overall": doctor.get("overall"),
             "doctor_summary": doctor.get("summary"),
@@ -128,14 +202,8 @@ class ConsoleAPI:
             return counts
         try:
             caller = self.tools._caller_workspace(workspace)
-            explicit_none_scope = (
-                caller.isolation == "none" and bool(str(workspace or "").strip())
-            )
-            if (caller.isolation == "strict" or explicit_none_scope) and caller.canonical:
-                scope_sql, scope_params = workspace_scope_sql(
-                    "COALESCE(NULLIF(workspace_canonical, ''), workspace)",
-                    caller.scope_canonicals() if caller.isolation == "strict" else caller.canonical,
-                )
+            scope_sql, scope_params = self._memory_scope(caller, workspace)
+            if scope_sql:
                 with self.tools.db.connection() as conn:
                     rows = conn.execute(
                         f"SELECT status, COUNT(*) AS count FROM memories WHERE {scope_sql} GROUP BY status",
@@ -208,28 +276,6 @@ class ConsoleAPI:
         if not detail:
             return {"error": f"conflict id {conflict_id} not found", "_http_status": 404}
         return detail
-
-    def _get_conflict_row(self, conflict_id: int) -> dict[str, Any] | None:
-        if not self.tools.db.db_available:
-            return None
-        try:
-            with self.tools.db.connection() as conn:
-                row = conn.execute("SELECT * FROM conflicts WHERE id=?", (int(conflict_id),)).fetchone()
-                if row is None:
-                    return None
-                conflict = {key: row[key] for key in row.keys()}
-                for key in (
-                    "slot_key", "candidate_key", "member_versions", "value_groups",
-                    "apply_summary", "notice_payload", "notice_slot_provenance",
-                ):
-                    if isinstance(conflict.get(key), str):
-                        try:
-                            conflict[key] = json.loads(conflict[key])
-                        except json.JSONDecodeError:
-                            conflict[key] = None
-                return conflict
-        except sqlite3.Error:
-            return None
 
     def memories(
         self,
@@ -333,22 +379,18 @@ class ConsoleAPI:
         # without one would leak cross-workspace memories. Reject the same way
         # memory_search does, so the console surfaces the error rather than
         # silently bypassing isolation.
-        isolation = getattr(self.tools.settings, "isolation", "none")
         caller = self.tools._caller_workspace(workspace)
-        if isolation == "strict" and not caller.canonical:
+        if caller.isolation == "strict" and not caller.canonical:
             return {"error": "forbidden_strict_workspace", "_http_status": 400, **caller.response_fields()}
         try:
             with db.connection() as conn:
-                explicit_none_scope = isolation == "none" and bool(str(workspace or "").strip())
-                if isolation == "strict" or explicit_none_scope:
-                    scope_sql, scope_params = workspace_scope_sql(
-                        "COALESCE(NULLIF(workspace_canonical, ''), workspace)",
-                        caller.scope_canonicals() if isolation == "strict" else caller.canonical,
-                    )
+                scope_sql, scope_params = self._memory_scope(caller, workspace)
+                if scope_sql:
                     total = int(conn.execute(
                         f"SELECT COUNT(*) FROM memories WHERE status='active' AND {scope_sql}",
                         scope_params,
                     ).fetchone()[0] or 0)
+                    # scope params lead: the clause sits before LIMIT/OFFSET
                     rows = conn.execute(
                         f"SELECT * FROM memories WHERE status='active' AND {scope_sql} "
                         "ORDER BY ingest_time DESC, id DESC LIMIT ? OFFSET ?",
@@ -375,7 +417,7 @@ class ConsoleAPI:
             "has_more": has_more,
             "status": "active",
         }
-        if isolation == "strict":
+        if caller.isolation == "strict":
             out.update(caller.response_fields())
         return out
 
@@ -395,6 +437,258 @@ class ConsoleAPI:
         if not self._ok(response):
             return {"error": data.get("error") or f"memory id {memory_id_int} not found", "_http_status": 404}
         return data
+
+    # Memory relations graph (memory detail page) — per-source caps keep the
+    # canvas readable; GRAPH_MAX_NEIGHBORS caps the union.
+    GRAPH_CONFLICT_LIMIT = 5
+    GRAPH_CONFLICT_MEMBERS_LIMIT = 4
+    GRAPH_CANDIDATE_LIMIT = 8
+    GRAPH_SAME_SUBJECT_LIMIT = 8
+    GRAPH_SAME_TAG_LIMIT = 6
+    GRAPH_MAX_NEIGHBORS = 24
+
+    def memory_graph(self, memory_id: int, workspace: str | None = None) -> dict[str, Any]:
+        """One-hop relations graph for one memory (read-only).
+
+        Edge sources, in priority order: open conflict groups
+        (``conflicts.member_versions``), pending ``conflict_backlog`` pairs
+        (``pair_score`` as weight), active memories sharing the subject, and
+        active memories sharing at least one tag. Entity edges were dropped
+        on purpose: ``metadata.entity`` is retired (0.17.0 G3 — new writes
+        strip it), so an entity edge would only light up for legacy rows.
+        """
+        missing_ws = self._strict_workspace_required(workspace)
+        if missing_ws is not None:
+            return missing_ws
+        detail = self._memory_or_error(memory_id, workspace=workspace)
+        if "error" in detail:
+            return detail
+        memory = detail.get("memory") or {}
+        mid = int(memory.get("id") or memory_id)
+        tags = memory.get("tags")
+        if isinstance(tags, str):
+            try:
+                tags = json.loads(tags)
+            except json.JSONDecodeError:
+                tags = []
+        # 0.17.0 review R2：原 [:8] 输入截断会静默丢共享第 9~32 个标签的
+        # 邻居（存储上限 32），且此处不置 truncated——直接用全量。
+        tags = [str(tag) for tag in (tags or []) if str(tag).strip()]
+
+        edges: list[dict[str, Any]] = []
+        truncated = {"conflict": False, "candidate": False, "same_subject": False, "same_tag": False}
+        neighbor_ids: set[int] = set()
+
+        caller = self.tools._caller_workspace(workspace)
+        isolation = caller.isolation
+        explicit_none_scope = isolation == "none" and bool(str(workspace or "").strip())
+        # One resolved caller, two scope fragments from _memory_scope:
+        # unaliased for single-table queries, "m."-aliased for the tags JOIN.
+        scope_sql, scope_params = self._memory_scope(caller, workspace)
+        scope_sql_m, scope_params_m = self._memory_scope(caller, workspace, alias="m")
+
+        def _neighbor_visible(row: dict[str, Any] | None) -> bool:
+            # Same read-ACL shape as memory_get (center) and
+            # _conflict_detail_for_workspace (members): strict → admitted-set
+            # membership; none + explicit workspace → single-canonical match.
+            if row is None:
+                return False
+            if isolation == "strict":
+                return visible_memory(row, caller.canonical, caller.scope_canonicals())
+            if explicit_none_scope:
+                return raw_workspace(row) == str(caller.canonical or "")
+            return True
+
+        conflicts = self.tools.db.list_open_conflicts_for_memory_ids([mid])
+        if len(conflicts) > self.GRAPH_CONFLICT_LIMIT:
+            truncated["conflict"] = True
+            conflicts = conflicts[: self.GRAPH_CONFLICT_LIMIT]
+        conflict_others: list[tuple[dict[str, Any], list[int]]] = []
+        backlog_pairs: list[tuple[int, float]] = []
+        involved: set[int] = set()
+        for conflict in conflicts:
+            others: list[int] = []
+            for member in conflict.get("member_versions") or []:
+                try:
+                    member_id = int(member.get("memory_id"))
+                except (TypeError, ValueError):
+                    continue
+                if member_id != mid and member_id not in others:
+                    others.append(member_id)
+            if len(others) > self.GRAPH_CONFLICT_MEMBERS_LIMIT:
+                truncated["conflict"] = True
+            conflict_others.append((conflict, others[: self.GRAPH_CONFLICT_MEMBERS_LIMIT]))
+            involved.update(others)
+
+        try:
+            with self.tools.db.connection() as conn:
+                backlog_rows = conn.execute(
+                    "SELECT left_memory_id, right_memory_id, pair_score FROM conflict_backlog "
+                    "WHERE status='pending' AND (left_memory_id=? OR right_memory_id=?) "
+                    "ORDER BY pair_score DESC, id DESC LIMIT ?",
+                    (mid, mid, self.GRAPH_CANDIDATE_LIMIT + 1),
+                ).fetchall()
+        except sqlite3.Error:
+            backlog_rows = []
+        if len(backlog_rows) > self.GRAPH_CANDIDATE_LIMIT:
+            truncated["candidate"] = True
+            backlog_rows = backlog_rows[: self.GRAPH_CANDIDATE_LIMIT]
+        for row in backlog_rows:
+            left, right = int(row["left_memory_id"]), int(row["right_memory_id"])
+            other = right if left == mid else left
+            if other == mid:
+                continue
+            backlog_pairs.append((other, float(row["pair_score"] or 0.0)))
+            involved.add(other)
+
+        rows_by_id: dict[int, dict[str, Any]] = {}
+        if involved:
+            id_placeholders = ",".join("?" for _ in sorted(involved))
+            try:
+                with self.tools.db.connection() as conn:
+                    rows_by_id = {
+                        int(row["id"]): dict(row)
+                        for row in conn.execute(
+                            f"SELECT id, workspace, workspace_canonical FROM memories "
+                            f"WHERE id IN ({id_placeholders})",
+                            tuple(sorted(involved)),
+                        ).fetchall()
+                    }
+            except sqlite3.Error:
+                rows_by_id = {}
+
+        for conflict, others in conflict_others:
+            if explicit_none_scope and str(conflict.get("workspace_canonical") or "") != str(caller.canonical or ""):
+                continue  # same gate as _conflict_detail_for_workspace (none + explicit)
+            if isolation == "strict" and not all(
+                _neighbor_visible(rows_by_id.get(member_id)) for member_id in others
+            ):
+                # strict sees the complete correlated snapshot or nothing —
+                # a partial group would leak members' lifecycle/existence.
+                continue
+            for other_id in others:
+                edges.append({
+                    "source": mid, "target": other_id, "type": "conflict",
+                    "conflict_id": conflict.get("id"), "status": conflict.get("status"),
+                })
+                neighbor_ids.add(other_id)
+
+        for other, score in backlog_pairs:
+            if not _neighbor_visible(rows_by_id.get(other)):
+                continue
+            edges.append({"source": mid, "target": other, "type": "candidate", "weight": score})
+            neighbor_ids.add(other)
+
+        subject = str(memory.get("subject") or "")
+        subject_rows: list[Any] = []
+        if subject:
+            scope_clause = f" AND {scope_sql}" if scope_sql else ""
+            try:
+                with self.tools.db.connection() as conn:
+                    subject_rows = conn.execute(
+                        f"SELECT id FROM memories WHERE subject=? AND id<>? AND status='active'{scope_clause} "
+                        "ORDER BY ingest_time DESC, id DESC LIMIT ?",
+                        # {scope_clause} trails the WHERE — scope params slot
+                        # between the subject/mid binds and LIMIT
+                        (subject, mid, *scope_params, self.GRAPH_SAME_SUBJECT_LIMIT + 1),
+                    ).fetchall()
+            except sqlite3.Error:
+                subject_rows = []
+        if len(subject_rows) > self.GRAPH_SAME_SUBJECT_LIMIT:
+            truncated["same_subject"] = True
+            subject_rows = subject_rows[: self.GRAPH_SAME_SUBJECT_LIMIT]
+        for row in subject_rows:
+            other = int(row["id"])
+            edges.append({"source": mid, "target": other, "type": "same_subject"})
+            neighbor_ids.add(other)
+
+        tag_rows: list[Any] = []
+        if tags:
+            tag_placeholders = ",".join("?" for _ in tags)
+            scope_clause_m = f" AND {scope_sql_m}" if scope_sql_m else ""
+            try:
+                with self.tools.db.connection() as conn:
+                    tag_rows = conn.execute(
+                        f"SELECT m.id AS id, COUNT(*) AS overlap FROM memories m "
+                        f"JOIN json_each(m.tags) t ON t.value IN ({tag_placeholders}) "
+                        f"WHERE m.id<>? AND m.status='active'{scope_clause_m} "
+                        "GROUP BY m.id ORDER BY overlap DESC, m.id DESC LIMIT ?",
+                        # json_each binds first, then {scope_clause_m}'s
+                        # params, then LIMIT — matching placeholder order
+                        (*tags, mid, *scope_params_m, self.GRAPH_SAME_TAG_LIMIT + 1),
+                    ).fetchall()
+            except sqlite3.Error:
+                tag_rows = []
+        if len(tag_rows) > self.GRAPH_SAME_TAG_LIMIT:
+            truncated["same_tag"] = True
+            tag_rows = tag_rows[: self.GRAPH_SAME_TAG_LIMIT]
+        for row in tag_rows:
+            other = int(row["id"])
+            edges.append({"source": mid, "target": other, "type": "same_tag", "weight": int(row["overlap"])})
+            neighbor_ids.add(other)
+
+        if len(neighbor_ids) > self.GRAPH_MAX_NEIGHBORS:
+            keep: set[int] = set()
+            for edge in edges:  # priority order: conflict → candidate → subject → tag
+                target = int(edge["target"])
+                if target in keep or len(keep) < self.GRAPH_MAX_NEIGHBORS:
+                    keep.add(target)
+                else:
+                    truncated[edge["type"]] = True
+            edges = [edge for edge in edges if int(edge["target"]) in keep]
+            neighbor_ids = keep
+
+        nodes: list[dict[str, Any]] = [{
+            "id": mid, "kind": "self", "subject": memory.get("subject"),
+            "status": memory.get("status"), "source_type": memory.get("source_type"),
+            "version": memory.get("version"),
+        }]
+        if neighbor_ids:
+            id_placeholders = ",".join("?" for _ in sorted(neighbor_ids))
+            scope_clause = f" AND {scope_sql}" if scope_sql else ""
+            try:
+                with self.tools.db.connection() as conn:
+                    node_rows = conn.execute(
+                        f"SELECT id, subject, status, source_type, version FROM memories "
+                        f"WHERE id IN ({id_placeholders}){scope_clause}",
+                        # {scope_clause}'s params trail the IN-list binds
+                        (*sorted(neighbor_ids), *scope_params),
+                    ).fetchall()
+            except sqlite3.Error:
+                node_rows = []
+            visible_ids: set[int] = set()
+            for row in node_rows:
+                nodes.append({
+                    "id": int(row["id"]), "kind": "memory", "subject": row["subject"],
+                    "status": row["status"], "source_type": row["source_type"],
+                    "version": row["version"],
+                })
+                visible_ids.add(int(row["id"]))
+            # Drop edges whose target vanished (deleted memory, or outside the
+            # caller's workspace scope) so the canvas never draws to nowhere.
+            edges = [edge for edge in edges if int(edge["target"]) in visible_ids]
+            neighbor_ids = visible_ids
+
+        history = [
+            {"version": row.get("version"), "changed_at": row.get("changed_at"), "reason": row.get("reason")}
+            for row in self.tools.db.list_history(mid)
+        ]
+        try:
+            internal_pairs = int(self.tools.db.internal_conflicts.pending_pair_count(mid))
+        except (sqlite3.Error, AttributeError):
+            internal_pairs = 0
+
+        return {
+            "memory": {
+                "id": mid, "subject": memory.get("subject"), "status": memory.get("status"),
+                "source_type": memory.get("source_type"), "tags": tags, "version": memory.get("version"),
+            },
+            "nodes": nodes,
+            "edges": edges,
+            "history": history,
+            "internal_conflict_pairs": internal_pairs,
+            "truncated": truncated,
+        }
 
     def doctor(self) -> dict[str, Any]:
         return self._payload(self.tools.memory_doctor_overview(deep=False))
@@ -453,9 +747,9 @@ class ConsoleAPI:
             "embedding.auto_query": self.settings.embedding_auto_query,
             "embedding.auto_write": self.settings.embedding_auto_write,
             "semantic_conflict.enabled": self.settings.semantic_conflict_enabled,
-            "semantic_conflict.model_path": self.settings.semantic_conflict_model_path,
+            "semantic_conflict.mdeberta_ckpt": self.settings.semantic_conflict_mdeberta_ckpt,
             "semantic_conflict.on_write": self.settings.semantic_conflict_on_write,
-            "semantic_conflict.n_gpu_layers": self.settings.semantic_conflict_gpu_layers,
+            "semantic_conflict.mdeberta_notice_min_prob": self.settings.semantic_conflict_mdeberta_notice_min_prob,
             "mcp.http.host": self.settings.mcp_http_host,
             "mcp.http.port": self.settings.mcp_http_port,
             "update_check.enabled": self.settings.update_check_enabled,

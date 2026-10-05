@@ -50,6 +50,7 @@ def main() -> None:
 
     def vec(text: str) -> list[float]:
         if text not in cache:
+            # 离线对照工具：量的是无前缀旧形态，勿与新空间阈值混用
             cache[text] = list(embedder.embed_text(prefix="", body=text).embedding)
         return cache[text]
 

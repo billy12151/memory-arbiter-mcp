@@ -23,7 +23,6 @@ from ..models import utc_now_iso
 if TYPE_CHECKING:
     from .core import MemoryDB
 
-QUEUE_STATUSES = ("pending", "confirmed", "dismissed", "voided", "expired")
 QUEUE_KINDS = ("conflict", "internal", "workspace")
 
 
@@ -57,6 +56,7 @@ class ScanQueueStore:
         reason: str,
         severity: str | None,
         source: str,
+        priority: float = 0.0,
         detail: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Insert one suspected item; ``candidate_key_hash`` UNIQUE makes
@@ -72,13 +72,13 @@ class ScanQueueStore:
                 cur = conn.execute(
                     """INSERT OR IGNORE INTO scan_queue(
                          kind,workspace_canonical,status,candidate_key_hash,member_versions,
-                         evidence,reason,severity,source,detail,created_at,updated_at)
-                       VALUES(?,?,'pending',?,?,?,?,?,?,?,?,?)""",
+                         evidence,reason,severity,source,priority,detail,created_at,updated_at)
+                       VALUES(?,?,'pending',?,?,?,?,?,?,?,?,?,?)""",
                     (
                         kind, workspace_canonical, candidate_key_hash,
                         json.dumps(member_versions, ensure_ascii=False),
                         json.dumps(evidence or [], ensure_ascii=False),
-                        reason, severity, source,
+                        reason, severity, source, float(priority),
                         json.dumps(detail, ensure_ascii=False) if detail else None,
                         now, now,
                     ),
@@ -114,6 +114,41 @@ class ScanQueueStore:
     def backlog(self) -> int:
         counts = self.counts()
         return counts.get("pending", 0)
+
+    def load_workspace_dismissals(self) -> dict[int, set[tuple[int, str]]]:
+        """Durable workspace-dismissal index: memory_id -> {(version, suspected)}.
+
+        Survives boot purges and detector-epoch wipes by design (the queue is a
+        workbench; this table is the decision record). DB error -> {} (fail-open)."""
+        if not self._db_available:
+            return {}
+        try:
+            with self._db.connection() as conn:
+                rows = conn.execute(
+                    "SELECT memory_id, version, suspected_workspace FROM workspace_dismissals"
+                ).fetchall()
+            index: dict[int, set[tuple[int, str]]] = {}
+            for row in rows:
+                index.setdefault(int(row["memory_id"]), set()).add(
+                    (int(row["version"]), str(row["suspected_workspace"]))
+                )
+            return index
+        except (sqlite3.Error, TypeError, ValueError):
+            return {}
+
+    def record_workspace_dismissals_on_conn(
+        self, conn: sqlite3.Connection, rows: list[tuple[int, int, str, str]],
+    ) -> int:
+        """Caller owns the transaction (atomic with the queue-row status flip)."""
+        now = utc_now_iso()
+        if rows:
+            conn.executemany(
+                """INSERT OR IGNORE INTO workspace_dismissals(
+                     memory_id, version, suspected_workspace, reason, decided_at)
+                   VALUES(?,?,?,?,?)""",
+                [(m, v, s, r, now) for (m, v, s, r) in rows],
+            )
+        return len(rows)
 
     def refresh_stale_pins(self) -> int:
         """Expire rows whose pinned member versions no longer match reality.

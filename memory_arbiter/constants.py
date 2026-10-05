@@ -53,23 +53,6 @@ class Isolation:
     WEAK = "weak"
     STRICT = "strict"
 
-    #: Values accepted from config/env; anything else falls back to NONE.
-    ALL = (NONE, WEAK, STRICT)
-
-
-
-
-def strict_ws(level: str, ws_canonical: str | None) -> str | None:
-    """Return ``ws_canonical`` only under strict isolation, else None.
-
-    Folds the repeated ``ws_canonical if (isolation == "strict" and ws_canonical)
-    else None`` idiom that appeared 9× across search.py / tools.py. Under weak or
-    none the caller must NOT hard-filter by workspace, so this returns None.
-    """
-    if level == Isolation.STRICT and ws_canonical:
-        return ws_canonical
-    return None
-
 
 # ---------------------------------------------------------------------------
 # Frozen configuration constants (v0.15.0 config slimming).
@@ -88,49 +71,220 @@ EMBEDDING_MAX_SECTION_CHARS = 3600
 # known (vnext estimates). Never used to accept or reject vectors.
 EMBEDDING_DEFAULT_DIM = 768
 
-# semantic-conflict (Qwen) engine
+# semantic-conflict judge engine (mDeBERTa since 0.17.1; the Qwen/GGUF
+# engine is retired)
 # n_ctx 2048 (0.15.8): 1024 left no headroom — system(178) + frame/metadata
 # (~101) + two 400-char quotes (~460) + the 384-token output budget exceeded
 # the window, so long-prompt pairs had their JSON generation truncated at the
 # context wall (the top qwen_invalid_output source).
-SEMANTIC_N_CTX = 2048
 SEMANTIC_N_THREADS = 4
-SEMANTIC_N_BATCH = 128
-SEMANTIC_JOB_TIMEOUT_MS = 5000
+
+# mDeBERTa judge (0.17.1, owner plan §3.1/§3.6): the write-time conflict
+# arbitration engine replacing Qwen. Label order is a PINNED PROTOCOL: the
+# parent passes this tuple to the child and the load-time echo check pins
+# parent↔child protocol-constant consistency (a tampered/drifting child
+# fails loudly). The checkpoint itself carries no label metadata on disk —
+# re-training/swapping a ckpt requires MANUALLY verifying this order still
+# matches the training-time class order (there is no disk-side check).
+SEMANTIC_MDEBERTA_LABELS = ("conflict", "no_conflict", "possible_conflict")
+SEMANTIC_MDEBERTA_MAX_LEN = 256
+# 0.17.1 owner 指令：判定输入= subject + 对立行 + 前后各 1 句（722eaee 定版
+# 形态）。预算感知组装见 semantic_judge.row_window——对立行无条件全保，
+# subject 截 64 字符、邻行各截 80 字符，每侧（对立行+邻行）300 字符预算；
+# 组装结果可能超 256，由 tokenizer 侧 max_len 截断兜底。
+SEMANTIC_JUDGE_CONTEXT_BEFORE = 1
+SEMANTIC_JUDGE_CONTEXT_AFTER = 1
+# Batch size constant (fallback 8). The config key
+# semantic_conflict.mdeberta_batch defaults to 0 = device-tiered auto
+# (semantic_judge.device_default_batch: Apple Silicon / NVIDIA GPU 16,
+# otherwise CPU 8); an explicit config value >0 overrides the tier. There is
+# no startup knee probe.
+SEMANTIC_MDEBERTA_BATCH = 8
+
+# 0.17.1 重标（owner 2026-10-03 拍板）：5000→10000——池 500 对 ≈63 片
+# （_JudgeBatch 客户端切片恒 8）× (IPC+前向) 的量级余量；公平期限机制不变
+# （队列空闲无墙、忙时生效），突发保护自动保留。开工实测校准后回写依据。
+SEMANTIC_JOB_TIMEOUT_MS = 10000
 SEMANTIC_INFERENCE_TIMEOUT_MS = 30000
 SEMANTIC_LOAD_TIMEOUT_MS = 120000
 SEMANTIC_MIN_PAIR_BUDGET_MS = 1000
-# Pair-extraction feedback retry (pair-v6): a single protocol invalid output
-# (over-limit field / truncated JSON / wrong schema) earns one retry with a
-# feedback turn. Truncation retries shrink the evidence quotes and widen the
-# output budget — worst-case n_ctx: system(~250) + metadata(~101) +
-# 2x400-char quotes(~460) + previous raw(<=384) + feedback(~30) + 384 output
-# ~= 1610 < 2048; the truncation retry (~240-char quotes, 512 output) lands
-# lower still. Unknown-field/backend failures never retry.
-SEMANTIC_PAIR_MAX_ATTEMPTS = 2
-SEMANTIC_PAIR_RETRY_QUOTE_CHARS = 240
-SEMANTIC_PAIR_RETRY_MAX_TOKENS = 512
 # A1 ring (0.15.14): recent examined-pair samples kept for status/doctor
-# aggregation (mean/p95 pair_ms, retried ratio, long-decode ratio). A sample
-# whose generated tokens reach this share of the 384-token output budget
-# counts as a long decode — the slow-but-valid rambling/copy mode that
-# neither queue competition nor retries explain.
+# aggregation (mean/p95 pair_ms).
 SEMANTIC_PAIR_RING_SIZE = 20
-SEMANTIC_PAIR_LONG_DECODE_TOKENS = 256
-SEMANTIC_QUEUE_MAX_SIZE = 100
-EVIDENCE_QUEUE_MAX_SIZE = 200
+# C2 (0.17.0 unit retirement): the worker merge moved indexing into the
+# semantic job, so this queue now carries the combined index+detect load —
+# it inherits the old evidence-queue watermark (200) instead of 100.
+SEMANTIC_QUEUE_MAX_SIZE = 200
+# C2: wall-clock cap for the job's embed+publish phase. Normal batched embeds
+# are ~300ms/memory; a GPU rebuild-class stall must fail the job fast
+# (incomplete → retry) instead of parking the single worker thread and
+# starving every queued job behind it.
+SEMANTIC_EMBED_PHASE_TIMEOUT_MS = 30000
+# C7: streaming collection batch size. The producer embeds one batch ahead on
+# a single worker thread (queue depth 1) so the main thread's KNN+gates
+# overlap the GPU work; value-anchor ranking happens BEFORE batching, so a
+# deadline/cap hit stops later batches and always cuts the lowest-value tail.
+SEMANTIC_STREAM_BATCH_ROWS = 16
+# Adversarial-review follow-up: internal (same-memory) pair construction is
+# O(n²) in segment count — row granularity multiplied n (a 300-row table is
+# ~45k pairs). Independent from the cross-loop cap so E10① (internal keepers
+# land despite cross truncation) keeps its own headroom.
+SEMANTIC_INTERNAL_MAX_ROWS = 256
+# Owner insight 2026-09-23: the detection window must surface CONFLICT
+# candidates, not the globally most-similar rows — a wide window deduped per
+# peer keeps every plausible opponent represented; the per-peer dict then
+# keeps each opponent's closest row as its representative.
+# 0.17.1 (owner 2026-09-28 ③)：窗口=clash 批处理上限(SEMANTIC_MDEBERTA_BATCH=8)
+# × 4 = 32——一次批前向可判完一整窗，噪音/样板行挤占（harness 首轮 ny-* 11 漏报
+# 的机制）在更宽窗口下被稀释；cost 不变（余弦门内存完成，判定只增带内对）。
+SEMANTIC_CROSS_KNN_WINDOW = 32
+# Gate-v2 G2 (owner 拍板 6): an evidence-channel best whose TRUE cosine
+# clears this is the text the user asked for (#91: raw KNN first yet
+# find-rank 15 after RRF rank-flattening) — the fusion boost bypasses rank
+# arithmetic entirely. The detection side reuses the same ceiling: pairs at
+# or above it are duplicates, not conflicts (G4 repeatability skip).
+# embedder 任务前缀（EmbeddingGemma 训练带任务 prompt，llama.cpp 载 GGUF 不
+# 自动补——25 处裸调用是相似度不准的根因，mema #1071）。分型按（存储侧，
+# 查询侧）配对语义：历史名 STS 保留以最小化 diff，语义=「存储/配对侧统一
+# 前缀」。doctor 维度探针豁免。
+# 终局形态（owner 2026-09-26 拍板）：**存储侧裸文本，查询侧 query 前缀**。
+# 双语料实测（2026-09-26 消融）：中文中长文语料 recall-v3-len 三写入侧前缀
+# 打平（R@5 全 0.9737，eval/results/recall-len3-{qxq,bare,official}）；
+# LOCOMO 英文改述场景 bare-doc+query-prefix 0.605 vs query×query 0.387
+# （+21.8pt，WorkBuddy mema-vs-mem0 消融报告；纯向量 0.614 vs 0.538）。
+# 未发版改形零迁移成本，且存量用户库（0.16.x）即裸文本空间，文档侧语义连续。
+# 版本号纪律（owner 2026-09-26）：EMBEDDING_PIPELINE_VERSION 维持已发版的 2
+# 不轮换——存储侧向量语义与 0.16.12 逐字节一致，升级用户零全量重嵌；查询侧
+# 前缀是运行时行为无需重嵌。前缀常量值不进 space_id 组成，未来若改存储侧
+# 嵌入文本必须手动 bump 版本号。冲突带 FLOOR 0.60 等阈值系 sts 前缀空间
+# 标定（702ff59），裸空间下须经 harness conflict 门复验，不达即按既有标定
+# 协议重校。
+EMBED_PREFIX_STS = ""
+EMBED_PREFIX_SEARCH = "task: search result | query: "
+# 0.17.0 前缀重标注记（M0）：sts 下 nontrue 近重复对可达 0.9965（≥CEIL 正确
+# 落 duplicates），但 true 里也有 9 条 ≥0.9837——新空间「过顶=近重复冲突通道
+# 不收」的既有 doctrine 需 harness 复验；本值与 CEIL 同源（A2 联动，勿单独动）。
+COS_EXACT_BOOST = 0.98
+# Gate-v2 G4 candidate cosine band on TRUE row-to-row cosine (calibration
+# table §1: true conflicts 0.80-0.97, same-topic non-conflicts 0.64-0.75,
+# random same-bucket p5=0.554 — below-floor pairs are noise; at/above-ceil
+# pairs are duplicates that belong to the similarity/duplicates channel,
+# hence the ceil == COS_EXACT_BOOST). Non-unit row vectors (|v|≈16.5) make
+# L2-to-cos conversion unreliable, so the gate runs on fetched vectors, one
+# batched IN query per collection loop.
+# 0.17.0 前缀重标（M0 + real-model 实证）：sts 前缀把矛盾对余弦**推低**（探针
+# contra 0.96→0.85；digit-free 矛盾对在 0.70 下被切——floor 高于矛盾分布是错
+# 位的），维持 0.60 让矛盾对进带、由 Qwen 裁决；上收噪声交由 FLOOR 之上其余
+# 过滤层。0.70 的内容级 true_min 0.7467 是内容级量尺，句子级矛盾对可低至 0.6x。
+SEMANTIC_CANDIDATE_COS_FLOOR = 0.60
+SEMANTIC_CANDIDATE_COS_CEIL = COS_EXACT_BOOST
+# 检索线档位（0.17.0 追加包 K1/K2：关键词模式查询+召回余弦档位，方案
+# docs/mema-keyword-query-and-cos-bands-2026-09-24.md §1/§4；owner
+# 2026-09-24 拍板。与检测线的 SEMANTIC_CANDIDATE_COS_* 用途不同、各自
+# 标定，禁止共用）。
+# 0.17.0 前缀重标（M0 search/sts 分布）：relevant best min 0.5085 / p5
+# 0.5238 → 0.48 留余量（旧 0.52 口径在新空间会砍贴线 relevant）。
+# 0.17.0 分层门槛（owner 2026-09-26）：本值同时是把守 evidence-only 纯向
+# 量行的三道同名尺——K2 准入线（进池）、查询门槛豁免线（放行，
+# _passes_query_recall_floor）、keyword 救济带下缘（search.py 与
+# COS_MIDBAND_CEIL 成对）。消费点必须同步重标：动了这里就同时改变"谁能
+# 进池"、"谁能上页"与"谁进救济带"。跨语言数据锚：recall-v3-len en→zh 15
+# 个贴线 gold 余弦 0.509-0.681 全在线上（xlang-floor-policies.json）。
+COS_RECALL_FLOOR = 0.48
+# 向量结果准入线：evidence-only 候选（无词法席位）的 best 行真余弦低于
+# 此线不进结果（K2；仅 active 查询路径，expired 审计豁免沿 8.25 口径）。
+# 0.58 档实测会删掉 A04(0.567)/A12(0.543) 两条已在 top10 内的 relevant
+# （R@10 0.889 击穿 ≥0.93 门）；0.52 由 owner 拍板留余量，三条贴线
+# relevant（0.543/0.554/0.567）全保留。换嵌入模型或语料扩版必须重标。
+# 0.17.0 前缀重标（M0）：relevant best p75 0.6718 → 救济带上界 0.67。
+COS_MIDBAND_CEIL = 0.67
+# 中间带上界（relevant p75=0.769 / borderline p75=0.678 / irrelevant
+# 长尾 0.794 的重叠区右缘）；[COS_RECALL_FLOOR, COS_MIDBAND_CEIL) 是
+# 关键词救济带，不随准入线变动。
+KEYWORD_QUERY_MAX_TOKENS = 8
+# 关键词模式 token 数上限（防超长枚举查询；超限按非关键词查询处理）。
+KEYWORD_RESCUE_BOOST = 0.01
+# 中间带救济融合分加值：×_RRF_SCORE_WEIGHT(300) → final +3.0 分，排在
+# 词法 strong(10)/medium(6) 命中之下、weak(2.0) 与纯向量 floor 之上。
+# 初始值，K3 全量 AB 标定：过强（越过词法 strong/medium）或过弱（名次
+# 不动）按 0.005 步进调（方案 §6 BOOST 标定门）。
+KEYWORD_RESCUE_DF_MAX = 5
+# 救济匹配形态的区分度闸（K3 实施标定；闸值 5 待 owner 追认，误召回
+# 口径/B07 不拆词/D04 语料三拍板已落）：形态在池内中间带 evidence-only
+# 行命中 >5 即视为话题词不救济。r3 探针实测（B07/C07/C08/D01/D02/D04/
+# K03 七池命中数）给出干净分离带——探针词：桥接 5 / 纪律 2 / 做法 1；
+# 话题词：脚本 8 / 计划 8 / 评估 10 / 预算 12 / 操作 17 / 场景 20 /
+# 数据 38 / 安全 18 / 上限 15。无闸时（r2）通用词把 C07/C08/D01/D02
+# 负例 0→8~10、误召回 2→18。
+# **绝对计数口径，属档位标定的一部分：语料扩版或换嵌入模型必须与
+# COS_* 档位一并重标**（298 记忆语料的分离带不保证迁移；探针词最高
+# 值「桥接 5」恰在闸上零余量；中期可改池占比归一，R2-P1-2）。
+# Gate-v2 G5 title coarse-screen width (方案: 30-50 条记忆, 初值 30-50,
+# 宽不罚——后续层会筛; 窄才漏). One subject-row KNN per write.
+SEMANTIC_NEIGHBOR_SCREEN = 50
 # 0.15.14 (A5): unit cap covers the real-library maximum (62 observed in #956);
 # collection cost per unit is one k=5 KNN + rule gate (milliseconds) — the
 # expensive resource is Qwen pairs, bounded separately below.
-SEMANTIC_MAX_EVIDENCE_UNITS = 64
-# 0.15.14 (A5): deterministic second gate on Qwen work per write-check — the
-# fair job deadline remains the first. Formula (plan mema-01514 §A5):
-# clamp(6, 16, round(20s target check budget ÷ p95 pair wall)); with the
-# grammar-free decode (A2) the measured p95 pair ≈ 1.6s ×1.5 load margin
-# ⇒ 10. Pairs beyond the cap report incomplete reason=pairs_examined_capped.
-SEMANTIC_MAX_EXAMINED_PAIRS = 10
+# 0.17.1 重标（owner 2026-10-03 拍板，方案 §3）：判定执行合一后 internal 与
+# A-cross 消费同一个 job 全局池；旧值 10 = Qwen 时代公式（20s 目标预算 ÷
+# 1.6s p95 pair，plan mema-01514 §A5）——mDeBERTa 批前向实测 ~0.1s/16 对，
+# 前提不成立。新值 500 = 32 次前向 ≈3.2s 的量级余量，为候选面扩容留位
+# （当前实际候选几十对，池是名义上限；实际判定量仍由 rows/window/漏斗门
+# 管）。超池对仍报 incomplete reason=pairs_examined_capped。
+SEMANTIC_MAX_EXAMINED_PAIRS = 500
+# 0.17.0 P2-3.1: row cap for the row-level conflict channel (sentences +
+# header-folded table rows; ~35 rows per typical memory, 256 covers the
+# real-library tail). Rows sort value-anchored-first before the cap bites
+# (P2-3.1, plan §5); the truncation reason is rows_capped. Initial value —
+# P2-3.2 recalibrates on the noisy corpus (constants keep the evidence chain).
+SEMANTIC_MAX_ROWS = 256
+# 0.17.1 重标合一 B2（owner 2026-10-03 拍板：所有内部自查都要用向量，且过
+# 漏斗门）：内部配对=numpy 内存 top-k（批路径用已发布向量、streaming 用流
+# drain 后的 landed 向量——job_conn 快照对同相位发布必然不可见，不走 DB
+# KNN）。每行取最相似 k 邻居，n×k 对封顶（256 行 1280 对 vs n² 32640）。
+SEMANTIC_INTERNAL_SELF_KNN_K = 5
+# B3（owner 2026-10-03 拍板）：超长表格段豁免——单个表格段（kind=table_row
+# 且 row_index 连续）行数超过该值即整体不存行向量、不做内外冲突检测（各数
+# 各的：夹散文断段，段各自计数）。超长表=记录/台账，检测意义低而嵌入成本
+# ~10ms/行（6 万行≈10 分钟嵌入+180MB 向量垃圾，且污染 KNN 空间）。该表
+# 无行级召回（hits 不能命中表内行），摘要级召回不受影响。
+SEMANTIC_TABLE_ROW_EXEMPT = 100
+# 0.17.1 修复批 A1：sqlite-vec 0.1.x vec0 KNN 硬上限（实测 0.1.9 /
+# SQLite 3.53.4：k=4096 通过，k=4097 报 "k value in knn query too large,
+# the limit is 4096"）。深 offset 会把 k 推到 4096+（recall 的
+# pool_cap=(offset+limit+1)，evidence 通道再 ×16）——届时 vec0 整条查询
+# 失败，而调用方的 except sqlite3.Error 会把它吞成空结果（语义通道静默
+# 消失，实测 offset=156@limit=100 时 100 条→0 条）。clamp 保通道存活；
+# 翻页深度语义本就是 best-effort（v0.15.4 口径），不新增承诺。
+VEC0_MAX_K = 4096
+# 0.17.1 修复批 A4：毒记忆（稳定抛非 TypeError/ValueError 的异常、水位无法
+# 推进）的失败上界。跨 kick 累计在 scan_pipeline_state.poison_failures；
+# 达界后 kick 回执 poison_skipped 可见（不自动 mark_scanned——那会静默丢
+# 覆盖；轮次保持 complete=false、conflict_scan_required 门不清，由用户处置）。
+SCAN_POISON_MAX_FAILURES = 5
+# 0.17.0 P2-3.4: candidate pair_score weights (order-only, never a verdict).
+# Base is the C4 subject/tags overlap; value features outrank topic
+# similarity because 98% of same-topic pairs are continuations, not
+# conflicts (12th/13th-round evidence). Weights sum to 1.0; recalibrated
+# with the P2-0 corpus during P2-3.2.
+# 0.17.0 P2-3.3/P2-5.3: claims channel attr-vector gate τ (8th-round spike:
+# 0.17.0 review A3: the claims channel is zero-Qwen with no natural pairs
+# cap — notices per write are bounded here instead (overflow visible).
+CLAIMS_MAX_NOTICES_PER_WRITE = 5
+# Gate-v2 G6 rewrite (owner 2026-09-23): the candidate set is ALREADY all
+# same-topic near neighbours — C4 overlap measures topic-ness, which has no
+# discrimination INSIDE the set (wrong layer), so it drops to a tiebreak.
+# The budget order now leads with the CONFLICT-BAND membership of the true
+# cosine, then the deterministic opposition signals:
+#   score = 0.40*band(clamp((cos-0.60)/(0.98-0.60))) + 0.25*numeric_route
+#         + 0.20*values_differ(normalized unequal) + 0.15*negation
+# Order-only boundary invariant: a mis-rank wastes budget, never flips a
+# verdict. Weights are initial values — recalibrated at G7 (五轮基线).
+PAIR_SCORE_W_CONFLICT_BAND = 0.40
+PAIR_SCORE_W_NUMERIC_ROUTE = 0.25
+PAIR_SCORE_W_VALUES_DIFFER = 0.20
+PAIR_SCORE_W_NEGATION = 0.15
 SEMANTIC_PRELOAD = True
-SEMANTIC_RESIDENT = True
 
 # scheduled-task guidance notice (scan_log.jsonl freshness): a library whose
 # newest completed scan is older than this, or that has never completed one,
@@ -144,28 +298,17 @@ SCAN_CHAIN_STALE_HOURS = 1
 # would re-read scan_log.jsonl end to end.
 SCAN_TASK_RECHECK_SECONDS = 3600
 
-# Write-time duplicate hint: subject gate over candidate recall, then a
-# content-confirmation gate (owner 2026-09-16 redesign, three-measurement
-# evidence from the eval harness). The old tag-Jaccard second gate is GONE:
-# on the real library it blocked true cross-habit rewrites (duplicate writes
-# whose tags drifted, Jaccard 0.29–0.70) while waving through same-subject
-# serials (98% of subject-similar pairs are same-topic continuations, not
-# duplicates — content-similarity median 0.15). The subject bar 0.95→0.80
-# same day (gate only fired at ratio ≥0.968, missing natural-suffix
-# rewrites; 0.80 recovers 8/12 on the natural-gradient corpus, 0/36 false
-# positives — see eval/sweep_similar_threshold.py).
-# Content gate: full-body char-trigram cosine (semantic_conflict._char_ngrams
-# + _cosine, the deterministic pre-filter's own implementation) ≥ 0.40.
-# Calibration on 14 positives / 154 negatives (real library + corpus):
-# negatives top out at 0.374, positives ≥0.427 → 0.40 sits mid-band with
-# recall 11/14 and 0 false positives. Bodies under the char floor skip the
-# confirmation and hint anyway flagged low_confidence (set variance is too
-# high on short texts; prefer recall). Vector confirmation was measured and
-# REJECTED: paraphrase-type near-dups (0.87–0.92) and serials (0.81–0.93)
-# are inseparable at 0.5B-embedding resolution — that split belongs to the
-# Qwen scan line, not this millisecond sync channel.
-WRITE_SIMILAR_SUBJECT_RATIO = 0.8
-WRITE_SIMILAR_CONTENT_COSINE = 0.4
+# 0.17.0 P2-7 校准轮（cand1 数据）：双轴 OR 规则——(subject≥0.45 且
+# content≥0.22) 或 (subject≥0.80 且 content≥0.15)。语料实测分布：真近重复
+# (含 noisy 改写) s∈[0.32,1.0]/c∈[0.17,0.74]，组内样板互撞带 s≈0.10/c∈
+# [0.60,0.74]（旧豁免线 0.60 正落在带内致 sim07 假阳性），负例带 c≤0.16。
+# 地板 0.22 取负例带之上、真值地板之下；0.45/0.80 分层兜 sim12 型低内容对。
+# 对抗 review P0 修正：此阈值消费方是 difflib 词法 ratio（write.py），非
+# embedder 产物——不受前缀影响，0.45 维持（M0 的 sts 余弦是错尺，勿用）。
+WRITE_SIMILAR_SUBJECT_FLOOR = 0.45
+WRITE_SIMILAR_CONTENT_FLOOR = 0.22
+WRITE_SIMILAR_SUBJECT_STRONG = 0.80
+WRITE_SIMILAR_CONTENT_MIN = 0.15
 WRITE_SIMILAR_MIN_CONTENT_CHARS = 40
 WRITE_SIMILAR_MAX_HINTS = 2
 # Recall channel (0.15.3): with a loaded embedder the hint recalls candidates
@@ -188,16 +331,10 @@ SCAN_DUPLICATES_MAX_RESULTS = 200
 SCAN_DUPLICATES_BATCH = 100
 SCAN_DUPLICATES_MAX_PAGES = 200
 
-# workspace normalization Qwen guard (A/B: top-3 beats top-5; over-distance
-# candidates must never reach the model — see tools._suggest_workspace_candidate)
-QWEN_CANDIDATE_DISTANCE = 0.25
-QWEN_CANDIDATE_TOP_K = 3
-QWEN_BUDGET_MS = 750
-
 # workspace recall / normalization thresholds (global; NOT per-isolation)
-WORKSPACE_MATCH_DISTANCE = 0.25
+WORKSPACE_MATCH_DISTANCE = 0.25  # 0.17.0 前缀重标暂缓：sts 下 11 对真实 alias 距离 max 0.4264 超此值，但负例分布未测（0.45 有相似名折叠风险，scan 家族夹具即证）——补负例语料后重标（挂观察）
 WORKSPACE_RECALL_ADMISSION = True
-WORKSPACE_RECALL_CUTOFF = 0.25
+WORKSPACE_RECALL_CUTOFF = 0.25  # 0.17.0 前缀重标暂缓：sts 下 11 对真实 alias 距离 max 0.4264 超此值，但负例分布未测（0.45 有相似名折叠风险，scan 家族夹具即证）——补负例语料后重标（挂观察）
 WORKSPACE_WEAK_VECTOR_WEIGHT = False
 WORKSPACE_MIN_NAME_LEN = 3
 
@@ -251,15 +388,12 @@ BATCH_READ_FULL_BUDGET_MAX_BYTES = 100 * 1024
 # keep the MAX_TAGS=100 bound; the total cap applies to the merged on-row set.
 MAX_MEMORY_TOTAL_TAGS = 32
 
-# Pipeline kick defaults: one kick is a bounded synchronous batch (the task
-# re-kicks until complete; no resident walker per §6⑦).
-SCAN_PIPELINE_KICK_TIME_BUDGET_S = 45.0
-SCAN_PIPELINE_KICK_MAX_MEMORIES = 400
-SCAN_PIPELINE_NEIGHBOR_K = 10
 # 0.16.2 §1.5: machine-decidable check routes only generate within the top-3
 # neighbour ranks; notify routes keep the full top-10 (real-conflict recall
 # has no threshold). A rank tightening, not an absolute distance band.
 SCAN_MACHINE_ROUTE_TOP_K = 3
+# 0.17.0 P2-6.2: slow-lane anchors per kick (owner default 20, adjustable).
+SCAN_SLOW_LANE_PER_KICK = 20
 
 # 0.16.0 workspace-normalization gate (plan §6⑫); 0.16.2 recalibrates the
 # vote threshold from the absolute >=8/10 (based on the 930/950 cases owner
@@ -331,9 +465,6 @@ REMOVED_ENV_NAMES = (
     "MEMORY_ARBITER_WORKSPACE",
     "MEMORY_ARBITER_WORKSPACE_MATCH_DISTANCE",
     "MEMORY_ARBITER_WORKSPACE_MIN_NAME_LEN",
-    "MEMORY_ARBITER_WORKSPACE_QWEN_BUDGET_MS",
-    "MEMORY_ARBITER_WORKSPACE_QWEN_CANDIDATE_DISTANCE",
-    "MEMORY_ARBITER_WORKSPACE_QWEN_CANDIDATE_TOP_K",
     "MEMORY_ARBITER_WORKSPACE_RECALL_ADMISSION",
     "MEMORY_ARBITER_WORKSPACE_RECALL_CUTOFF",
     "MEMORY_ARBITER_WORKSPACE_WEAK_VECTOR_WEIGHT",

@@ -22,15 +22,24 @@ def _load(name: str) -> list[dict]:
     ]
 
 
-def test_queries_cover_34_with_expected_kinds() -> None:
+def test_queries_cover_42_with_expected_kinds() -> None:
     data = json.loads((FIXTURES / "queries.json").read_text(encoding="utf-8"))
     queries = data["queries"]
-    assert data["corpus_version"] == "recall-v1"
-    assert len(queries) == 34
+    # 检索线 K3：corpus bump recall-v2-kw——原 34 题（问句/混合形态）保留
+    # 作回归基线，+K01~K13 关键词模式专属考题（expected_band 实测定档）。
+    # 0.17.0 修剪（owner 2026-09-26，recall-v2-kw-trim）：短句/超配跨语言/
+    # 死题出卷（R1-R4，eval/trim_recall_v2.py）——47→42（A01/A03/A05/A07/
+    # B09 五道死题移除）。
+    assert data["corpus_version"] == "recall-v2-kw-trim"
+    assert len(queries) == 42
     kinds: dict[str, int] = {}
     for row in queries:
         kinds[row["kind"]] = kinds.get(row["kind"], 0) + 1
-    assert kinds == {"paraphrase": 12, "lookup": 10, "legal": 8, "far": 4}
+    assert kinds == {"paraphrase": 8, "lookup": 9, "legal": 8, "far": 4, "keyword": 13}
+    bands = {row["qid"]: row.get("expected_band") for row in queries if row["kind"] == "keyword"}
+    assert set(bands.values()) == {"midband", "above"}
+    assert list(bands.values()).count("midband") >= 5
+    assert list(bands.values()).count("above") >= 3
 
 
 def test_targets_content_addressed_and_unique() -> None:
@@ -50,8 +59,9 @@ def test_labels_reference_existing_targets_only() -> None:
         assert row["label"] in {"relevant", "borderline"}, row
         assert row["fixture_key"] in known, row
     labeled_qids = {row["qid"] for row in labels}
-    # 当年口径：A/B 组 22 qid 有非无关标注；C/D 组 12 qid 未标=默认无关
-    assert len(labeled_qids) == 22
+    # 0.17.0 修剪后：原 22→17 qid（A/B 组非无关标注，5 道死题移除）+
+    # K 组 13 qid（relevant 目标）；C/D 组 12 qid 未标=默认无关
+    assert len(labeled_qids) == 30
 
 
 def test_distractors_exclude_twin_bucket_and_targets() -> None:
@@ -68,7 +78,8 @@ def test_manifest_matches_files() -> None:
     manifest = json.loads((FIXTURES / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["targets"] == len(_load("targets.jsonl"))
     assert manifest["distractors"] == len(_load("distractors.jsonl"))
-    assert manifest["labeled_qids"] == 22
+    # 0.17.0 修剪（recall-v2-kw-trim）：35→30（A01/A03/A05/A07/B09 死题移除）
+    assert manifest["labeled_qids"] == 30
 
 
 SIM_FIXTURES = REPO / "eval" / "fixtures" / "similarity"
@@ -124,7 +135,12 @@ def test_similarity_corpus_shape_and_naturalness() -> None:
 
 
 CONFLICT_FIXTURES = REPO / "eval" / "fixtures" / "conflict"
-CONFLICT_LABELS = {"true_conflict", "coexist", "noise"}
+# 2026-09-28 口径审计（owner 指令）：新增 non_conflict（版本演进/时点说明/
+# 不同主题——原 owner_resolved 真冲突按新口径改标，见 audit-20260928.md）
+CONFLICT_LABELS = {"true_conflict", "coexist", "noise", "non_conflict"}
+CONFLICT_NON_CONFLICT_KINDS = {
+    "version_evolution", "point_in_time", "different_topic", "same_value_duplicate",
+}
 CONFLICT_SHAPES = {"scan_evolution", "governed_negative", "write_opposition"}
 
 
@@ -148,9 +164,17 @@ def test_conflict_pairs_composition_and_integrity() -> None:
         # 重放保真：成员正文非空且互不字节相同（防重门会拦截）
         assert left["content"] and right["content"], pair["pair_id"]
         assert left["content"] != right["content"], pair["pair_id"]
+        # 口径审计：non_conflict 必须带改标台账与细分 kind；true_conflict
+        # 必须带信息充足度标注（insufficient 对疑似=满分口径的计分依据）
+        if pair["label"] == "non_conflict":
+            assert pair.get("non_conflict_kind") in CONFLICT_NON_CONFLICT_KINDS, pair["pair_id"]
+            assert pair.get("relabel_20260928", {}).get("from") == "true_conflict", pair["pair_id"]
+        if pair["label"] == "true_conflict":
+            assert pair.get("opposition_quality") in {"sufficient", "insufficient"}, pair["pair_id"]
     labels = {p["label"] for p in pairs}
     assert labels == CONFLICT_LABELS
-    # owner 判定来源的对不得为空（ground truth 主体）
+    # owner 判定来源的对不得为空（ground truth 主体；non_conflict 改标对
+    # 保留原 owner_resolved label_source——审计台账在 relabel_20260928）
     owner_sourced = [p for p in pairs if p["label_source"].startswith("owner_")]
     assert len(owner_sourced) >= 30
 
@@ -159,7 +183,9 @@ def test_conflict_overrides_audit_trail_exists() -> None:
     overrides = json.loads(
         (CONFLICT_FIXTURES / "label_overrides.json").read_text(encoding="utf-8"),
     )
-    assert "cf-coexist-796-797" in overrides  # 改判 true_conflict（演进取代未标注）
+    # 2026-09-28 口径审计后该对改判 non_conflict（版本演进；原 true_conflict
+    # 判定史见 relabel_20260928 与 audit-20260928.md）
+    assert "cf-coexist-796-797" in overrides
     pair_ids = {p["pair_id"] for p in _conflict_pairs()}
     dropped = {pid for pid, (label, _) in overrides.items() if label is None}
     assert not (dropped & pair_ids), "剔除对不得留在正式对集"

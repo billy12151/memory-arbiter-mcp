@@ -23,7 +23,7 @@ def make_tools(tmp_path: Path) -> MemoryTools:
 
 def test_remember_requires_content_and_subject(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
-    for data, field in (({"subject": "s"}, "content"), ({"content": "x"}, "subject")):
+    for data, field in (({"workspace": "default", "subject": "s"}, "content"), ({"workspace": "default", "content": "x"}, "subject")):
         result = tools.memory("remember", data)
         assert result["ok"] is False
         assert result["data"]["field"] == field
@@ -32,14 +32,17 @@ def test_remember_requires_content_and_subject(tmp_path: Path) -> None:
 def test_remember_rejects_lifecycle_status_values(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     for status in ("superseded", "conflicted", "deleted", "bogus"):
-        result = tools.memory("remember", {"content": "x", "subject": "s", "status": status})
+        result = tools.memory("remember", {
+            "workspace": "default","content": "x", "subject": "s", "status": status})
         assert result["ok"] is False, status
         assert result["data"]["error"] == "invalid_input"
         assert result["data"]["field"] == "status"
-    allowed = tools.memory("remember", {"content": "x", "subject": "s", "status": "active"})
+    allowed = tools.memory("remember", {
+        "workspace": "default","content": "x", "subject": "s", "status": "active"})
     assert allowed["ok"] is True
     assert allowed["data"]["record"]["status"] == "active"
-    pending = tools.memory("remember", {"content": "x", "subject": "s", "status": "pending"})
+    pending = tools.memory("remember", {
+        "workspace": "default","content": "x", "subject": "s", "status": "pending"})
     assert pending["ok"] is True
     assert pending["data"]["record"]["status"] == "pending"
 
@@ -70,26 +73,31 @@ def test_memory_write_direct_guard_rejects_invalid_structured_fields(tmp_path: P
 
 def test_content_limit_is_utf8_bytes_and_inclusive(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
-    accepted = tools.memory("remember", {"content": "a" * MAX_CONTENT_BYTES, "subject": "limit"})
+    accepted = tools.memory("remember", {
+        "workspace": "default","content": "a" * MAX_CONTENT_BYTES, "subject": "limit"})
     assert accepted["ok"] is True
-    rejected = tools.memory("remember", {"content": "a" * (MAX_CONTENT_BYTES + 1), "subject": "limit"})
+    rejected = tools.memory("remember", {
+        "workspace": "default","content": "a" * (MAX_CONTENT_BYTES + 1), "subject": "limit"})
     assert rejected["ok"] is False
     assert rejected["data"]["error"] == "resource_limit_exceeded"
 
 
 def test_unknown_field_warns_but_sensitive_typo_rejects(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
-    warned = tools.memory("remember", {"content": "x", "subject": "s", "harmless_extra": 1})
+    warned = tools.memory("remember", {
+        "workspace": "default","content": "x", "subject": "s", "harmless_extra": 1})
     assert warned["ok"] is True
     assert "unknown field ignored: harmless_extra" in warned["warnings"]
-    rejected = tools.memory("remember", {"content": "x", "subject": "s", "workspcae": "secret"})
+    rejected = tools.memory("remember", {
+        "workspace": "default","content": "x", "subject": "s", "workspcae": "secret"})
     assert rejected["ok"] is False
     assert rejected["data"]["did_you_mean"] == "workspace"
 
 
 def test_unknown_field_name_cannot_remove_authorization(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
-    written = tools.memory("remember", {"content": "x", "subject": "s"})
+    written = tools.memory("remember", {
+        "workspace": "default","content": "x", "subject": "s"})
     memory_id = written["data"]["id"]
     result = tools.memory_govern(
         "retire",
@@ -114,8 +122,10 @@ def test_product_ids_must_be_positive(tmp_path: Path) -> None:
 def test_non_finite_confidence_and_bad_time_rejected(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     for confidence in ("NaN", True, False):
-        assert tools.memory("remember", {"content": "x", "subject": "s", "confidence": confidence})["ok"] is False
-    result = tools.memory("remember", {"content": "x", "subject": "s", "event_time": "yesterday"})
+        assert tools.memory("remember", {
+            "workspace": "default","content": "x", "subject": "s", "confidence": confidence})["ok"] is False
+    result = tools.memory("remember", {
+        "workspace": "default","content": "x", "subject": "s", "event_time": "yesterday"})
     assert result["ok"] is False
     assert result["data"]["field"] == "event_time"
 
@@ -124,7 +134,7 @@ def test_numeric_resource_limits_reject_extremes(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     assert tools.memory("find", {"query": "x", "limit": 101})["ok"] is False
     assert tools.memory_review("expired", {"query": "x", "offset": 10_001})["ok"] is False
-    assert tools.memory_repair("rebuild_claims", {"memory_ids": [1, -2]})["ok"] is False
+    assert tools.memory_repair("rebuild_claims", {"memory_ids": [1, -2]})["ok"] is False  # unknown task → rejected
 
 
 def test_status_unknown_field_is_warned_and_removed(tmp_path: Path) -> None:
@@ -199,12 +209,13 @@ def test_cas_pins_and_semantic_timeout_bounds(tmp_path: Path) -> None:
 
 def test_textual_resource_boundaries(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
-    memory_id = tools.memory("remember", {"content": "abc", "subject": "s"})["data"]["id"]
+    memory_id = tools.memory("remember", {
+        "workspace": "default","content": "abc", "subject": "s"})["data"]["id"]
     cases = [
         ("memory", "update", {"memory_id": memory_id, "old_text": "x" * (MAX_REPLACEMENT_TEXT_CHARS + 1), "new_text": "y"}, "old_text"),
         ("memory", "judge", {"ref": "x" * (MAX_TEXT_FIELD_CHARS + 1)}, "ref"),
         ("memory", "judge", {"chosen_value": "x" * (MAX_TEXT_FIELD_CHARS + 1)}, "chosen_value"),
-        ("memory_govern", "rename_workspace_canonical", {"old": "x" * (MAX_TEXT_FIELD_CHARS + 1), "new": "c", "authorized": True}, "old"),
+        ("memory_govern", "rename_workspace_canonical", {"workspace": "ws", "old": "x" * (MAX_TEXT_FIELD_CHARS + 1), "new": "c", "authorized": True}, "old"),
         ("memory_repair", "set_entity", {"memory_id": memory_id, "entity": "x" * (MAX_TEXT_FIELD_CHARS + 1)}, "entity"),
         ("memory_repair", "record_conflict", {"detector_version": "x" * (MAX_TEXT_FIELD_CHARS + 1)}, "detector_version"),
         ("memory_repair", "record_conflict", {"prompt_version": "x" * (MAX_TEXT_FIELD_CHARS + 1)}, "prompt_version"),
@@ -220,7 +231,7 @@ def test_timestamp_fields_reject_non_strings_and_oversized_values() -> None:
     for value in (True, 123, "2" * 129):
         result = validate_product_payload(
             "memory", "remember",
-            {"content": "x", "subject": "s", "event_time": value},
+            {"workspace": "default", "content": "x", "subject": "s", "event_time": value},
         )
         assert result.error is not None
         assert result.error["field"] == "event_time"
@@ -262,9 +273,8 @@ def test_notice_authorized_is_not_registered_and_notice_remains_unauthorized(tmp
 def test_product_field_registry_covers_all_declared_surface_operations() -> None:
     expected = {
         "memory": {"help", "status", "remember", "find", "batch_find", "read", "batch_read", "update", "judge"},
-        "memory_review": {"overview", "doctor", "audit", "conflicts", "conflict_detail", "history", "expired", "entities", "help"},
+        "memory_review": {"overview", "doctor", "audit", "conflicts", "conflict_detail", "history", "expired", "entities", "workspaces", "help"},
         "memory_govern": {"retire", "merge_memories", "apply_conflict_action", "replan_conflict", "resolve_conflict", "confirm", "rename_workspace_canonical", "migrate_workspace", "move_memories_workspace", "rollback_auto_move", "separate_workspace_alias", "confirm_pending_workspace", "confirm_workspaces", "help"},
-        "memory_repair": {"rebuild_evidence", "scan_pipeline", "scan_queue", "scan_candidates", "scan_duplicates", "scan_workspace_anomalies", "cleanup_history", "set_entity", "activate_pending", "semantic_control", "notice", "record_conflict", "replay_backup", "normalize_workspaces", "help"},
     }
     actual = {
         surface: {operation for registered_surface, operation in PRODUCT_FIELD_REGISTRY if registered_surface == surface}
@@ -325,3 +335,20 @@ def test_workspace_vector_publish_failure_does_not_fail_memory_write(tmp_path: P
         ).fetchone()
     assert memory["workspace_canonical"] == "new-project"
     assert canonical["name"] == "new-project"
+
+
+def test_hit_window_whitelisted_on_four_recall_surfaces() -> None:
+    """0.17.0 hit_window：进四调用白名单——不再被 unknown field 静默 pop。"""
+    from memory_arbiter.validation import validate_product_payload
+    cases = [
+        ("find", {"query": "q"}),
+        ("batch_find", {"queries": [{"query": "q"}]}),
+        ("read", {"memory_id": 1}),
+        ("batch_read", {"memory_ids": [1]}),
+    ]
+    for operation, base in cases:
+        payload = {**base, "hit_window": 2}
+        result = validate_product_payload("memory", operation, payload)
+        assert result.error is None, (operation, result.error)
+        assert result.warnings == [], (operation, result.warnings)
+        assert payload.get("hit_window") == 2  # 未被 pop

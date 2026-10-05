@@ -53,9 +53,24 @@ SCHEMA_MIGRATIONS = {
 # machine-decidable routes, proportional normalize gate, and the write-time
 # pre-gates with unified internal Qwen slot extraction (plan #977 §1.1-§1.9)
 # — same treatment: the epoch re-arms one full round under the new semantics.
-CONFLICT_DETECTOR_VERSION = "difference-classifier-v3"
+# v4 (0.17.0): row-level conflict channel + attr-vector gate + process-record
+# subject guard + lineage veto — a detection-semantic change (plan §10: the
+# unified bump retires unit-keyed scan rows and re-arms one full round,
+# co-collecting the P2-1 误杀对 revival).
+# v6 (owner 2026-09-25): row-context envelope — A-cross and channel-C peer
+# envelopes carry heading+neighbour context for Qwen attribute recovery
+# (pair-v10); prompt/detection semantics changed, so the detector version
+# re-arms one full scan round per the standing release contract.
+# v2: backlog drain 判定输入上下文化（方案补充⑤）
+# v3: 722eaee row_window 判定输入定版（H1 序/邻行 80 帽复原/每侧预算
+#     165→300）——判定输入形态变化必须换代（d13280d 自立的换代硬约束），
+#     旧扫描判定结果按旧输入口径作出，re-arm 一轮全量重扫按新口径重判。
+CONFLICT_DETECTOR_VERSION = "mdeberta-v4m-v3"
+# 0.17.1（owner 2026-09-29 拍板）：memory_claims/memory_claim_vec 已全退——
+# additive.py 启动幂等 DROP（0.17.0 时代的 LIVE 表注释随之作废）。若有
+# legacy tombstone 命中同名，按 0.17.0 附录 C-11 裁定语义作废。
 LEGACY_DERIVED_TABLES = {
-    "memory_claims", "memories_vec", "memory_sections_vec",
+    "memories_vec", "memory_sections_vec",
 }
 
 
@@ -110,7 +125,7 @@ def detect_upgrade_source_generation(path: Path) -> DatabaseGeneration:
                 str(row[0])
                 for row in conn.execute(
                     "SELECT name FROM sqlite_master WHERE type='table' "
-                    "AND name IN ('memories','migration_state','memory_claims',"
+                    "AND name IN ('memories','migration_state',"
                     "'memories_vec','memory_sections_vec')"
                 )
             }

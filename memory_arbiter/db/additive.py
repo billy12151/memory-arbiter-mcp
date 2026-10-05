@@ -24,111 +24,110 @@ Covered structures (0.16.0):
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import sqlite3
+from typing import TYPE_CHECKING
 
 from ..models import utc_now_iso
+from .conflict_backlog import conflict_backlog_ddl
+
+# 拆分批 ③ 纯移动 re-export（历史 import 面不变；guard-key 常量随函数走）。
+from .additive_ddl import (  # noqa: F401
+    _sha as _sha,
+    has_column as has_column,
+    memory_row_ddl as memory_row_ddl,
+    rebuild_memory_row_for_subject_kind as rebuild_memory_row_for_subject_kind,
+    scan_queue_ddl as scan_queue_ddl,
+    internal_conflicts_ddl as internal_conflicts_ddl,
+    normalize_audit_ddl as normalize_audit_ddl,
+    workspace_dismissals_ddl as workspace_dismissals_ddl,
+    governance_audit_ddl as governance_audit_ddl,
+    voided_identity_hash as voided_identity_hash,
+)
+from .additive_migrations import (  # noqa: F401
+    _UNIT_RETIREMENT_KEY as _UNIT_RETIREMENT_KEY,
+    _VEC_DEFERRED_KEY as _VEC_DEFERRED_KEY,
+    _SUBJECT_ROW_KEY as _SUBJECT_ROW_KEY,
+    _METADATA_PURGE_KEY as _METADATA_PURGE_KEY,
+    _NUMERIC_SWEEP_KEY as _NUMERIC_SWEEP_KEY,
+    _CLEANUP_KEY as _CLEANUP_KEY,
+    _TWIN_REDIRECT_KEY as _TWIN_REDIRECT_KEY,
+    _CLEARANCE_KEY as _CLEARANCE_KEY,
+    _INTERNAL_NOISE_KEY as _INTERNAL_NOISE_KEY,
+    _EVOLUTION_VOID_KEY as _EVOLUTION_VOID_KEY,
+    _CONTENT_SHA_KEY as _CONTENT_SHA_KEY,
+    _STATUS_INGEST_IDX_KEY as _STATUS_INGEST_IDX_KEY,
+    _OVERFLOW_RETIRED_KEY as _OVERFLOW_RETIRED_KEY,
+    _NOTICE_KEY_BACKFILL as _NOTICE_KEY_BACKFILL,
+    _drop_vec_table_deferred as _drop_vec_table_deferred,
+    _retire_unit_tables as _retire_unit_tables,
+    _purge_retired_metadata_keys as _purge_retired_metadata_keys,
+    _rebuild_memory_row_store as _rebuild_memory_row_store,
+    _sweep_queued_numeric_rows as _sweep_queued_numeric_rows,
+    _cleanup_first_round_artifacts as _cleanup_first_round_artifacts,
+    _migrate_twin_bucket_residents as _migrate_twin_bucket_residents,
+    _clearance_migrate_check_route_pairs as _clearance_migrate_check_route_pairs,
+    _dismiss_internal_noise_rows as _dismiss_internal_noise_rows,
+    _void_evolution_queue_rows as _void_evolution_queue_rows,
+    _retire_claims_tables as _retire_claims_tables,
+    _add_content_sha_dedupe as _add_content_sha_dedupe,
+    _add_memories_status_ingest_index as _add_memories_status_ingest_index,
+    _retire_conflicts_overflow as _retire_conflicts_overflow,
+    _backfill_notice_dedupe_keys as _backfill_notice_dedupe_keys,
+)
+
+
+if TYPE_CHECKING:
+    from typing import Callable
 
 # migration_state guard key: the candidate-row migration runs exactly once.
 _MIGRATION_KEY = "scan_queue_candidate_migration_v1"
 
 
-def _sha(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def voided_identity_hash(base: str, row_id: int) -> str:
-    """Deterministic 64-char replacement identity for a voided conflicts row.
+def _run_additive_segment(
+    conn: sqlite3.Connection, label: str, applied: list[str],
+    fn: "Callable[[], None]",
+) -> bool:
+    """B2-2（0.17.1 修复批）：段级隔离——单段失败回滚该段并继续后续段。
 
-    Shared by the candidate migration and ConflictStore.void_conflicts_*:
-    rewriting candidate_key_hash/member_fingerprint releases the cross-status
-    UNIQUE indexes (§6⑯③④) while keeping a deterministic, auditable value.
+    此前任一步 sqlite3.Error 逃出 ensure_additive_structures → core 吞掉
+    整个 additive（其后所有步骤每次启动永久跳过，实测 unit 通道即此形态）。
+
+    实现用 **SAVEPOINT**（而非 conn.rollback()——那会把先前段尚未提交的
+    DML 一并回滚：Python sqlite3 默认 isolation_level='' 下 DDL 自动提交
+    而 DML 挂在隐式事务上，实测先前段落的 deferred 账本会被后续段的
+    rollback 抹掉）。SAVEPOINT 只回滚本段：失败段内的 DML 与其
+    migration_state guard 键同段同事务，回滚后不留"半完成 + 已标 guard"
+    状态（R2 对抗审查的核心约束），下轮可安全重试。
+
+    DDL 在 SQLite 中同样受 SAVEPOINT 约束（无独立 DDL 事务），故本段
+    建表失败会被回滚；全部 DDL 皆 IF NOT EXISTS，重跑幂等。
     """
-    if base:
-        return _sha(f"{base}:voided:{row_id}")
-    return _sha(f"voided:{row_id}")
-
-
-def scan_queue_ddl() -> str:
-    return """
-    CREATE TABLE IF NOT EXISTS scan_queue (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      kind TEXT NOT NULL DEFAULT 'conflict' CHECK(kind IN ('conflict','internal','workspace')),
-      workspace_canonical TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'pending'
-        CHECK(status IN ('pending','confirmed','dismissed','voided','expired')),
-      -- 0.16.6 dropped the phantom in_review state (zero writers ever).
-      -- Databases created before 0.16.6 keep their 6-state CHECK — harmless:
-      -- new code never writes in_review, and a legacy row in that state
-      -- would simply read as already_terminal at submit time.
-      candidate_key_hash TEXT NOT NULL UNIQUE CHECK(length(candidate_key_hash)=64),
-      member_versions TEXT NOT NULL CHECK(json_valid(member_versions) AND json_type(member_versions)='array' AND length(member_versions) <= 262144),
-      evidence TEXT CHECK(evidence IS NULL OR (json_valid(evidence) AND length(evidence) <= 131072)),
-      reason TEXT NOT NULL DEFAULT '',
-      severity TEXT,
-      source TEXT NOT NULL DEFAULT 'scan_pipeline',
-      detail TEXT CHECK(detail IS NULL OR (json_valid(detail) AND json_type(detail)='object' AND length(detail) <= 32768)),
-      decided_ref TEXT,
-      decided_reason TEXT,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
-      decided_at TEXT
-    );
-    CREATE INDEX IF NOT EXISTS idx_scan_queue_pending ON scan_queue(status, id);
-    CREATE INDEX IF NOT EXISTS idx_scan_queue_ws ON scan_queue(workspace_canonical, status);
-    """
-
-
-def internal_conflicts_ddl() -> str:
-    return """
-    CREATE TABLE IF NOT EXISTS internal_conflicts (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      memory_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
-      memory_version INTEGER NOT NULL,
-      status TEXT NOT NULL DEFAULT 'pending'
-        CHECK(status IN ('pending','dismissed','resolved','stale')),
-      unit_a INTEGER NOT NULL,
-      unit_b INTEGER NOT NULL,
-      quote_a TEXT NOT NULL,
-      quote_b TEXT NOT NULL,
-      span_a TEXT NOT NULL CHECK(json_valid(span_a)),
-      span_b TEXT NOT NULL CHECK(json_valid(span_b)),
-      reason TEXT NOT NULL DEFAULT '',
-      detector_version TEXT NOT NULL,
-      decided_reason TEXT,
-      decided_at TEXT,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
-      UNIQUE(memory_id, memory_version, unit_a, unit_b)
-    );
-    CREATE INDEX IF NOT EXISTS idx_internal_conflicts_open
-      ON internal_conflicts(memory_id, status);
-    """
-
-
-def normalize_audit_ddl() -> str:
-    return """
-    CREATE TABLE IF NOT EXISTS normalize_audit (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      memory_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
-      from_workspace TEXT NOT NULL,
-      to_workspace TEXT NOT NULL,
-      gate TEXT NOT NULL DEFAULT '{}',
-      status TEXT NOT NULL DEFAULT 'applied'
-        CHECK(status IN ('applied','rolled_back','manual_move')),
-      rolled_back_at TEXT,
-      created_at TEXT NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS idx_normalize_audit_memory
-      ON normalize_audit(memory_id, created_at);
-    """
-
-
-def has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
-    return any(
-        str(row[1]) == column for row in conn.execute(f"PRAGMA table_info({table})")
-    )
+    savepoint = "additive_seg"
+    try:
+        conn.execute(f"SAVEPOINT {savepoint}")
+    except sqlite3.Error:
+        # 连接不支持 SAVEPOINT（极旧 SQLite）：退化为直接执行（无隔离）
+        try:
+            fn()
+            return True
+        except sqlite3.Error as exc:
+            applied.append(f"{label}:failed({exc})")
+            return False
+    try:
+        fn()
+        conn.execute(f"RELEASE {savepoint}")
+        return True
+    except sqlite3.Error as exc:
+        try:
+            conn.execute(f"ROLLBACK TO {savepoint}")
+            conn.execute(f"RELEASE {savepoint}")
+        except sqlite3.Error:
+            pass
+        applied.append(f"{label}:failed({exc})")
+        return False
 
 
 def ensure_additive_structures(conn: sqlite3.Connection) -> list[str]:
@@ -139,294 +138,165 @@ def ensure_additive_structures(conn: sqlite3.Connection) -> list[str]:
     by a ``migration_state`` key written in the same transaction. The caller
     owns the connection; changes are committed here so partial startup state
     never persists.
+
+    B2-2（0.17.1 修复批）：段级隔离——每段独立 try/except（见
+    ``_run_additive_segment``），单段失败只回滚该段并记
+    ``{label}:failed(...)``，后续段照常执行（此前一步失败会让其后所有
+    步骤永久跳过）。段划分按真实执行顺序。
     """
     applied: list[str] = []
-    if not has_column(conn, "memories", "scan_watermark"):
-        conn.execute("ALTER TABLE memories ADD COLUMN scan_watermark INTEGER")
-        applied.append("memories.scan_watermark")
-    scan_queue_existed = bool(conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='scan_queue'"
-    ).fetchone())
-    conn.executescript(scan_queue_ddl())
-    if not scan_queue_existed:
-        applied.append("scan_queue")
-    internal_existed = bool(conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='internal_conflicts'"
-    ).fetchone())
-    conn.executescript(internal_conflicts_ddl())
-    if not internal_existed:
-        applied.append("internal_conflicts")
-    audit_existed = bool(conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='normalize_audit'"
-    ).fetchone())
-    conn.executescript(normalize_audit_ddl())
-    if not audit_existed:
-        applied.append("normalize_audit")
-    migrated = _migrate_legacy_candidates(conn)
-    if migrated:
-        applied.append(f"candidate_rows_migrated({migrated})")
-    cleaned = _cleanup_first_round_artifacts(conn)
-    if cleaned:
-        applied.append(cleaned)
-    swept = _sweep_queued_numeric_rows(conn)
-    if swept:
-        applied.append(swept)
-    rerouted = _migrate_twin_bucket_residents(conn)
-    if rerouted:
-        applied.append(rerouted)
-    cleared = _clearance_migrate_check_route_pairs(conn)
-    if cleared:
-        applied.append(cleared)
-    purged = _purge_terminal_queue_rows(conn)
-    if purged:
-        applied.append(purged)
-    quieted = _dismiss_internal_noise_rows(conn)
-    if quieted:
-        applied.append(quieted)
-    evolution_voided = _void_evolution_queue_rows(conn)
-    if evolution_voided:
-        applied.append(evolution_voided)
-    sha_dedupe = _add_content_sha_dedupe(conn)
-    if sha_dedupe:
-        applied.append(sha_dedupe)
-    status_ingest_idx = _add_memories_status_ingest_index(conn)
-    if status_ingest_idx:
-        applied.append(status_ingest_idx)
-    overflow_retired = _retire_conflicts_overflow(conn)
-    if overflow_retired:
-        applied.append(overflow_retired)
-    notice_keys = _backfill_notice_dedupe_keys(conn)
-    if notice_keys:
-        applied.append(notice_keys)
+
+    def _columns() -> None:
+        if not has_column(conn, "memories", "scan_watermark"):
+            conn.execute("ALTER TABLE memories ADD COLUMN scan_watermark INTEGER")
+            applied.append("memories.scan_watermark")
+        # 0.17.0 P2-6.2: slow-lane rotation clock — "least recently scanned"
+        # picks anchors by wall time, independent of version bumps.
+        if not has_column(conn, "memories", "last_scanned_at"):
+            conn.execute("ALTER TABLE memories ADD COLUMN last_scanned_at TEXT")
+            applied.append("memories.last_scanned_at")
+
+    _run_additive_segment(conn, "columns", applied, _columns)
+
+    # 0.17.1（owner 2026-09-29 拍板）：claims 数据层全退——表连带 DROP。
+    # 幂等：不存在的库无操作；存量库连数据一并清除（检测线已零读取，
+    # 数据无消费方）。sqlite-vec 0.1.x DROP 虚拟主表不连带清影子表，
+    # memory_claim_vec_% 需显式 sweep（对齐 rebuild_vec_tables 口径），
+    # 否则跑过 claims 通道的存量库升级后影子表成永久孤儿。
+    _run_additive_segment(
+        conn, "claims_retirement", applied,
+        lambda: _retire_claims_tables(conn, applied),
+    )
+
+    def _tables() -> None:
+        scan_queue_existed = bool(conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='scan_queue'"
+        ).fetchone())
+        conn.executescript(scan_queue_ddl())
+        if not has_column(conn, "scan_queue", "priority"):
+            conn.execute("ALTER TABLE scan_queue ADD COLUMN priority REAL NOT NULL DEFAULT 0")
+            applied.append("scan_queue.priority")
+        if not scan_queue_existed:
+            applied.append("scan_queue")
+        internal_existed = bool(conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='internal_conflicts'"
+        ).fetchone())
+        conn.executescript(internal_conflicts_ddl())
+        if not internal_existed:
+            applied.append("internal_conflicts")
+        audit_existed = bool(conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='normalize_audit'"
+        ).fetchone())
+        conn.executescript(normalize_audit_ddl())
+        if not audit_existed:
+            applied.append("normalize_audit")
+        # 0.17.0 Part 2: row-level conflict store + write-time backlog + claims.
+        for name, ddl in (
+            ("memory_row", memory_row_ddl()),
+            ("conflict_backlog", conflict_backlog_ddl()),
+        ):
+            existed = bool(conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+            ).fetchone())
+            conn.executescript(ddl)
+            if not existed:
+                applied.append(name)
+
+        # 0.17.1 workspace dismiss 持久化：决策记录独立于 scan_queue 工作台——
+        # 启动 purge / 检测器换代整表 DELETE 释放行身份后，dismiss 仍然存活。
+        dismissals_existed = bool(conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='workspace_dismissals'"
+        ).fetchone())
+        conn.executescript(workspace_dismissals_ddl())
+        if not dismissals_existed:
+            applied.append("workspace_dismissals")
+
+        # 0.17.1 P2 #7: governance_audit — bucket-level action trail (rename/
+        # migrate/confirm_pending reasons). No memory_id/status columns, so the
+        # normalize_audit consumers (rollback_auto_move, doctor) are untouched.
+        governance_existed = bool(conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='governance_audit'"
+        ).fetchone())
+        conn.executescript(governance_audit_ddl())
+        if not governance_existed:
+            applied.append("governance_audit")
+
+    # B2-2 修订（R3/R4 对抗双轮实证）：本段**不进 SAVEPOINT**——
+    # executescript() 会先 COMMIT（隐式），把外层 savepoint 释放掉：实测
+    # RELEASE / ROLLBACK TO 均报 "no such savepoint"，于是每次启动都记出
+    # 假失败 ddl:failed(no such savepoint)，并把真实错误信息掩盖成症状
+    # （R3/R4 独立复现）。诚实的形态：本段无隔离，但全部 DDL 皆
+    # IF NOT EXISTS，重跑幂等；异常仍收敛为单段失败标记（后续段照常）。
+    try:
+        _tables()
+    except sqlite3.Error as exc:
+        applied.append(f"ddl:failed({exc})")
+
+    def _migrations_a() -> None:
+        migrated = _migrate_legacy_candidates(conn)
+        if migrated:
+            applied.append(f"candidate_rows_migrated({migrated})")
+        cleaned = _cleanup_first_round_artifacts(conn)
+        if cleaned:
+            applied.append(cleaned)
+        swept = _sweep_queued_numeric_rows(conn)
+        if swept:
+            applied.append(swept)
+        rerouted = _migrate_twin_bucket_residents(conn)
+        if rerouted:
+            applied.append(rerouted)
+        cleared = _clearance_migrate_check_route_pairs(conn)
+        if cleared:
+            applied.append(cleared)
+
+    _run_additive_segment(conn, "migrations_a", applied, _migrations_a)
+
+    def _migrations_b() -> None:
+        purged = _purge_terminal_queue_rows(conn)
+        if purged:
+            applied.append(purged)
+        quieted = _dismiss_internal_noise_rows(conn)
+        if quieted:
+            applied.append(quieted)
+        evolution_voided = _void_evolution_queue_rows(conn)
+        if evolution_voided:
+            applied.append(evolution_voided)
+        sha_dedupe = _add_content_sha_dedupe(conn)
+        if sha_dedupe:
+            applied.append(sha_dedupe)
+        status_ingest_idx = _add_memories_status_ingest_index(conn)
+        if status_ingest_idx:
+            applied.append(status_ingest_idx)
+        overflow_retired = _retire_conflicts_overflow(conn)
+        if overflow_retired:
+            applied.append(overflow_retired)
+        notice_keys = _backfill_notice_dedupe_keys(conn)
+        if notice_keys:
+            applied.append(notice_keys)
+        subject_rows = _rebuild_memory_row_store(conn)
+        if subject_rows:
+            applied.append(subject_rows)
+
+    _run_additive_segment(conn, "migrations_b", applied, _migrations_b)
+
+    def _unit_retirement() -> None:
+        retired = _retire_unit_tables(conn, applied)
+        if retired:
+            applied.append(retired)
+
+    _run_additive_segment(conn, "unit_retirement", applied, _unit_retirement)
+
+    def _purge() -> None:
+        metadata_purged = _purge_retired_metadata_keys(conn)
+        if metadata_purged:
+            applied.append(metadata_purged)
+
+    _run_additive_segment(conn, "metadata_purge", applied, _purge)
+
     conn.commit()
     return applied
 
 
-_NUMERIC_SWEEP_KEY = "scan_pipeline_numeric_sweep_v1"
-
-
-def _sweep_queued_numeric_rows(conn: sqlite3.Connection) -> str:
-    """One-shot: queued numeric-route pairs → voided (identity released) and
-    watermarks reset, so the calibrated per-kick auto-reject cap (5000)
-    classifies them into the audit trail on the re-run instead of burning
-    agent judgment. Runs once; steady-state libraries see a no-op."""
-    guard = conn.execute(
-        "SELECT value FROM migration_state WHERE key=?", (_NUMERIC_SWEEP_KEY,)
-    ).fetchone()
-    if guard is not None:
-        return ""
-    from ..models import utc_now_iso as _now
-
-    now = _now()
-    rows = conn.execute(
-        "SELECT id, candidate_key_hash FROM scan_queue "
-        "WHERE kind='conflict' AND status='pending' AND reason LIKE '%numeric_value_candidate%'"
-    ).fetchall()
-    for row in rows:
-        conn.execute(
-            "UPDATE scan_queue SET status='voided', candidate_key_hash=?, "
-            "decided_reason='numeric sweep: reclassified to auto-reject', decided_at=?, updated_at=? "
-            "WHERE id=?",
-            (voided_identity_hash(str(row["candidate_key_hash"]), int(row["id"])), now, now, int(row["id"])),
-        )
-    conn.execute("DELETE FROM migration_state WHERE key='scan_pipeline_state'")
-    conn.execute("UPDATE memories SET scan_watermark=NULL WHERE status='active'")
-    conn.execute(
-        "INSERT INTO migration_state(key,value,updated_at) VALUES(?,?,CURRENT_TIMESTAMP) "
-        "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",
-        (_NUMERIC_SWEEP_KEY, f"voided={len(rows)}"),
-    )
-    return f"numeric_sweep(voided={len(rows)}, watermarks_reset)"
-
-
-_CLEANUP_KEY = "scan_pipeline_gate_v2_cleanup_v1"
-
-
-def _cleanup_first_round_artifacts(conn: sqlite3.Connection) -> str:
-    """One-shot reset of the first-round classification (gate change).
-
-    The first real kick ran before the internal precision gates (overlap
-    skip, genuine-numeric shape) and with the mis-scoped round-level
-    auto-reject cap: internal_conflicts flooded with splitter artifacts and
-    numeric noise pairs landed in the queue. This guarded cleanup purges the
-    internal table, voids queued numeric-route pairs (identity RELEASED so
-    re-detection re-classifies them), resets the round state and watermarks,
-    so the first full round re-runs under the corrected gates. Guarded by a
-    migration_state key — never runs twice.
-    """
-    guard = conn.execute(
-        "SELECT value FROM migration_state WHERE key=?", (_CLEANUP_KEY,)
-    ).fetchone()
-    if guard is not None:
-        return ""
-    from ..models import utc_now_iso as _now
-
-    now = _now()
-    conn.execute("DELETE FROM internal_conflicts")
-    rows = conn.execute(
-        "SELECT id, candidate_key_hash FROM scan_queue "
-        "WHERE kind='conflict' AND status='pending' AND reason LIKE '%numeric_value_candidate%'"
-    ).fetchall()
-    from .additive import voided_identity_hash as _vh  # module-local
-
-    for row in rows:
-        conn.execute(
-            "UPDATE scan_queue SET status='voided', candidate_key_hash=?, "
-            "decided_reason='gate v2: numeric route moved to auto-reject', decided_at=?, updated_at=? "
-            "WHERE id=?",
-            (_vh(str(row["candidate_key_hash"]), int(row["id"])), now, now, int(row["id"])),
-        )
-    conn.execute("DELETE FROM migration_state WHERE key='scan_pipeline_state'")
-    conn.execute("UPDATE memories SET scan_watermark=NULL WHERE status='active'")
-    conn.execute(
-        "INSERT INTO migration_state(key,value,updated_at) VALUES(?,?,CURRENT_TIMESTAMP) "
-        "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",
-        (_CLEANUP_KEY, "done"),
-    )
-    return f"gate_v2_cleanup(internal_purged, queue_numeric_voided={len(rows)}, watermarks_reset)"
-
-
-_TWIN_REDIRECT_KEY = "twin_write_redirect_migration_v1"
-
-
-def _migrate_twin_bucket_residents(conn: sqlite3.Connection) -> str:
-    """One-shot: mema-twin rows written by non-twin agents move to
-    mema-twin-dev (0.16.2 §1.2 stock, owner rule #976).
-
-    The write-path redirect only covers new writes; this migrates existing
-    violations. Real library: exactly 1 row (jingleAI-default). The twin's
-    own rows (agent_id='mema-twin') are untouched. Rows moved here get their
-    scan watermark cleared (move-as-edit) so the pipeline re-pairs them in
-    the new bucket, and pending kind='workspace' suspects pinning the old
-    bucket are expired in the same transaction — the move companion void in
-    workspaces.move_memory_workspace_on_conn has no boot-time equivalent.
-    """
-    guard = conn.execute(
-        "SELECT value FROM migration_state WHERE key=?", (_TWIN_REDIRECT_KEY,)
-    ).fetchone()
-    if guard is not None:
-        return ""
-    now = utc_now_iso()
-    rows = conn.execute(
-        """SELECT id FROM memories
-           WHERE status='active'
-             AND COALESCE(NULLIF(workspace_canonical,''),workspace)='mema-twin'
-             AND COALESCE(agent_id,'') != 'mema-twin'"""
-    ).fetchall()
-    moved = 0
-    for row in rows:
-        memory_id = int(row["id"])
-        conn.execute(
-            """UPDATE memories SET workspace='mema-twin-dev',
-                 workspace_canonical='mema-twin-dev', scan_watermark=NULL
-               WHERE id=?""",
-            (memory_id,),
-        )
-        conn.execute(
-            """UPDATE scan_queue SET status='expired',
-                 decided_reason='redirect migration: subject moved to mema-twin-dev',
-                 decided_at=?, updated_at=?
-               WHERE kind='workspace' AND status='pending'
-                 AND EXISTS(SELECT 1 FROM json_each(scan_queue.member_versions) AS m
-                            WHERE CAST(json_extract(m.value,'$.memory_id') AS INTEGER)=?)""",
-            (now, now, memory_id),
-        )
-        moved += 1
-    if moved:
-        conn.execute(
-            "INSERT OR IGNORE INTO workspace_canonicals(name, created_at) VALUES ('mema-twin-dev', ?)",
-            (now,),
-        )
-    conn.execute(
-        "INSERT INTO migration_state(key,value,updated_at) VALUES(?,?,CURRENT_TIMESTAMP) "
-        "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",
-        (_TWIN_REDIRECT_KEY, f"moved={moved}"),
-    )
-    return f"twin_redirect_migration(moved={moved})"
-
-
-_CLEARANCE_KEY = "scan_queue_difference_clearance_v1"
-
-
-def _clearance_migrate_check_route_pairs(conn: sqlite3.Connection) -> str:
-    """One-shot: difference-based clearance of queued check-route pairs
-    (0.16.2 §1.4, owner ④).
-
-    The first full round enqueued every suspicious pair; the difference
-    classifier now decides at enqueue time. This brings the STOCK to the
-    same standard with the SAME implementation: notify pairs
-    (severity='high') always survive, every check pair is classified from
-    its evidence quotes — keepers stay pending, the rest are voided
-    (identity released, so an edited pair can re-detect and re-classify).
-    Cleared rows never land in ``conflicts``; counts go to
-    ``migration_state`` as the audit trail.
-    """
-    guard = conn.execute(
-        "SELECT value FROM migration_state WHERE key=?", (_CLEARANCE_KEY,)
-    ).fetchone()
-    if guard is not None:
-        return ""
-    from ..difference_classifier import classify_pair, is_garbage
-
-    now = utc_now_iso()
-    rows = conn.execute(
-        "SELECT id,severity,reason,candidate_key_hash,evidence FROM scan_queue "
-        "WHERE kind='conflict' AND status='pending'"
-    ).fetchall()
-    cleared_sim = cleared_num = garbage_labeled = kept = 0
-    for row in rows:
-        route = str(row["reason"] or "")
-        # Notify protection keys on BOTH severity and the route reason —
-        # a severity-NULL legacy row that names a notify route must never
-        # fall through to the classifier (defense in depth; the live
-        # library has zero such rows, other deployments may not).
-        if str(row["severity"] or "") == "high" or route.startswith(
-            ("polarity_changed", "todo_resolved")
-        ):
-            kept += 1  # notify route: real-signal recall has no threshold
-            continue
-        try:
-            evidence = json.loads(str(row["evidence"] or "[]"))
-        except (TypeError, ValueError):
-            evidence = []
-        # Legacy candidate rows migrated from conflicts (0.16.0 §6⑲⑥) store
-        # an envelope object; the scan pipeline stores a bare array. Unwrap
-        # both — misreading the envelope would clear real evidence pairs.
-        if isinstance(evidence, dict):
-            evidence = evidence.get("evidence") or []
-        quotes = [
-            str(item.get("evidence_quote")) if isinstance(item, dict) and item.get("evidence_quote") else None
-            for item in (evidence or [])
-        ]
-        while len(quotes) < 2:
-            quotes.append(None)
-        verdict = classify_pair(quotes[0], quotes[1], route=route)
-        if verdict == "keep":
-            kept += 1
-            continue
-        if is_garbage(quotes[0]) or is_garbage(quotes[1]):
-            garbage_labeled += 1
-        conn.execute(
-            "UPDATE scan_queue SET status='voided', candidate_key_hash=?, "
-            "decided_reason='difference clearance: no extractable value difference', "
-            "decided_at=?, updated_at=? WHERE id=?",
-            (voided_identity_hash(str(row["candidate_key_hash"] or ""), int(row["id"])),
-             now, now, int(row["id"])),
-        )
-        if "numeric_value_candidate" in route:
-            cleared_num += 1
-        else:
-            cleared_sim += 1
-    summary = (
-        f"cleared={cleared_sim + cleared_num} (sim={cleared_sim},numeric={cleared_num},"
-        f"garbage={garbage_labeled}), kept={kept}"
-    )
-    conn.execute(
-        "INSERT INTO migration_state(key,value,updated_at) VALUES(?,?,CURRENT_TIMESTAMP) "
-        "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",
-        (_CLEARANCE_KEY, summary),
-    )
-    return f"difference_clearance({summary})"
 
 
 _PURGE_QUEUE_KEY = "scan_queue_terminal_purge_v1"
@@ -458,79 +328,6 @@ def _purge_terminal_queue_rows(conn: sqlite3.Connection) -> str:
     return f"queue_purge(total={total}, {counts})"
 
 
-_INTERNAL_NOISE_KEY = "internal_noise_rule_v1"
-
-
-def _dismiss_internal_noise_rows(conn: sqlite3.Connection) -> str:
-    """One-shot: dismiss pending internal rows matching the 0.16.3 structural
-    noise shapes (table slices, note-meta lines) so the agent never sees the
-    stock the new gate would not have produced. Guard-keyed, runs once; new
-    writes/scans are filtered upstream by internal_noise_pair.
-    """
-    guard = conn.execute(
-        "SELECT value FROM migration_state WHERE key=?", (_INTERNAL_NOISE_KEY,)
-    ).fetchone()
-    if guard is not None:
-        return ""
-    from ..difference_classifier import internal_noise_pair
-
-    rows = conn.execute(
-        "SELECT id, quote_a, quote_b FROM internal_conflicts WHERE status='pending'"
-    ).fetchall()
-    dismissed = 0
-    for row in rows:
-        if internal_noise_pair(str(row["quote_a"] or ""), str(row["quote_b"] or "")):
-            conn.execute(
-                "UPDATE internal_conflicts SET status='dismissed', "
-                "decided_reason='structural noise (table/meta-line rule v1)', "
-                "decided_at=?, updated_at=? WHERE id=?",
-                (utc_now_iso(), utc_now_iso(), int(row["id"])),
-            )
-            dismissed += 1
-    conn.execute(
-        "INSERT INTO migration_state(key,value,updated_at) VALUES(?,?,CURRENT_TIMESTAMP) "
-        "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",
-        (_INTERNAL_NOISE_KEY, f"dismissed={dismissed}"),
-    )
-    return f"internal_noise_dismissal({dismissed})" if dismissed else ""
-
-
-_EVOLUTION_VOID_KEY = "scan_pipeline_evolution_void_v1"
-
-
-def _void_evolution_queue_rows(conn: sqlite3.Connection) -> str:
-    """One-shot (0.16.4 §1): pending cross-memory notify queue rows → voided.
-
-    The evolution-domain exclusion (is_cross_evolution) means the pipeline
-    no longer produces todo_resolved/polarity_changed rows at all — the
-    pending stock the old semantics queued is cleared so the agent never
-    judges it. ``voided`` (not not_a_conflict): the identity is RELEASED on
-    purpose — if the exclusion ever misses a path, the pair re-enqueues and
-    surfaces the gap instead of being suppressed silent. Guard-keyed, runs
-    once; the standing boot purge (_purge_terminal_queue_rows) deletes the
-    voided rows on a later boot.
-    """
-    guard = conn.execute(
-        "SELECT value FROM migration_state WHERE key=?", (_EVOLUTION_VOID_KEY,)
-    ).fetchone()
-    if guard is not None:
-        return ""
-    now = utc_now_iso()
-    cur = conn.execute(
-        "UPDATE scan_queue SET status='voided', "
-        "decided_reason='0.16.4 evolution-domain exclusion (retroactive clear)', "
-        "decided_at=?, updated_at=? "
-        "WHERE status='pending' AND kind='conflict' "
-        "AND (reason LIKE '%todo_resolved%' OR reason LIKE '%polarity_changed%')",
-        (now, now),
-    )
-    voided = int(cur.rowcount or 0)
-    conn.execute(
-        "INSERT INTO migration_state(key,value,updated_at) VALUES(?,?,CURRENT_TIMESTAMP) "
-        "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",
-        (_EVOLUTION_VOID_KEY, f"voided={voided}"),
-    )
-    return f"evolution_void({voided})" if voided else ""
 
 
 def _migrate_legacy_candidates(conn: sqlite3.Connection) -> int:
@@ -649,195 +446,3 @@ def _void_row(
 
 # ── 0.16.6 content dedup gate (owner spec 2026-09-14: partial unique over
 # ACTIVE rows only — "只管活的") ────────────────────────────────────────────
-_CONTENT_SHA_KEY = "content_sha_dedupe_v1"
-
-
-def _add_content_sha_dedupe(conn: sqlite3.Connection) -> str:
-    """One-shot: content_sha column + active-only unique index.
-
-    sha256 over the raw UTF-8 content bytes, never normalised (any
-    normalisation would fold distinct memories onto one hash). The unique
-    index is PARTIAL on status='active': retired/pending rows exit the
-    index on status change, so governance flows (merge, supersede) that
-    legitimately produce an active + superseded same-content pair keep
-    working (m986/m987 is exactly that shape). Non-active rows keep their
-    sha for observability but never hold a slot.
-
-    Idempotent: re-runs re-check the column, re-backfill NULL shas and
-    re-run the duplicate self-check before the index is (re-)created.
-    """
-    guard = conn.execute(
-        "SELECT value FROM migration_state WHERE key=?", (_CONTENT_SHA_KEY,)
-    ).fetchone()
-    if guard is not None:
-        return ""
-    if not has_column(conn, "memories", "content_sha"):
-        conn.execute("ALTER TABLE memories ADD COLUMN content_sha TEXT")
-    # NULL/'' canonical rows would sit outside the index (NULL never
-    # conflicts); normalise them to the workspace column first.
-    conn.execute(
-        "UPDATE memories SET workspace_canonical=workspace "
-        "WHERE workspace_canonical IS NULL OR workspace_canonical=''"
-    )
-    rows = conn.execute(
-        "SELECT id, content, status, workspace_canonical, content_sha FROM memories"
-    ).fetchall()
-    pending = [(_sha(row["content"] or ""), int(row["id"])) for row in rows
-               if row["content_sha"] is None]
-    # Self-check BEFORE any write: the effective sha of every active row
-    # (stored or about-to-be-backfilled) must already be unique per
-    # workspace — writing first would violate an existing index itself.
-    seen: dict[tuple[object, str], list[int]] = {}
-    for row in rows:
-        if row["status"] != "active":
-            continue
-        effective = row["content_sha"] if row["content_sha"] is not None else _sha(row["content"] or "")
-        seen.setdefault((row["workspace_canonical"], effective), []).append(int(row["id"]))
-    dupes = {key: ids for key, ids in seen.items() if len(ids) > 1}
-    if dupes:
-        # Nothing has been written and the guard stays unwritten: after
-        # governance retires one of each pair, the next boot retries whole.
-        detail = "; ".join(
-            f"ws={key[0]!r} sha={str(key[1])[:8]}… ids={ids}"
-            for key, ids in list(dupes.items())[:20]
-        )
-        ids = sorted({i for pair_ids in dupes.values() for i in pair_ids})
-        raise RuntimeError(
-            "content_sha dedup migration aborted: active duplicate pairs exist. "
-            "Governance must retire/merge one row of each pair before the unique "
-            f"index can be created. Pairs: {detail} "
-            f"Recovery (this error aborts service start by design): retire one row "
-            f"of each pair directly, e.g. "
-            f"sqlite3 <db> 'UPDATE memories SET status='superseded' WHERE id IN ({','.join(str(i) for i in ids)})' "
-            "then restart — or boot the previous release, govern via the product "
-            "tools, and upgrade again."
-        )
-    if pending:
-        conn.executemany(
-            "UPDATE memories SET content_sha=? WHERE id=? AND content_sha IS NULL",
-            pending,
-        )
-    conn.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_content_sha "
-        "ON memories(workspace_canonical, content_sha) "
-        "WHERE status='active' AND content_sha IS NOT NULL"
-    )
-    conn.execute(
-        "INSERT INTO migration_state(key,value,updated_at) VALUES(?,?,CURRENT_TIMESTAMP) "
-        "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",
-        (_CONTENT_SHA_KEY, f"backfilled={len(pending)}"),
-    )
-    return f"content_sha_dedupe(backfilled={len(pending)})"
-
-
-_STATUS_INGEST_IDX_KEY = "memories_status_ingest_idx_v1"
-
-
-def _add_memories_status_ingest_index(conn: sqlite3.Connection) -> str | None:
-    """0.16.12 P1-T7: (status, ingest_time) index for the browse/recent paths
-    (_recent_fallback's COUNT and recall_by_filters' ORDER BY ingest_time
-    DESC). Pure index addition — no query logic changes. Idempotent: the
-    migration_state key only records that the statement ran."""
-    done = conn.execute(
-        "SELECT 1 FROM migration_state WHERE key=?", (_STATUS_INGEST_IDX_KEY,),
-    ).fetchone()
-    if done:
-        return None
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_memories_status_ingest "
-        "ON memories(status, ingest_time)"
-    )
-    conn.execute(
-        "INSERT INTO migration_state(key,value,updated_at) VALUES(?,?,CURRENT_TIMESTAMP) "
-        "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",
-        (_STATUS_INGEST_IDX_KEY, "created"),
-    )
-    return "memories_status_ingest_idx(created)"
-
-
-_OVERFLOW_RETIRED_KEY = "conflicts_overflow_retired_v1"
-
-
-def _retire_conflicts_overflow(conn: sqlite3.Connection) -> str:
-    """One-shot: drop the write-only conflicts.overflow column.
-
-    The column was a materialised flag for outcome="overflow"; every
-    consumer reads the outcome, nobody reads the column (0.16.6 audit A5).
-    Writers stopped setting it in the same release, keeping the revision
-    CAS in the same statement intact.
-    """
-    guard = conn.execute(
-        "SELECT value FROM migration_state WHERE key=?", (_OVERFLOW_RETIRED_KEY,)
-    ).fetchone()
-    if guard is not None:
-        return ""
-    note = "dropped"
-    if has_column(conn, "conflicts", "overflow"):
-        try:
-            conn.execute("ALTER TABLE conflicts DROP COLUMN overflow")
-        except sqlite3.OperationalError as exc:  # pre-3.35 SQLite
-            if "drop" not in str(exc).lower():
-                raise  # transient (e.g. locked) — retry next boot, don't pin
-            note = f"kept ({exc})"
-    conn.execute(
-        "INSERT INTO migration_state(key,value,updated_at) VALUES(?,?,CURRENT_TIMESTAMP) "
-        "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",
-        (_OVERFLOW_RETIRED_KEY, note),
-    )
-    return f"conflicts_overflow_{note}"
-
-
-_NOTICE_KEY_BACKFILL = "semantic_notice_dedupe_backfill_v1"
-
-
-def _backfill_notice_dedupe_keys(conn: sqlite3.Connection) -> str:
-    """One-shot: derive notice_dedupe_key for legacy decided semantic notices.
-
-    is_semantic_pair_closed reads the idx_conflicts_notice_dedupe index
-    since 0.16.6; rows decided before the key existed would look open and
-    be re-detected (one extra notice per pair — self-healing on the next
-    dismissal). Malformed member JSON is skipped, not fatal.
-    """
-    guard = conn.execute(
-        "SELECT value FROM migration_state WHERE key=?", (_NOTICE_KEY_BACKFILL,)
-    ).fetchone()
-    if guard is not None:
-        return ""
-    import json as _json
-
-    from ..semantic_conflict import notice_dedupe_key
-
-    rows = conn.execute(
-        "SELECT id, member_versions, notice_type FROM conflicts "
-        "WHERE notice_dedupe_key IS NULL AND notice_type IS NOT NULL "
-        "AND notice_delivery_status IN ('dismissed','resolved')"
-    ).fetchall()
-    keyed = skipped = 0
-    for row in rows:
-        try:
-            members = _json.loads(row["member_versions"] or "[]")
-            left, right = members[0], members[1]
-            key = notice_dedupe_key(
-                int(left["memory_id"]), int(right["memory_id"]),
-                int(left["version"]), int(right["version"]),
-                str(row["notice_type"]),
-            )
-        except (ValueError, TypeError, KeyError, IndexError):
-            skipped += 1
-            continue
-        try:
-            conn.execute(
-                "UPDATE conflicts SET notice_dedupe_key=? WHERE id=? "
-                "AND notice_dedupe_key IS NULL",
-                (key, int(row["id"])),
-            )
-            keyed += 1
-        except sqlite3.IntegrityError:
-            # Another already-keyed row owns this pair; leave this one NULL.
-            skipped += 1
-    conn.execute(
-        "INSERT INTO migration_state(key,value,updated_at) VALUES(?,?,CURRENT_TIMESTAMP) "
-        "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",
-        (_NOTICE_KEY_BACKFILL, f"keyed={keyed},skipped={skipped}"),
-    )
-    return f"notice_dedupe_backfill(keyed={keyed},skipped={skipped})"

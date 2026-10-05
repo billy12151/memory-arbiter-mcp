@@ -35,9 +35,12 @@ def _render_plan(plan: dict[str, Any]) -> str:
     conflict_only = plan.get("upgrade_mode") == "conflict_only"
     mode_lines = (
         [
-            "The source evidence index is ready in the configured embedding space.",
-            "Existing memory_evidence and vector tables can be cloned unchanged; no",
-            "model loading or embedding recomputation is required for this upgrade.",
+            "The source evidence index is cloned unchanged; no model loading is",
+            "required for the migration itself. Only if a future release rotates",
+            "the embedding pipeline version would the preserved space be reported",
+            "as mismatch and stay disabled until rebuilt with a local model",
+            "(memory_repair rebuild_evidence). 0.17.0 pinned the version at 2",
+            "and did NOT rotate it (owner 2026-09-26): existing vectors stay valid.",
         ]
         if conflict_only else
         [
@@ -335,6 +338,9 @@ def run_upgrade(
     if result.get("ok"):
         result["next_step"] = (
             "Restart the MCP client and run `mema doctor --json`. "
+            "Row vectors are backfilled automatically on first start (a daemon "
+            "thread) — watch doctor rows.coverage; with no embedding model the "
+            "backfill stays pending until one is configured. "
             "Also schedule the two maintenance tasks (hourly conflict scan + daily governance "
             "reminder); the full platform-agnostic spec is the `scheduled_tasks` help topic."
         )

@@ -1,0 +1,30 @@
+{
+ "gemma-query": {
+  "dim": 768,
+  "recall_rel_best": {
+   "min": 0.4393,
+   "p5": 0.4453,
+   "p75": 0.6043
+  },
+  "conflict_true_sent_min": 0.6312,
+  "conflict_true_sent_p5": 0.7475,
+  "attr_same_min": null,
+  "attr_diff_max": 0.8036,
+  "attr_row_min": 0.451,
+  "attr_row_mean": 0.6095
+ },
+ "bge-none": {
+  "dim": 1024,
+  "recall_rel_best": {
+   "min": 0.4253,
+   "p5": 0.4736,
+   "p75": 0.6704
+  },
+  "conflict_true_sent_min": 0.6484,
+  "conflict_true_sent_p5": 0.6981,
+  "attr_same_min": null,
+  "attr_diff_max": 0.8354,
+  "attr_row_min": 0.4881,
+  "attr_row_mean": 0.6622
+ }
+}

@@ -1,0 +1,136 @@
+<mxfile host="app.diagrams.net" agent="mema-docs" version="24.7.8">
+  <diagram name="写入时相似检测-时序图" id="wsim-seq">
+    <mxGraphModel dx="1000" dy="700" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1150" pageHeight="1150" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="t" value="mema 写入时相似检测时序图（memory action=remember）" style="text;html=1;fontSize=16;fontStyle=1;align=left;" vertex="1" parent="1">
+          <mxGeometry x="20" y="10" width="660" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="p1" value="调用方&#10;（上层 Agent）" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="20" y="50" width="150" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p2" value="写入流水线&#10;pipeline/write.py&#10;memory_write(290)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="195" y="50" width="150" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p3" value="相似候选召回&#10;_duplicate_hint_candidate_rows" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="370" y="50" width="150" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p4" value="本地库&#10;memories / subject_tags 向量" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="545" y="50" width="150" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p5" value="嵌入服务&#10;ManagedEmbedder" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="720" y="50" width="150" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p6" value="双门判定&#10;_similar_active_notice(188)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="895" y="50" width="150" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="l1" style="html=1;endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="95" y="90" as="sourcePoint" />
+            <mxPoint x="95" y="1010" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="l2" style="html=1;endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="270" y="90" as="sourcePoint" />
+            <mxPoint x="270" y="1010" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="l3" style="html=1;endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="445" y="90" as="sourcePoint" />
+            <mxPoint x="445" y="1010" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="l4" style="html=1;endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="620" y="90" as="sourcePoint" />
+            <mxPoint x="620" y="1010" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="l5" style="html=1;endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="795" y="90" as="sourcePoint" />
+            <mxPoint x="795" y="1010" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="l6" style="html=1;endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="970" y="90" as="sourcePoint" />
+            <mxPoint x="970" y="1010" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m1" value="memory(action=&quot;remember&quot;, subject, content, tags, workspace)" style="html=1;endArrow=block;fontSize=11;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="95" y="130" as="sourcePoint" />
+            <mxPoint x="270" y="130" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="s1" value="统一校验漏斗 validate_product_payload；&#10;strict 模式下 workspace 必填；解析工作区规范化；&#10;insert_memory 落盘（0.16.6 去重门：同工作区正文完全一致 → 直接返回原记录，不再新建）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="195" y="160" width="150" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="m2" value="提交后处理 _post_commit(recheck_conflicts=True)（tools.py:332）" style="html=1;endArrow=block;fontSize=11;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="270" y="275" as="sourcePoint" />
+            <mxPoint x="445" y="275" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m3" value="① 用 subject+排序后 tags 生成嵌入并入向量表（upsert_subject_tags_vector）" style="html=1;endArrow=block;fontSize=11;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="445" y="320" as="sourcePoint" />
+            <mxPoint x="795" y="320" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m4" value="② subject_tags_knn(k=10, 同工作区, 排除自身)" style="html=1;endArrow=block;fontSize=11;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="445" y="365" as="sourcePoint" />
+            <mxPoint x="620" y="365" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m5" value="相似候选行" style="html=1;endArrow=block;dashed=1;fontSize=11;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="620" y="405" as="sourcePoint" />
+            <mxPoint x="445" y="405" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="s2" value="降级路径：向量不可用或召回为空 → &#10;直接扫同工作区 active 的 subject/tags 行，上限 500 条" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="195" y="430" width="150" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="m6" value="逐条过第一道门（主题相似）" style="html=1;endArrow=block;fontSize=11;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="445" y="520" as="sourcePoint" />
+            <mxPoint x="970" y="520" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="s3" value="① 长度预筛：短的一方加倍仍达不到 0.8×长度和 → 直接跳过（省比对开销）；&#10;② 数字段归一后同系列（如「0.15.1 发版清单」对「0.15.2 发版清单」）→ 静默跳过；&#10;③ 主题相似度 ≥ 0.8 才算过门" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="895" y="545" width="150" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="m7" value="过门者再过第二道门（正文确认）：字符三元组余弦 ≥ 0.4；任一侧正文不足 40 字则跳过确认并标 low_confidence" style="html=1;endArrow=block;fontSize=11;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="970" y="670" as="sourcePoint" />
+            <mxPoint x="270" y="670" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="s4" value="排序规则（相似度降序 → 低置信靠后 → 正文余弦降序），&#10;最多保留 2 条提示；整个函数外层包 try/except：&#10;任何异常都静默返回空（报错不影响写入成功）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="195" y="700" width="150" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="m8" value="返回 notices：[{type: similar_active_memory, severity: info, matches: […], agent_instruction}]" style="html=1;endArrow=block;dashed=1;fontSize=11;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="270" y="800" as="sourcePoint" />
+            <mxPoint x="95" y="800" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m9" value="写入响应（含相似提示，仅提示不改数据）" style="html=1;endArrow=block;dashed=1;fontSize=11;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="270" y="850" as="sourcePoint" />
+            <mxPoint x="95" y="850" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="note" value="说明：这一路是「提醒」而非「判定」。它同步跑在写入线程里，只做轻量确定性比对，不调大模型、不落冲突表；判定失败一律静默放行，绝不阻断写入。" style="shape=note;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;align=left;" vertex="1" parent="1">
+          <mxGeometry x="545" y="880" width="460" height="60" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

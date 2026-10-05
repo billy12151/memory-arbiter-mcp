@@ -29,6 +29,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from memory_arbiter.validation import PRODUCT_REQUIRED_FIELDS as REQUIRE_WORKSPACE
 from memory_arbiter.validation import (  # noqa: E402
     MAX_BATCH_FIND_QUERIES,
     MAX_BATCH_IDS,
@@ -67,24 +68,27 @@ OUT = Path(__file__).resolve().parent.parent / "tests" / "golden" / "validation.
 #                the rule is len<=128 AND parseable, and ISO8601 tops out ~35
 # --------------------------------------------------------------------------
 FIELD_KIND: dict[str, str] = {
-    "action": "none", "add_tags": "list_str", "after_time": "iso8601", "alias": "none",
+    "action": "none", "add_tags": "list_str", "after_id": "int_range",
+    "after_time": "iso8601", "alias": "none",
     "anchor_memory_id": "none", "apply_plan": "list_obj", "audit_id": "none",
     "authorized": "none", "batch": "none", "batch_size": "int_range",
     "before_time": "iso8601", "candidate_key": "shape", "canonical": "str_len",
-    "chosen_value": "str_len", "clear": "none", "confidence": "float_unit",
+    "chosen_value": "str_len",
+    "clear": "none", "confidence": "float_unit",
     "conflict_id": "int_id", "conflict_point": "str_len", "content": "bytes",
     "content_hash": "none", "content_mode": "none", "debug_ranking": "none",
     "decided_by": "none", "decisions": "none", "deduplicate": "none", "deep": "none",
     "default_fallback": "none", "detector_version": "str_len", "dry_run": "none",
     "entity": "str_len", "event_time": "iso8601", "expected_content_hash": "none",
     "expected_revision": "int_range", "expected_version": "int_range",
-    "from": "str_len", "id": "int_id", "include_check": "none",
+    "from": "str_len", "hit_window": "int_range", "id": "int_id", "include_check": "none",
     "include_conflict_signal": "none", "include_duplicates": "none",
     "include_linked_open_items": "none", "include_quotes": "none",
     "include_size": "none", "include_unassigned": "none", "ingest_time": "iso8601",
     "k": "none", "limit": "int_range", "limit_per_query": "int_range",
     "loser_ids": "none", "max_distance": "none", "max_memories": "none",
     "members": "list_obj", "memory_id": "int_id", "memory_ids": "manual",
+    "mode": "none", "model_path": "str_len",
     "merged_content": "none", "metadata": "shape", "neighbor_k": "none",
     "new": "str_len", "new_content": "bytes", "new_subject": "str_len",
     "new_tags": "list_str", "new_text": "str_len", "new_workspace": "str_len",
@@ -93,7 +97,8 @@ FIELD_KIND: dict[str, str] = {
     "page_token": "none", "patches": "manual", "prompt_version": "str_len",
     "protection_level": "enum", "queries": "manual", "query": "str_len",
     "query_embedding": "shape", "reason": "str_len", "ref": "str_len",
-    "remove_tags": "list_str", "resolution_memory_id": "none", "scope": "str_len",
+    "remove_tags": "list_str", "resolution_memory_id": "none", "results": "list_obj", "scope": "str_len",
+    "slow_lane": "none",
     "slot_key": "shape", "source": "str_len", "source_ref": "str_len",
     "source_type": "enum", "span": "none", "spans": "shape", "status": "manual",
     "subject": "str_len", "superseded_by": "int_id", "survivor_id": "none",
@@ -113,11 +118,12 @@ INT_RANGE: dict[str, tuple[int, int]] = {
     "limit": (1, 100), "offset": (0, 10_000), "batch_size": (1, 500),
     "older_than_days": (0, 365_000), "expected_version": (1, 2_147_483_647),
     "expected_revision": (1, 2_147_483_647), "limit_per_query": (1, 20),
+    "hit_window": (0, 5), "after_id": (0, 2_147_483_647),
 }
 
 LEGAL_SAMPLE: dict[str, Any] = {
     "action": "page", "add_tags": ["a"], "after_time": "2026-01-01T00:00:00+00:00",
-    "alias": "alias-x", "anchor_memory_id": 1, "apply_plan": [{"memory_id": 1}],
+    "after_id": 1, "alias": "alias-x", "anchor_memory_id": 1, "apply_plan": [{"memory_id": 1}],
     "audit_id": 1, "authorized": True, "batch": 10, "batch_size": 10,
     "before_time": "2026-12-31T00:00:00+00:00", "candidate_key": {"k": "v"},
     "canonical": "ws", "chosen_value": "v", "clear": False, "confidence": 0.5,
@@ -127,7 +133,7 @@ LEGAL_SAMPLE: dict[str, Any] = {
     "default_fallback": False, "detector_version": "v1", "dry_run": True,
     "entity": "ent", "event_time": "2026-01-01T00:00:00+00:00",
     "expected_content_hash": "cafe", "expected_revision": 1, "expected_version": 1,
-    "from": "ws-a", "id": 1, "include_check": False, "include_conflict_signal": False,
+    "from": "ws-a", "mode": "pending", "model_path": "model.gguf", "hit_window": 2, "id": 1, "include_check": False, "include_conflict_signal": False,
     "include_duplicates": False, "include_linked_open_items": False,
     "include_quotes": False, "include_size": False, "include_unassigned": False,
     "ingest_time": "2026-01-01T00:00:00+00:00", "k": 5, "limit": 10,
@@ -141,7 +147,9 @@ LEGAL_SAMPLE: dict[str, Any] = {
     "patches": [{"old_text": "a", "new_text": "b"}], "prompt_version": "p1",
     "protection_level": "normal", "queries": [{"id": "q1", "query": "hello"}],
     "query": "hello", "query_embedding": [0.1, 0.2], "reason": "because",
-    "ref": "chat", "remove_tags": ["t"], "resolution_memory_id": 1, "scope": "sc",
+    "ref": "chat", "remove_tags": ["t"], "resolution_memory_id": 1,
+    "results": [{"memory_id": 1}], "scope": "sc",
+    "slow_lane": False,
     "slot_key": {"s": "v"}, "source": "scan", "source_ref": "ref",
     "source_type": "agent_generated", "span": {"start": 0}, "spans": {"1": {"start": 0}},
     "status": "active", "subject": "subj", "superseded_by": 2, "survivor_id": 1,
@@ -343,10 +351,10 @@ def build_combination_cases() -> list[dict[str, Any]]:
     # The unknown-field pop decides whether a later block runs at all.
     add("D/pop_suppresses_confidence", "memory", "find", {"query": "x", "confidence": "garbage"})
     add("D/no_pop_reports_confidence", "memory", "remember",
-        {"content": "a", "subject": "b", "confidence": "garbage"})
+        {"workspace": "default", "content": "a", "subject": "b", "confidence": "garbage"})
     # A warning and an error can coexist; the warning is still recorded.
     add("D/warning_plus_error", "memory", "remember",
-        {"content": "a", "subject": "b", "bogus_field": 1, "confidence": 5})
+        {"workspace": "default", "content": "a", "subject": "b", "bogus_field": 1, "confidence": 5})
     # Multiple unknown fields: warning order follows payload iteration order,
     # and every one of them is popped before the later blocks run.
     add("D/multiple_unknown_fields", "memory", "find",
@@ -364,9 +372,26 @@ def build_combination_cases() -> list[dict[str, Any]]:
         ("memory_repair", "set_entity"), ("memory_repair", "activate_pending"),
         ("memory_repair", "cleanup_history"), ("memory_govern", "confirm_pending_workspace"),
     ):
-        add(f"D/id_rename/{surface}.{operation}", surface, operation, {"id": "abc"})
+        payload = {"id": "abc"}
+        if (surface, operation) in REQUIRE_WORKSPACE:
+            payload = {"workspace": "ws", "id": "abc"}
+        add(f"D/id_rename/{surface}.{operation}", surface, operation, payload)
     # Unregistered (surface, operation): the unknown-field block is skipped.
     add("D/unregistered_combo", "memory", "nosuchaction", {"whatever": object.__doc__, "id": "abc"})
+    # C1（owner 2026-10-03）：动桶动作 workspace 必传=strip 后非空。
+    add("D/required_workspace_missing", "memory", "remember",
+        {"content": "a", "subject": "b"})
+    add("D/required_workspace_empty", "memory", "remember",
+        {"workspace": "   ", "content": "a", "subject": "b"})
+    add("D/required_workspace_pass", "memory", "remember",
+        {"workspace": "default", "content": "a", "subject": "b"})
+    add("D/required_workspace_govern_missing", "memory_govern", "confirm_pending_workspace",
+        {"memory_id": 1, "canonical": "ws", "authorized": True})
+    add("D/required_workspace_govern_empty", "memory_govern", "rename_workspace_canonical",
+        {"workspace": "", "old": "a", "new": "b", "authorized": True})
+    # 非必传动作不受影响（读路径缺 workspace 照常过形状校验）。
+    add("D/required_workspace_not_enforced_on_read", "memory", "find", {"query": "x"})
+
     # Removed field and remember-only aliases fail loudly with a migration hint.
     add("D/include_content_removed", "memory", "find", {"query": "x", "include_content": True})
     add("D/batch_find_include_content", "memory", "batch_find",

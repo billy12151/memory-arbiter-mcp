@@ -110,7 +110,7 @@ def run_cli(argv: list[str]) -> None:
     settings = Settings.from_env()
     db_path = Path(args.db).expanduser() if args.db else settings.db_path
     # If --db overrides, build a Settings copy with the new path so all
-    # downstream code (incl. build_unopenable_report) uses it.
+    # downstream code uses it.
     if args.db:
         settings = replace(settings, db_path=db_path)
 

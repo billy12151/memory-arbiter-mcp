@@ -30,6 +30,10 @@ class _VecEmbedder:
     last_encode_error = None
 
     @staticmethod
+    def embed_texts(texts, prefix: str = ""):
+        return [_VecEmbedder.embed_text(prefix="", body=t) for t in texts]
+
+    @staticmethod
     def embed_text(prefix: str, body: str, max_body_chars: int | None = None) -> EmbedResult:
         text = f"{prefix}\n{body}".casefold()
         if "deploy" in text:
@@ -60,27 +64,47 @@ def make_tools(tmp_path: Path) -> MemoryTools:
 
 
 class _RecordingBackend:
-    """Classify nothing as notice; records pair evaluation order (once per pair)."""
+    """0.17.1: records judged pair evaluation order via the batch interface
+    (text pairs carry the hit row text — mapped back to memory ids by the
+    test through hits_by_peer)."""
 
     name = "recording"
 
     def __init__(self) -> None:
         self.order: list[tuple[int, int]] = []
+        self.text_to_id: dict[str, int] = {}
 
-    def classify_pair(
-        self, left: dict[str, Any], right: dict[str, Any], *, deadline_monotonic: float | None = None,
-    ) -> Any:
-        from memory_arbiter.semantic_conflict import ModelSignal
-        # forward+reverse both run per pair; dedupe by unordered id pair so
-        # `order` lists each evaluated pair exactly once, in evaluation order.
-        pair = {int(left["memory_id"]), int(right["memory_id"])}
-        if not self.order or self.order[-1] != pair:
-            self.order.append(pair)
-        parsed = {
-            "attribute_a": "export_format", "value_a": "json",
-            "attribute_b": "export_format", "value_b": "csv",
-        }
-        return ModelSignal(True, "attribute_value_extraction", None, "", parsed, None)
+    def register(self, hits_by_peer: dict[int, dict[str, Any]]) -> None:
+        for pid, hit in hits_by_peer.items():
+            self.text_to_id[hit["text"]] = int(pid)
+
+    def lookup(self, text_b: str) -> "int | None":
+        """窗口 text_b 含对立行裸文本为子串 → 反查 pid。"""
+        for txt, mid in self.text_to_id.items():
+            if txt in text_b:
+                return mid
+        return None
+
+    def judge_pairs(self, pairs):
+        import sys; print("JP text_bs:", [tb[:40] for _, tb in pairs], file=sys.stderr)
+        from memory_arbiter.semantic_judge import PairVerdict
+        for text_a, text_b in pairs:
+            # 0.17.1 上下文化：text_b=subject+邻句+对立行窗口——对立行是其中
+            # 一段。text_to_id 的 key 是裸行文本，窗口含它为子串即匹配。
+            pid = None
+            for txt, mid in self.text_to_id.items():
+                if txt in text_b:
+                    pid = mid
+                    break
+            pair = (pid,)
+            if pair[0] is not None and (not self.order or self.order[-1] != pair):
+                self.order.append(pair)
+        return [
+            PairVerdict("no_conflict",
+                        {"conflict": 0.0, "no_conflict": 1.0, "possible_conflict": 0.0},
+                        None, "test")
+            for _ in pairs
+        ]
 
 
 def _write(tools: MemoryTools, content: str, subject: str, tags: list[str]) -> dict[str, Any]:
@@ -113,15 +137,26 @@ def _active_records(tools: MemoryTools) -> list[dict[str, Any]]:
         rows = conn.execute("SELECT * FROM memories ORDER BY id").fetchall()
     return [dict(row) for row in rows]
 
+def _pass_cos_gate(monkeypatch, cos: float = 0.85):
+    """Gate-v2 G4: pass every hand-built hit through the cosine band
+    (embedder-agnostic — patches the gates module, which the detection loop
+    imports at call time)."""
+    import memory_arbiter.pipeline.gates as _gates
+    monkeypatch.setattr(
+        _gates, "candidate_cos_gate",
+        lambda own, hits, vecs: ([(h, cos) for h in hits], [], []),
+    )
+
+
 
 def test_write_path_orders_check_level_by_overlap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Same action level: high-overlap peer evaluated before low-overlap."""
     tools = make_tools(tmp_path)
     tools.settings.semantic_conflict_on_write = "off"
     far = _write(tools, "invoice process is manual", "billing", ["billing"])
-    near = _write(tools, "deploy pipeline is green", "deploy", ["deploy"])
-    new = _write(tools, "deploy pipeline is blue", "deploy2", ["deploy"])
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    near = _write(tools, "deploy pipeline is green 8 and 16", "deploy", ["deploy"])
+    new = _write(tools, "deploy pipeline is blue 9 and 17", "deploy2", ["deploy"])
+    assert tools.wait_semantic_worker_drained(timeout=5)
     _publish_hint_vectors(tools)
 
     # new shares subject/tags vector space with `near` (deploy) and is
@@ -131,13 +166,13 @@ def test_write_path_orders_check_level_by_overlap(tmp_path: Path, monkeypatch: p
     monkeypatch.setattr(tools._semantic_worker, "pending_job_deadline", lambda timeout: None)
 
     hits_by_peer = {
-        int(near["id"]): {"memory_id": int(near["id"]), "id": 1, "kind": "text", "text": "deploy pipeline is green",
-                         "start_offset": 0, "end_offset": 23, "distance": 0.9, "metadata": dict(_META)},
+        int(near["id"]): {"memory_id": int(near["id"]), "id": 1, "kind": "text", "text": "deploy pipeline is green 8 and 16",
+                         "start_offset": 0, "end_offset": 33, "distance": 0.9, "metadata": dict(_META)},
         int(far["id"]): {"memory_id": int(far["id"]), "id": 2, "kind": "text", "text": "invoice process is manual",
-                         "start_offset": 0, "end_offset": 23, "distance": 0.1, "metadata": dict(_META)},
+                         "start_offset": 0, "end_offset": 33, "distance": 0.1, "metadata": dict(_META)},
     }
 
-    def fake_knn(embedding: Any, k: Any = 5, workspace: Any = None, exclude_memory_id: Any = None, conn: Any = None) -> list[dict[str, Any]]:
+    def fake_knn(embedding: Any, k: Any = 5, workspace: Any = None, exclude_memory_id: Any = None, conn: Any = None, **_kw: Any) -> list[dict[str, Any]]:
         return [
             {"memory_id": pid, "id": hit["id"], "kind": "text", "text": hit["text"],
              "start_offset": hit["start_offset"], "end_offset": hit["end_offset"],
@@ -145,15 +180,16 @@ def test_write_path_orders_check_level_by_overlap(tmp_path: Path, monkeypatch: p
             for pid, hit in hits_by_peer.items()
         ]
 
-    monkeypatch.setattr(tools.db, "evidence_knn", fake_knn)
+    monkeypatch.setattr(tools.db, "row_knn", fake_knn)
+    _pass_cos_gate(monkeypatch)
+    backend.register(hits_by_peer)
 
     result = tools._process_semantic_conflict_job(int(new["id"]), _snapshot(tools, int(new["id"])))
 
     # The far (0.1) but zero-overlap pair must NOT come first any more: the
     # near (0.9) same-topic pair is evaluated first under equal check level.
     first_pair = backend.order[0]
-    assert int(near["id"]) in first_pair
-    assert int(far["id"]) not in first_pair
+    assert first_pair == (int(near["id"]),)
     assert result["status"] in {"completed", "incomplete"}
 
 
@@ -161,10 +197,10 @@ def test_write_path_notify_level_not_demoted_by_score(tmp_path: Path, monkeypatc
     """A deterministic notify pair outranks a check pair even with zero overlap."""
     tools = make_tools(tmp_path)
     tools.settings.semantic_conflict_on_write = "off"
-    check_peer = _write(tools, "deploy pipeline is green", "deploy", ["deploy"])  # same topic
+    check_peer = _write(tools, "deploy pipeline is green 8 and 16", "deploy", ["deploy"])  # same topic
     notify_peer = _write(tools, "invoice process is manual", "billing", ["billing"])  # zero overlap
-    new = _write(tools, "deploy pipeline is blue", "deploy2", ["deploy"])
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    new = _write(tools, "deploy pipeline is blue 9 and 17", "deploy2", ["deploy"])
+    assert tools.wait_semantic_worker_drained(timeout=5)
     _publish_hint_vectors(tools)
 
     backend = _RecordingBackend()
@@ -185,16 +221,24 @@ def test_write_path_notify_level_not_demoted_by_score(tmp_path: Path, monkeypatc
         return real_decide(text, hit_text)
 
     monkeypatch.setattr(pipeline.evidence, "decide_evidence", decide)
+    # 拆分批（方案 §6-2c）：读点随收集相迁 _evidence_phases，双命名空间 patch 保钉子能力
+    import memory_arbiter.pipeline._evidence_phases as _evp
+    monkeypatch.setattr(_evp, "decide_evidence", decide)
 
-    def fake_knn(embedding: Any, k: Any = 5, workspace: Any = None, exclude_memory_id: Any = None, conn: Any = None) -> list[dict[str, Any]]:
+    def fake_knn(embedding: Any, k: Any = 5, workspace: Any = None, exclude_memory_id: Any = None, conn: Any = None, **_kw: Any) -> list[dict[str, Any]]:
         return [
-            {"memory_id": int(check_peer["id"]), "id": 1, "kind": "text", "text": "deploy pipeline is green",
-             "start_offset": 0, "end_offset": 23, "distance": 0.1, "metadata": dict(_META)},
+            {"memory_id": int(check_peer["id"]), "id": 1, "kind": "text", "text": "deploy pipeline is green 8 and 16",
+             "start_offset": 0, "end_offset": 33, "distance": 0.1, "metadata": dict(_META)},
             {"memory_id": int(notify_peer["id"]), "id": 2, "kind": "text", "text": "invoice process is manual",
-             "start_offset": 0, "end_offset": 23, "distance": 0.9, "metadata": dict(_META)},
+             "start_offset": 0, "end_offset": 33, "distance": 0.9, "metadata": dict(_META)},
         ]
 
-    monkeypatch.setattr(tools.db, "evidence_knn", fake_knn)
+    monkeypatch.setattr(tools.db, "row_knn", fake_knn)
+    _pass_cos_gate(monkeypatch)
+    backend.register({
+        int(check_peer["id"]): {"text": "deploy pipeline is green 8 and 16"},
+        int(notify_peer["id"]): {"text": "invoice process is manual"},
+    })
 
     tools._process_semantic_conflict_job(int(new["id"]), _snapshot(tools, int(new["id"])))
 
@@ -222,7 +266,7 @@ def test_subject_tags_vectors_batch_read(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     one = _write(tools, "deploy note", "deploy", ["deploy"])
     two = _write(tools, "invoice note", "billing", ["billing"])
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     _publish_hint_vectors(tools)
 
     found = tools.db.memories.subject_tags_vectors([int(one["id"]), int(two["id"]), 999999])

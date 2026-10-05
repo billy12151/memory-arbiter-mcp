@@ -37,7 +37,7 @@ class CharHistogramEmbedder:
     @staticmethod
     def embed_text(prefix: str, body: str, max_body_chars=None) -> EmbedResult:
         vector = [0.0] * 32
-        text = f"{prefix}\n{body}".casefold()
+        text = body.casefold()  # 直方图只对 body（prefix 不参与分箱）
         for ch in text:
             vector[ord(ch) % 32] += 1.0
         return EmbedResult(vector, False, len(text), len(text))
@@ -172,7 +172,7 @@ def test_backfill_restores_missing_actives_only(tmp_path: Path) -> None:
     tools = make_vec_tools(tmp_path)
     keep = _write(tools, "存量记忆一", ["legacy"])
     drop = _write(tools, "存量记忆二", ["legacy"])
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     # Simulate a library created before 0.15.3: no hint vectors at all.
     with tools.db.write_transaction() as conn:
         conn.execute("DELETE FROM subject_tags_vec")
@@ -266,9 +266,9 @@ def test_vec_knn_filters_inactive_and_excludes_self(tmp_path: Path) -> None:
         "ok"
     ]
     query = CharHistogramEmbedder.embed_text(
-        "", WritePipeline._subject_tags_embed_text("KNN 过滤验证", ["vec"]),
+        "", MemoryTools._summary_embed_text("KNN 过滤验证", ["vec"], "body for KNN 过滤验证"),
     ).embedding
-    rows = tools.db.subject_tags_knn(
+    rows = tools.db.memory_summary_knn(
         query,
         k=10,
         exclude_memory_id=int(active["id"]),
@@ -277,10 +277,12 @@ def test_vec_knn_filters_inactive_and_excludes_self(tmp_path: Path) -> None:
     assert [row["id"] for row in rows] == [], "superseded rows must not be recalled"
 
 
-def test_vec_knn_window_grows_past_foreign_workspaces(tmp_path: Path) -> None:
-    """vec0's k-window is global: 30 closer rows from OTHER workspaces must
-    not starve the scoped recall (the growth ceiling is the unscoped active
-    count, evidence-knn style)."""
+def test_vec_knn_scoped_recall_excludes_foreign_workspaces(tmp_path: Path) -> None:
+    """0.16.12 P3-T2 rowid-IN pre-filter: the workspace/exclusion predicates
+    push INTO the vec0 scan, so 30 same-shape rows from OTHER workspaces
+    cannot crowd the k-window — the scoped nearest row is recalled exactly
+    (the subject-tags_vec read leg retired 0.17.1; the summary vector is the
+    live duplicate-hint recall)."""
     tools = make_vec_tools(tmp_path)
     # Foreign rows share most characters with the query text, so their
     # histograms sit closer than the target's own workspace peers.
@@ -289,9 +291,12 @@ def test_vec_knn_window_grows_past_foreign_workspaces(tmp_path: Path) -> None:
     target = _write(tools, "金营项目发版流程说明", ["release"], workspace="w")
     excluded = _write(tools, "完全无关的第二条", ["other"], workspace="w")
     query = CharHistogramEmbedder.embed_text(
-        "", WritePipeline._subject_tags_embed_text("金营项目发版流程说明", ["release"]),
+        "",
+        MemoryTools._summary_embed_text(
+            "金营项目发版流程说明", ["release"], "body for 金营项目发版流程说明",
+        ),
     ).embedding
-    rows = tools.db.subject_tags_knn(
+    rows = tools.db.memory_summary_knn(
         query, k=5, exclude_memory_id=int(excluded["id"]), workspace_canonical="w",
     )
     assert [row["id"] for row in rows] == [int(target["id"])]
@@ -306,7 +311,9 @@ def test_knn_failure_falls_back_to_scan_hint(
     def _raise(**kwargs):
         raise RuntimeError("vec exploded")
 
-    monkeypatch.setattr(tools.db, "subject_tags_knn", _raise)
+    # 0.17.0 P2-7 起 duplicate-hint 召回走 memory_summary_knn——fault
+    # injection 必须钉在活路径上，钉在已退役的 subject_tags_knn 上是假绿。
+    monkeypatch.setattr(tools.db, "memory_summary_knn", _raise)
     result = tools.memory_write(
         content="fallback body", subject="回退扫描验证", tags=["fb"], workspace="w",
     )
@@ -355,7 +362,7 @@ def test_boot_backfill_backgrounded_and_reads_degrade(tmp_path: Path, monkeypatc
     assert result["ok"], result
     # 完成等待点：3 条 × 两个索引的向量终将写满
     assert tools.wait_boot_backfills(timeout=30.0)
-    assert tools.wait_evidence_worker_drained(timeout=10.0)
+    assert tools.wait_semantic_worker_drained(timeout=10.0)
     with tools.db.connection() as conn:
         st = conn.execute("SELECT COUNT(*) FROM subject_tags_vec").fetchone()[0]
         sm = conn.execute("SELECT COUNT(*) FROM memory_summary_vec").fetchone()[0]
@@ -393,18 +400,21 @@ def test_knn_rowid_in_matches_bruteforce_topk(tmp_path: Path) -> None:
     by_memory: dict[int, list] = {}
     for mid, text, uidx, vec, _dist in published:
         by_memory.setdefault(mid, []).append((text, uidx, vec))
+    from memory_arbiter.rowseg import RowSegment
+
     for mid, entries in by_memory.items():
-        outcome = db.evidence.publish(
+        outcome = db.evidence.publish_rows(
             mid, 2, evidence_content_hash(content_of[mid]),
-            [EvidenceUnit("text", text, 0, len(text), uidx) for text, uidx, _ in entries],
+            [RowSegment(kind="sentence", text=text, start_offset=0,
+                        end_offset=len(text), row_index=uidx) for text, uidx, _ in entries],
             [vec for _, _, vec in entries],
         )
         assert outcome.get("published"), outcome
     query = [1.0, 0.0]
     for k in (1, 2, 3, 4):
         for exclude in (None, a1):
-            got = db.evidence_knn(list(query), k=k, workspace="projA", exclude_memory_id=exclude)
-            got_set = {(int(r["memory_id"]), int(r["unit_index"])) for r in got}
+            got = db.row_knn(list(query), k=k, workspace="projA", exclude_memory_id=exclude)
+            got_set = {(int(r["memory_id"]), int(r["row_index"])) for r in got}
             eligible = sorted(
                 ((dist, mid, uidx) for mid, _t, uidx, _v, dist in published
                  if mid != exclude and mid != b1),

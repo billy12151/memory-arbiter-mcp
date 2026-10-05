@@ -1,0 +1,21 @@
+{
+  "corpus_version": "recall-v3-len",
+  "exported_at": "2026-09-26T01:35:11.519736+00:00",
+  "source_db": "/Users/zhangzhiwei17/.local/share/memory-arbiter/memory.sqlite3",
+  "targets": 72,
+  "distractors": 196,
+  "lang_mix_targets": {
+    "en": 9,
+    "mixed": 43,
+    "zh": 20
+  },
+  "len_mix_targets": {
+    "500-1k": 19,
+    "1k-2k": 28,
+    "2k-4k": 9,
+    ">4k": 4,
+    "<500": 12
+  },
+  "design": "owner 2026-09-26：长度分层（中长/很长加权，生产 ≥1k 占 52.9%）× 语言分桶（mixed/zh/en 按生产分布 80/15/4.5）；queries/labels 人工出题后组装",
+  "lang_def": "CJK/ASCII 字母比：zh≥0.7，en≤0.15，否则 mixed"
+}

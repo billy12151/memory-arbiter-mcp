@@ -66,7 +66,7 @@ def _library_with_misplacement(tools: MemoryTools) -> dict:
         content="生产环境数据库使用 PostgreSQL，端口是 5433。", subject="port-b",
         tags=["db"], workspace="dbpgsql",
     )["data"]
-    assert tools.wait_evidence_worker_drained(timeout=10)
+    assert tools.wait_semantic_worker_drained(timeout=10)
     return {"misplaced": misplaced, "partner": partner}
 
 
@@ -120,6 +120,7 @@ def test_post_move_pair_becomes_recordable_candidate(vec_tools: MemoryTools) -> 
     lib = _library_with_misplacement(tools)
     tools.memory_repair("scan_workspace_anomalies", {})
     moved = tools.memory_govern("move_memories_workspace", {
+        "workspace": "default",
         "memory_ids": [int(lib["misplaced"]["id"])], "new_workspace": "dbpgsql",
         "reason": "confirmed placement", "authorized": True,
     })

@@ -1,0 +1,150 @@
+<mxfile host="app.diagrams.net" agent="mema-docs" version="24.7.8">
+  <diagram name="查询链路-流程图" id="query-flow">
+    <mxGraphModel dx="1000" dy="700" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1400" pageHeight="1700" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="t" value="mema 查询链路流程图（memory action=find / search）" style="text;html=1;fontSize=16;fontStyle=1;align=left;" vertex="1" parent="1">
+          <mxGeometry x="20" y="10" width="620" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="n1" value="收到调用&#10;memory(action=&quot;find&quot;, query, …)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="120" y="60" width="220" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="n2" value="入口过滤参数校验&#10;拒绝 include_content / include_superseded&#10;content_mode 仅允许 preview | hits | full" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="100" y="150" width="260" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="n3" value="计算 query 向量（_auto_embed）&#10;若向量索引状态为 mismatch / failed，则跳过向量通道并附警告" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="100" y="250" width="260" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="n4" value="解析工作区/隔离上下文&#10;strict 隔离且无工作区 → 直接拒绝" style="rhombus;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="90" y="350" width="280" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="n5" value="query 为空？" style="rhombus;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="110" y="490" width="240" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="n6" value="分支 A：query 空且无过滤&#10;按时间倒序取最近记忆&#10;retrieval_mode = recent_browse" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="480" y="470" width="250" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="n7" value="分支 B：query 空但有过滤&#10;按 tags / 时间 / source_type 过滤召回&#10;并用精确 count 给出 total" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="790" y="470" width="250" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="n8" value="分支 C：query 非空 → 宽召回（_wide_recall）&#10;候选池上限 50；offset&gt;0 时放宽池到 max(50, offset+limit+1)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1100" y="470" width="260" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="n9" value="通道 1：FTS 全文检索（AND，全词都命中）" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1060" y="580" width="300" height="34" as="geometry" />
+        </mxCell>
+        <mxCell id="n10" value="通道 2：FTS 宽松检索（OR，任一 token 命中即可）&#10;仅当候选池未满时执行" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1060" y="634" width="300" height="34" as="geometry" />
+        </mxCell>
+        <mxCell id="n11" value="通道 3：subject / tags 模糊匹配（每次都跑）&#10;整句 + 分词 token，过滤停用锚点，打标为 surface 候选" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1060" y="688" width="300" height="34" as="geometry" />
+        </mxCell>
+        <mxCell id="n12" value="通道 4：正文 LIKE（池未满且 query 锚点≥2，上限 30）&#10;打标为 content-only 候选（软重排时降权）" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1060" y="742" width="300" height="34" as="geometry" />
+        </mxCell>
+        <mxCell id="n13" value="通道 5：证据向量近邻（k=池上限×8）&#10;按记忆聚合：最佳单元分 + 0.08×支撑单元数" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1060" y="796" width="300" height="34" as="geometry" />
+        </mxCell>
+        <mxCell id="n14" value="融合排序（RRF）：分 = 1/(60+词法排名) + 1/(60+向量排名)&#10;排序后做双通道配额：词法 26 / 向量 24&#10;再追加 10 个 surface 保留席，不足按融合分补齐" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1040" y="860" width="340" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="n15" value="软重排（_soft_rerank）&#10;最终分 = 相关性（subject/tags/正文，各自封顶）&#10;+ 融合分×300 + 信任度 + 新鲜度 + 工作区加分 − 已废弃×1000&#10;正文单通道命中与超长正文降权；向量候选保底 2.5 分" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1040" y="970" width="340" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="n16" value="相关性下限过滤&#10;active 查询丢弃最终分 &lt; 8.1 的候选；若全部被滤，附警告提示" style="rhombus;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1080" y="1110" width="260" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="n17" value="组装分页结果&#10;有过滤：精确 total + has_more；无过滤 active：total 不给、has_more=false" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1050" y="1260" width="320" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="n18" value="挂冲突信号（仅 direct 命中）&#10;记录 attention 日志；强信号（open_table / conflict_guidance）置 attention_required" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1050" y="1360" width="320" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="n19" value="按 content_mode 裁剪正文&#10;preview → 只给字数与大纲；hits → 给命中片段（覆盖≥50% 升为全文）；full → 全文" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1050" y="1460" width="320" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="n20" value="返回结果（results / count / warnings / attention_required）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1050" y="1560" width="320" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="n21" value="拒绝：返回错误说明" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="440" y="370" width="200" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="e1" style="html=1;endArrow=block;" edge="1" parent="1" source="n1" target="n2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" style="html=1;endArrow=block;" edge="1" parent="1" source="n2" target="n3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" style="html=1;endArrow=block;" edge="1" parent="1" source="n3" target="n4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4" value="通过" style="html=1;endArrow=block;fontSize=11;" edge="1" parent="1" source="n4" target="n5">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5" value="拒绝" style="html=1;endArrow=block;fontSize=11;" edge="1" parent="1" source="n4" target="n21">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6" value="是，无过滤" style="html=1;endArrow=block;fontSize=11;" edge="1" parent="1" source="n5" target="n6">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e7" value="是，有过滤" style="html=1;endArrow=block;fontSize=11;" edge="1" parent="1" source="n5" target="n7">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e8" value="否，query 非空" style="html=1;endArrow=block;fontSize=11;" edge="1" parent="1" source="n5" target="n8">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e9" style="html=1;endArrow=block;" edge="1" parent="1" source="n8" target="n9">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e10" style="html=1;endArrow=block;" edge="1" parent="1" source="n9" target="n10">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e11" style="html=1;endArrow=block;" edge="1" parent="1" source="n10" target="n11">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e12" style="html=1;endArrow=block;" edge="1" parent="1" source="n11" target="n12">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e13" style="html=1;endArrow=block;" edge="1" parent="1" source="n12" target="n13">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e14" style="html=1;endArrow=block;" edge="1" parent="1" source="n13" target="n14">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e15" style="html=1;endArrow=block;" edge="1" parent="1" source="n14" target="n15">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e16" style="html=1;endArrow=block;" edge="1" parent="1" source="n15" target="n16">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e17" value="有候选留存" style="html=1;endArrow=block;fontSize=11;" edge="1" parent="1" source="n16" target="n17">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e18" style="html=1;endArrow=block;" edge="1" parent="1" source="n17" target="n18">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e19" style="html=1;endArrow=block;" edge="1" parent="1" source="n18" target="n19">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e20" style="html=1;endArrow=block;" edge="1" parent="1" source="n19" target="n20">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e21" value="全被滤掉（空结果+警告）" style="html=1;endArrow=block;dashed=1;strokeColor=#b85450;fontSize=11;fontColor=#b85450;" edge="1" parent="1" source="n16" target="n20">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="960" y="1165" />
+              <mxPoint x="960" y="1585" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e23" style="html=1;endArrow=block;" edge="1" parent="1" source="n6" target="n20">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e24" style="html=1;endArrow=block;" edge="1" parent="1" source="n7" target="n20">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

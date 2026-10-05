@@ -1,49 +1,55 @@
 """Local-text evidence indexing and conflict candidate processing."""
 from __future__ import annotations
 
-import hashlib
-import sqlite3
-import json
+import threading
 import time
-from typing import Any, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING, Iterator
 
-from ..db_generation import CONFLICT_DETECTOR_VERSION
 from ..constants import (
-    SEMANTIC_JOB_TIMEOUT_MS,
-    SEMANTIC_MAX_EVIDENCE_UNITS,
-    SEMANTIC_MAX_EXAMINED_PAIRS,
-    SEMANTIC_MIN_PAIR_BUDGET_MS,
+    EMBED_PREFIX_STS,
+    SEMANTIC_JUDGE_CONTEXT_BEFORE,
+    SEMANTIC_JUDGE_CONTEXT_AFTER,
 )
-from ..difference_classifier import classify_pair
-from ..evidence import evidence_content_hash, local_text_units
-from ..models import TrustedApplyingContext
+from ..evidence import evidence_content_hash
 from ..embedder import ManagedEmbedder
 from ..semantic_conflict import (
-    PAIR_PROMPT_VERSION,
-    PairGateResult,
+    _values_all_equivalent,
     SemanticBackend,
     decide_evidence,
     direct_value_verdict,
-    evaluate_single_direction_extraction,
     is_cross_evolution,
     notice_dedupe_key,
-    signal_extraction,
+    normalize_value,
 )
-from ..text import canon_entity, canon_scope
+from ._evidence_helpers import (  # noqa: F401
+    _TECHNICAL_REASONS as _TECHNICAL_REASONS,
+    _retired_gate_slot_key as _retired_gate_slot_key,
+    _conflict_notice_payload as _conflict_notice_payload,
+    _job_fair_deadline as _job_fair_deadline,
+    _giant_table_indexes as _giant_table_indexes,
+    _filter_exempted_segments as _filter_exempted_segments,
+    filter_exempted_scan_rows as filter_exempted_scan_rows,
+)
+from ._evidence_judge import (  # noqa: F401
+    _JudgeBatch as _JudgeBatch,
+    _judge_outcome as _judge_outcome,
+    _judge_pair_compat as _judge_pair_compat,
+    _pair_diff_anchor as _pair_diff_anchor,
+    _JudgePairView as _JudgePairView,
+    _JobJudgeBudget as _JobJudgeBudget,
+)
+from ._evidence_phases import _EvidencePhases
+from ._evidence_land import _EvidenceLand
 
 if TYPE_CHECKING:
     from ..tools import MemoryTools
     from ..workers import SemanticConflictWorker
 
 # Technical failures degrade the check route and keep the job incomplete.
-_TECHNICAL_REASONS = {
-    "qwen_timeout", "qwen_unavailable", "qwen_backend_error",
-    "qwen_invalid_output", "qwen_budget_exhausted", "notice_budget_exhausted",
-    "evidence_units_capped", "pairs_examined_capped", "notice_write_failed",
-}
-
-
-class EvidencePipeline:
+# 0.17.1: qwen_* keys renamed judge_*; qwen_unverified is GONE (grounding
+# belonged to the slot-extraction paradigm); qwen_budget_exhausted keeps its
+# semantics under the judge_ prefix.
+class EvidencePipeline(_EvidencePhases, _EvidenceLand):
     def __init__(self, tools: "MemoryTools") -> None:
         self._tools = tools
         self.db = tools.db
@@ -63,6 +69,213 @@ class EvidencePipeline:
     def _ensure_semantic_backend(self) -> "SemanticBackend | None":
         return self._tools._ensure_semantic_backend()
 
+
+    def drain_conflict_backlog(self, limit: int = 2) -> int:
+        """0.17.0 P2-4.2: idle-worker consumption of the conflict backlog.
+
+        Bounded per call (``limit`` entries); new writes always win because
+        the caller only invokes this when the job queue is empty and rechecks
+        between entries. A stored extraction replays through the deterministic
+        gate without the judge; a judge-less replay with no extraction lands
+        nothing (the entry stays pending for a backend-bearing pass — never
+        silently completed)."""
+        processed = 0
+        skipped: list[int] = []  # unprocessable this pass (no backend) — rotate past, never freeze
+        judge_pool: list[dict[str, Any]] = []  # A-5 批量判定池（本轮收齐 pass2 一次判）
+        pool_ids: list[int] = []  # 已入池条目必须进 take_next 排除表——条目 pass2
+        # 前不 complete 且 processed 不增，不排除则 while 每轮重取同一头部
+        # 条目无限循环（0.17.1 review P0）。
+        backend_holder: dict[str, Any] = {"backend": None}
+        while processed < limit:
+            entry = self.db.conflict_backlog.take_next(exclude_ids=skipped + pool_ids)
+            if entry is None:
+                break
+            left_id = int(entry["left_memory_id"])
+            right_id = int(entry["right_memory_id"])
+            # Version drift re-check at consumption time (refresh_stale is the
+            # bulk sweep; this is the per-entry guard).
+            rows = self.db.get_memories_by_ids([left_id, right_id])
+            left = rows.get(left_id)
+            right = rows.get(right_id)
+            if (
+                not left or not right
+                or str(left.get("status")) != "active" or str(right.get("status")) != "active"
+                or int(left.get("version") or 1) != int(entry["left_version"])
+                or int(right.get("version") or 1) != int(entry["right_version"])
+            ):
+                self.db.conflict_backlog.refresh_stale()
+                continue
+            extraction = entry.get("extraction") if isinstance(entry.get("extraction"), dict) else None
+            left_text = str(entry["left_text"] or "")
+            right_text = str(entry["right_text"] or "")
+            decision = decide_evidence(left_text, right_text)
+            if decision.action == "ignore" or is_cross_evolution(decision):
+                self.db.conflict_backlog.complete(int(entry["id"]))
+                processed += 1
+                continue
+            if extraction is None:
+                backend = self._ensure_semantic_backend()
+                backend_holder["backend"] = backend
+                if backend is None:
+                    # P2-4 livelock fix: skip-and-rotate instead of breaking —
+                    # the entry stays pending for a backend-bearing pass while
+                    # lower-scored entries (if any carry stored extraction)
+                    # still drain.
+                    skipped.append(int(entry["id"]))
+                    # R2-W1：该分支零进展（processed 不增），不设上限时
+                    # while processed<limit 只能靠 take_next 扫完全部 pending
+                    # 才停（每次调用新开 sqlite 连接，积压 500 ⇒ 空闲 tick 每
+                    # 5s 一轮上千次连接空转）。超界即停本轮；条目未 complete
+                    # 仍 pending，后端出现后照常重试——契约不变。
+                    if len(skipped) > 2 * limit:
+                        break
+                    continue
+                embedder, _warnings = self._ensure_embedder()
+                direct = direct_value_verdict(left_text, right_text, decision, embedder=embedder)
+                if direct is not None:
+                    self._record_backlog_notice(
+                        left, right, left_text, right_text, decision,
+                        str(direct[0]), str(direct[1]), str(direct[2]),
+                        reason="deterministic_same_key_value_diff",
+                    )
+                    self.db.conflict_backlog.complete(int(entry["id"]))
+                    processed += 1
+                    continue
+                # 0.17.1 (owner A-5)：本 drain 轮收集判定池，pass2 一次批前向
+                # （先收后判，与 A-cross 同构）。判定映射：notice/possible →
+                # notice；clear → 出队；error/technical → 留队（不 complete，
+                # 与 backend 不可用分支同契约；owner 2026-09-28 翻转 0.17.0
+                # 的技术失败出队丢弃）。
+                entry["left"] = left
+                entry["right"] = right
+                entry["decision"] = decision
+                judge_pool.append(entry)
+                pool_ids.append(int(entry["id"]))
+                continue
+            # Stored extraction replays through the deterministic gate (never
+            # re-spends Qwen — owner design #8).
+            attr = str(extraction.get("attribute") or "")
+            value_a = str(extraction.get("value_a") or "")
+            value_b = str(extraction.get("value_b") or "")
+            if attr and value_a and value_b and normalize_value(value_a) != normalize_value(value_b):
+                self._record_backlog_notice(
+                    left, right, left_text, right_text, decision,
+                    attr, value_a, value_b, reason="backlog_stored_extraction",
+                )
+            self.db.conflict_backlog.complete(int(entry["id"]))
+            processed += 1
+        # ── pass 2: one batched judge call for the collected pool ───────────
+        if judge_pool and backend_holder["backend"] is not None:
+            from ..semantic_judge import PairVerdict as _PV, locate_row, row_window
+            # 0.17.1 §2.2（评审 P1-1 修订版）：drain 判定输入上下文化——
+            # 版本复核已通过的 fresh content 走 locate_row 定位窗口。注意：
+            # backlog 存的是 rowseg 折叠文本（表格行/跨行句），不是裸
+            # content 的逐字子串，locate 对这两类结构性失配 → 退化裸行
+            # （无 subject）；逐字单行文本才真正上下文化。与 A-cross（直用
+            # 存储 span）不同口径，根治需 backlog 落 span 列（待拍板）。
+            def _judge_text(mem: "dict[str, Any]", bare: str) -> str:
+                content = str(mem.get("content") or "")
+                span = locate_row(content, bare)
+                if span is None:
+                    return bare
+                return row_window(content, span[0], span[1],
+                                  subject=str(mem.get("subject") or ""),
+                                  before=SEMANTIC_JUDGE_CONTEXT_BEFORE,
+                                  after=SEMANTIC_JUDGE_CONTEXT_AFTER)
+            pairs = [(_judge_text(e["left"], e["left_text"]),
+                      _judge_text(e["right"], e["right_text"])) for e in judge_pool]
+            verdicts = backend_holder["backend"].judge_pairs(pairs)
+            if len(verdicts) != len(pairs):
+                verdicts = [_PV("no_conflict", {}, None, "mdeberta:unavailable",
+                                error="judge verdict count mismatch")] * len(pairs)
+            min_prob = float(self.settings.semantic_conflict_mdeberta_notice_min_prob)
+            for entry, verdict in zip(judge_pool, verdicts):
+                outcome = _judge_outcome(verdict, min_prob)
+                if outcome == "error":
+                    # 留队重试（owner A-5）：下个 backend-bearing pass 再来
+                    # （留队靠「不调 complete」实现——entry 不出队即重试）
+                    continue
+                left, right = entry["left"], entry["right"]
+                left_text, right_text = entry["left_text"], entry["right_text"]
+                decision = entry["decision"]
+                # 量纲口径与 A-cross 同一（评审 P3④）：decision 在手比
+                # decision 值对，无值不触发守卫（notice 照常落）。
+                _dv = (getattr(decision, "left_value", None),
+                       getattr(decision, "right_value", None))
+                if outcome in ("notice", "possible") and not (
+                    _dv[0] and _dv[1] and _values_all_equivalent(str(_dv[0]), str(_dv[1]))
+                ):
+                    self._record_backlog_notice(
+                        left, right, left_text, right_text, decision,
+                        # 值=行文本（§3.4 快照原文形态，D1 双通道放行）；
+                        # [:400] 与 A-cross 组装同构——超 _MAX_FIELD_CHARS
+                        # 的长行会让 escalate 在 intake 重新堵死。
+                        # slot 方言统一（疑似#4，owner 2026-10-04 拍板）：
+                        # 与 A-cross 同用 12-hex pair anchor（可复现/定长/
+                        # 不泄内容；展示层已有 hex→左引文头的转换）
+                        _pair_diff_anchor(left_text, right_text),
+                        left_text[:400], right_text[:400],
+                        reason=f"backlog_judged:{verdict.label}",
+                        severity="normal" if outcome == "notice" else "info",
+                        model_signal=_JudgePairView.signal(verdict),
+                    )
+                self.db.conflict_backlog.complete(int(entry["id"]))
+                processed += 1
+        return processed
+
+    def _record_backlog_notice(
+        self, left: dict[str, Any], right: dict[str, Any],
+        left_text: str, right_text: str, decision: Any,
+        attribute: str, value_a: str, value_b: str, *, reason: str,
+        severity: str = "normal", model_signal: "dict[str, Any] | None" = None,
+    ) -> None:
+        """Record one notice for a backlog pair through the standard channel
+        (dedupe/suppression identical to the write path)."""
+        left_id = int(left.get("id") or 0)
+        right_id = int(right.get("id") or 0)
+        left_version = int(left.get("version") or 1)
+        right_version = int(right.get("version") or 1)
+        # Gate-v2 G3: the old soft-invisible return (metadata entity/scope
+        # missing → drop) is retired WITH the provenance gate — keeping it
+        # after the storage strip would have silenced EVERY backlog notice
+        # forever (entity/scope are gone from all metadata). Slot identity
+        # now rides workspace + subject (plan slot_key 连锁).
+        slot_key = _retired_gate_slot_key(
+            left.get("workspace_canonical") or left.get("workspace"),
+            attribute, str(left.get("subject") or ""),
+        )
+        extra: dict[str, Any] = {
+            "anchors": decision.anchors,
+            "backlog": True,
+        }
+        if model_signal is not None:
+            extra["model_signal"] = model_signal
+        self.db.record_semantic_notice(
+            memory_id=left_id, peer_id=right_id, severity=severity,
+            notice_type="semantic_evidence",
+            title=f"Possible memory change with #{right_id}",
+            message=str(decision.reason or "backlog"),
+            payload=_conflict_notice_payload(
+                reason=reason,
+                attribute="backlog",
+                slot_key=slot_key,
+                left_id=left_id, left_version=left_version,
+                left_value_norm=value_a, left_display=value_a,
+                left_quote=left_text,
+                right_id=right_id, right_version=right_version,
+                right_value_norm=value_b, right_display=value_b,
+                right_quote=right_text,
+                left_content=str(left.get("content") or ""),
+                right_content=str(right.get("content") or ""),
+                extra=extra,
+            ),
+            dedupe_key=notice_dedupe_key(
+                left_id, right_id, left_version, right_version, "semantic_evidence",
+            ),
+            left_version=left_version, right_version=right_version,
+            source="semantic_evidence",
+        )
+
     def index_memory(self, memory_id: int, record: dict[str, Any] | None = None) -> dict[str, Any]:
         current = record or self.db.get_memory(int(memory_id))
         embedder, warnings = self._ensure_embedder()
@@ -81,23 +294,48 @@ class EvidencePipeline:
                 "reason": "embedding_space_rebuild_required",
                 "warnings": warnings,
             }
-        units = local_text_units(
+        # C5 (unit retirement): index_memory embeds ROWS ONLY (subject row
+        # first, sentences/table rows, C3 fallback — see rowseg), batched via
+        # embed_texts; the unit tables are no longer written. Remaining
+        # callers: boot backfill / repair — the write path indexes inside the
+        # semantic job (C2).
+        from ..rowseg import segment_rows
+        row_segments = segment_rows(
             str(current.get("subject") or ""), str(current.get("content") or ""),
         )
-        embeddings: list[list[float]] = []
-        for unit in units:
-            result = embedder.embed_text(prefix="", body=unit.text)
-            if not result.embedding:
-                return {"status": "failed", "reason": "empty_embedding"}
-            embeddings.append(list(result.embedding))
+        # A3（0.17.1 修复批）：B3 超长表格段豁免——本路径是升级
+        # （vnext_migration 每记忆调用）与 repair 的入口，此前未接线：
+        # 存量巨表行会在这里复活（实测 120 行表 → 119 行 + 一次 scan 落地
+        # 7021 条 internal_conflicts）。
+        row_segments, exempted_count = _filter_exempted_segments(row_segments)
+        if not row_segments:
+            # 全豁免形态（空 subject + 全表 >100 行）：不 publish——publish_rows
+            # ([],[]) 会清空既有行并把记忆留在 missing_row_vector_rows 选集里，
+            # 造成每次启动重 embed 的死循环。保留现状、回执可见。
+            return {
+                "status": "skipped",
+                "reason": "all_rows_exempted",
+                "table_rows_exempted": exempted_count,
+                "warnings": warnings,
+            }
+        row_embeddings: list[list[float]] = []
+        ok = True
+        for embed_result in embedder.embed_texts([seg.text for seg in row_segments], prefix=EMBED_PREFIX_STS):
+            if not embed_result.embedding:
+                ok = False
+                break
+            row_embeddings.append([float(x) for x in embed_result.embedding])
+        if not ok:
+            return {"status": "failed", "reason": "empty_embedding"}
         # 0.16.12 P2-T2: prefer the row's maintained content_sha column (set
         # at insert and every content edit) — one hash per write instead of
         # re-hashing here; NULL only on exotic legacy rows, hence the fallback.
         row_sha = str(current.get("content_sha") or "") or evidence_content_hash(
             str(current.get("content") or "")
         )
-        published = self.db.evidence.publish(
-            int(memory_id), int(current.get("version") or 1), row_sha, units, embeddings,
+        published = self.db.evidence.publish_rows(
+            int(memory_id), int(current.get("version") or 1), row_sha,
+            row_segments, row_embeddings,
         )
         if published.get("published"):
             # Self-heal the embedding-space mismatch: once a rebuild has
@@ -110,739 +348,184 @@ class EvidencePipeline:
                 and vec_state.get("target_space_id") == embedder.embedding_space_id
             ):
                 self.db.maybe_complete_space_rebuild(embedder.embedding_space_id)
-        return {
+        result = {
             "status": "indexed" if published.get("published") else "failed",
             **published,
         }
+        if exempted_count:
+            result["table_rows_exempted"] = exempted_count
+        return result
 
-    def process_conflicts(self, memory_id: int, snapshot: dict[str, Any]) -> dict[str, Any]:
-        """Run the bounded notice gate and report completion to sync callers."""
+    @staticmethod
+    def _streamed_pairs(
+        ranked_segments: list[Any], embedder: Any, max_segments: int,
+    ) -> "Iterator[tuple[Any, list[float]]]":
+        """C7: lazy (segment, embedding) stream, one batch ahead.
+
+        A daemon producer thread embeds SEMANTIC_STREAM_BATCH_ROWS at a time
+        into a depth-1 queue; the main thread's KNN+gates consume the
+        previous batch while the GPU works on the next (the llama call holds
+        the embedder lock; KNN never touches it, so the overlap is real).
+        Ranking happened BEFORE this call, so the cap/phase-timeout stops
+        here always cut the lowest-value tail. Embed failures degrade to
+        skipped segments (the memory stays pending for the backfill).
+        """
+        import queue as _queue
+        from ..constants import (
+            SEMANTIC_EMBED_PHASE_TIMEOUT_MS, SEMANTIC_STREAM_BATCH_ROWS,
+        )
+
+        out: "_queue.Queue[Any]" = _queue.Queue(maxsize=1)
+        DONE = object()
+
+        def produce() -> None:
+            # P1-1 fix (adversarial review): the EMBED set is uncapped —
+            # publish_rows needs every row; the detection cap lives in the
+            # consumer. Only the phase wall-clock stops submissions here.
+            # P1-2 fix: a failed item keeps its POSITION (yielded as None and
+            # the stream ends) so the consumer's landed prefix can never
+            # misalign segments with vectors.
+            phase_started = time.monotonic()
+            try:
+                stop = False
+                for start in range(0, len(ranked_segments), SEMANTIC_STREAM_BATCH_ROWS):
+                    if stop or time.monotonic() - phase_started > SEMANTIC_EMBED_PHASE_TIMEOUT_MS / 1000.0:
+                        break  # phase cap: stop submitting, tail is lowest-value
+                    batch = ranked_segments[start:start + SEMANTIC_STREAM_BATCH_ROWS]
+                    results = embedder.embed_texts([seg.text for seg in batch], prefix=EMBED_PREFIX_STS)
+                    pairs: list[tuple[Any, Any]] = []
+                    for seg, result in zip(batch, results):
+                        if not result.embedding:
+                            # A failed item ends the stream AT its position;
+                            # publishing the prefix stays aligned, the rest
+                            # waits for the backfill.
+                            out.put(pairs)
+                            out.put([(seg, None)])
+                            stop = True
+                            break
+                        pairs.append((seg, [float(x) for x in result.embedding]))
+                    if stop:
+                        break
+                    out.put(pairs)
+            except Exception:
+                pass  # degraded embedder: short stream, memory stays pending
+            finally:
+                out.put(DONE)
+
+        threading.Thread(
+            target=produce, name="mema-stream-embed", daemon=True,
+        ).start()
+        while True:
+            item = out.get()
+            if item is DONE:
+                return
+            yield from item
+
+    def index_rows_in_job(self, memory_id: int, snapshot: dict[str, Any]) -> dict[str, Any]:
+        """C2 (0.17.0 worker merge): the job's index-only form.
+
+        Segment + batch-embed + publish rows — the indexing duty that used to
+        live on the local-text index worker. Reached for index_only snapshots
+        (conflict-apply edits §15.3, replay postprocess) and for every job
+        when semantic_conflict_on_write="off". Idempotent: current rows for
+        the version win, nothing re-embeds.
+        """
+        from ..constants import SEMANTIC_EMBED_PHASE_TIMEOUT_MS
+
         record = self.db.get_memory(int(memory_id))
         if record and record.get("status") == "pending":
-            # A pending (workspace-activation) memory is not an incomplete
-            # check: the conflict job is simply skipped until activation,
-            # matching the "skipped" semantics used by index_memory above.
-            return {"status": "skipped", "reason": "pending_workspace_activation", "notices_created": 0}
-        if not record or record.get("status") != "active":
-            return {"status": "incomplete", "reason": "memory_not_active", "notices_created": 0}
-        if int(record.get("version") or 1) != int(snapshot.get("version") or 1):
-            return {"status": "incomplete", "reason": "stale_snapshot", "notices_created": 0}
+            return {"status": "skipped", "reason": "pending_workspace_activation",
+                    "index_only": True, "notices_created": 0}
+        # 0.17.0 修复（owner 2026-09-25 拍板，C6「非 deleted 保全」口径）：重建
+        # 选集含全部非 deleted 状态（active/retired/superseded/expired），而本路径
+        # 此前对非 active 一律 memory_not_active 拒绝 → 非活跃记忆的 pending 永远
+        # 清不空 → 空间翻转永不触发 → 向量通道锁死（真库实测 106 superseded +
+        # 117 retired 卡死翻转）。放行全部非 deleted；检测仍只对 active（上方
+        # pending-activation skip 不变）。
+        status_now = str((record or {}).get("status") or "")
+        if not record or status_now == "deleted":
+            return {"status": "incomplete", "reason": "memory_not_active",
+                    "index_only": True, "notices_created": 0}
+        version = int(record.get("version") or 1)
+        if version != int(snapshot.get("version") or 1):
+            return {"status": "incomplete", "reason": "stale_snapshot",
+                    "index_only": True, "notices_created": 0}
         content = str(record.get("content") or "")
-        # 0.16.12 P2-T2: the row's content_sha column IS sha256(content) (set
-        # at insert, recomputed on every content edit) — compare against it
-        # instead of re-hashing the content again (legacy NULL falls back).
-        row_sha = str(record.get("content_sha") or "")
-        if not row_sha:
-            row_sha = hashlib.sha256(content.encode()).hexdigest()
-        if row_sha != snapshot.get("content_hash"):
-            return {"status": "incomplete", "reason": "stale_snapshot", "notices_created": 0}
-        # 0.16.12 P2-T6: the whole job body runs on ONE read-only connection
-        # under an explicit read transaction — per-unit evidence_knn, per-pair
-        # exists/closed probes and the peer prefetch all reuse it instead of
-        # opening one connection each. The BEGIN gives the job a single WAL
-        # snapshot (the old open-per-read behaviour saw a different
-        # point-in-time on every read); the job's own notice writes keep their
-        # own per-notice write transactions and never touch this connection.
-        with self.db.connection() as job_conn:
-            job_conn.execute("BEGIN")
-            job_started = time.monotonic()
-            try:
-                result = self._process_conflicts_job(
-                    memory_id, snapshot, record, job_conn, content, row_sha,
-                )
-            finally:
-                try:
-                    job_conn.rollback()
-                except sqlite3.Error:
-                    pass
-        # 0.16.12 eval contract: ACTUAL job execution time (embedding +
-        # KNN candidate collection + Qwen pairs + notice writes), excluding
-        # the caller's notice_sync_wait window — additive receipt key so the
-        # harness can report processing cost without the wait-window noise.
-        result["elapsed_ms"] = round((time.monotonic() - job_started) * 1000, 1)
-        return result
-
-    def _process_conflicts_job(
-        self, memory_id: int, snapshot: dict[str, Any],
-        record: dict[str, Any], job_conn: "sqlite3.Connection",
-        content: str, row_sha: str,
-    ) -> dict[str, Any]:
-        embedder, _ = self._ensure_active_embedder()
+        row_sha = str(record.get("content_sha") or "") or evidence_content_hash(content)
+        # _ensure_embedder (NOT the space-gated _ensure_active_embedder): a
+        # mismatch rebuild drives this path precisely to WRITE into the new
+        # space — the gate would return None and deadlock the flip.
+        embedder, _ = self._ensure_embedder()
         if embedder is None:
-            return {"status": "incomplete", "reason": "embedder_unavailable", "notices_created": 0}
-        if self.db.get_vec_index_state().get("state") in {"mismatch", "failed"}:
-            return {
-                "status": "incomplete",
-                "reason": "embedding_space_rebuild_required",
-                "notices_created": 0,
-            }
-        # Spec §5/§15.3: while a conflict group is applying, versions produced
-        # by its apply plan must not re-notify THE SAME conflict. Suppression is
-        # therefore slot-scoped and applied only after the gate resolves the
-        # candidate's slot_key, so a genuinely different conflict between the
-        # same two memories is still examined and surfaced. Validation is
-        # server-side against the live conflict rows; the trusted context only
-        # names which row to revalidate.
-        applying_slots: set[str] = set()
-        applying_groups: list[dict[str, Any]] = []
-        trusted = TrustedApplyingContext.from_dict(snapshot.get("trusted_applying_context"))
-        if trusted is not None:
-            live = self.db.get_conflict(trusted.conflict_id)
-            if live is not None and live.get("status") == "applying":
-                plan = (live.get("apply_summary") or {}).get("plan") or []
-                plan_ids = {int(item.get("memory_id") or 0) for item in plan}
-                trusted_memory = trusted.memory_id
-                trusted_revision = trusted.revision
-                trusted_action = trusted.action
-                # Spec §15.3 preconditions: applying status, exact revision,
-                # target in the plan, and the exact action from that plan step.
-                revision_ok = (
-                    trusted_revision is not None
-                    and int(trusted_revision) == int(live.get("revision") or 0)
-                )
-                step = next(
-                    (item for item in plan if int(item.get("memory_id") or 0) == trusted_memory),
-                    None,
-                )
-                action_ok = (
-                    bool(trusted_action)
-                    and step is not None
-                    and str(step.get("action") or "") == trusted_action
-                )
-                target_ok = trusted_memory in plan_ids
-                if revision_ok and action_ok and target_ok:
-                    applying_groups.append(live)
-        applying_groups.extend(
-            group for group in self.db.list_open_conflicts_for_memory_ids(
-                [int(memory_id)], include_applying=True,
-            ) if group.get("status") == "applying"
+            return {"status": "incomplete", "reason": "embedder_unavailable",
+                    "index_only": True, "notices_created": 0}
+        vec_state = self.db.get_vec_index_state()
+        if vec_state.get("state") == "failed" or (
+            vec_state.get("state") == "mismatch"
+            and vec_state.get("target_space_id") != embedder.embedding_space_id
+        ):
+            return {"status": "incomplete", "reason": "embedding_space_rebuild_required",
+                    "index_only": True, "notices_created": 0}
+        if vec_state.get("state") in {"mismatch", "failed"}:
+            # C2: a mismatch rebuild drives EVERY index_only job through this
+            # path — existing rows live in the OLD space, so "already current"
+            # would strand the flip. Republish unconditionally; the heal at
+            # the tail settles ready once the whole index is in the target
+            # space. (The mismatch guard for ordinary detection jobs lives in
+            # _conflicts_deterministic_collect.)
+            pass
+        elif self.db.evidence.current_row_vectors(int(memory_id), version, row_sha):
+            return {"status": "indexed", "reason": "already_current",
+                    "index_only": True, "notices_created": 0}
+        from ..rowseg import segment_rows
+        phase_started = time.monotonic()
+        segments = segment_rows(str(record.get("subject") or ""), content)
+        # B3：index-only 路径同样豁免超长表格段（与检测相共用 helper）——
+        # on_write=off / replay postprocess / conflict-apply edits 不得成为
+        # 巨表嵌入的后门。
+        segments, _exempted = _filter_exempted_segments(segments)
+        if not segments:
+            # 全豁免形态（空 subject + 全表 >100 行）：不 publish——与
+            # index_memory 的 A3 守卫同款。publish_rows([],[]) 会把记忆留在
+            # missing_row_vector_rows 选集（NOT EXISTS 谓词永真）且绕过
+            # already_current 早退，此后的每个 index_only job 都重复一次
+            # 空 publish 事务；回执照实报 skipped、豁免可见。
+            return {"status": "skipped", "reason": "all_rows_exempted",
+                    "index_only": True, "notices_created": 0,
+                    "table_rows_exempted": int(_exempted)}
+        results = embedder.embed_texts([segment.text for segment in segments], prefix=EMBED_PREFIX_STS)
+        if time.monotonic() - phase_started > SEMANTIC_EMBED_PHASE_TIMEOUT_MS / 1000.0:
+            # The llama call itself cannot be interrupted mid-flight; the cap
+            # marks the job incomplete (retry) and keeps the stall observable
+            # instead of silently treating a wedged embedder as success.
+            return {"status": "incomplete", "reason": "embed_phase_timeout",
+                    "index_only": True, "notices_created": 0}
+        vectors: list[list[float]] = []
+        for embed_result in results:
+            if not embed_result.embedding:
+                return {"status": "incomplete", "reason": "empty_embedding",
+                        "index_only": True, "notices_created": 0}
+            vectors.append([float(x) for x in embed_result.embedding])
+        published = self.db.evidence.publish_rows(
+            int(memory_id), version, row_sha, segments, vectors,
         )
-        for group in applying_groups:
-            if group.get("slot_key"):
-                applying_slots.add(json.dumps(
-                    group["slot_key"], ensure_ascii=False, sort_keys=True, separators=(",", ":"),
-                ))
-        min_budget = SEMANTIC_MIN_PAIR_BUDGET_MS / 1000.0
-        # Behaviour change (v3 hardening): each degradation reason is counted
-        # at most once per task. The pair loop can hit the same technical
-        # failure for many pairs, and counting every hit made
-        # _check_degradation_count grow with pair count rather than with
-        # distinct failure modes. reasons_seen keeps the per-task list that
-        # _check_degradation_reason (last write wins) would otherwise lose.
-        degradation_reasons: set[str] = set()
-        reasons_seen: list[str] = []
-
-        def record_degradation(reason: str, sample: str | None = None) -> None:
-            if reason in degradation_reasons:
-                return
-            degradation_reasons.add(reason)
-            reasons_seen.append(reason)
-            self._tools._record_check_degradation(reason, sample)
-
-        def backlog_deadline() -> float | None:
-            value = self._semantic_worker.pending_job_deadline(
-                SEMANTIC_JOB_TIMEOUT_MS / 1000.0,
-            )
-            return float(value) if value is not None else None
-
-        max_units = max(1, SEMANTIC_MAX_EVIDENCE_UNITS)
-        workspace = (
-            record.get("workspace_canonical") or record.get("workspace")
-            if self.settings.isolation == "strict" else None
-        )
-        by_peer: dict[int, tuple[dict[str, Any], Any, Any]] = {}
-        # P2-T2: same digest as the stale check above — the maintained
-        # content_sha column (or its recompute fallback), never a fresh hash.
-        content_hash = row_sha
-        unit_vectors = self.db.evidence.current_text_vectors(
-            int(memory_id), int(record.get("version") or 1), content_hash,
-        )
-        if not unit_vectors:
-            # Recovery fallback for an incomplete/legacy evidence publish. The
-            # normal write path has just published these vectors, so avoid a
-            # second GGUF embedding pass in the common synchronous-notice path.
-            unit_vectors = []
-            for unit in local_text_units(str(record.get("subject") or ""), content):
-                if unit.kind != "text":
-                    continue
-                embedded = embedder.embed_text(prefix="", body=unit.text)
-                if embedded.embedding:
-                    unit_vectors.append((unit, list(embedded.embedding)))
-        # 0.16.0 E10① (§6⑳): same-memory internal examination comes FIRST —
-        # units are in hand (no KNN), the rule is deterministic, and the
-        # finding lands in the dedicated internal_conflicts structure (the
-        # conflicts table's pair invariants reject a single memory@version
-        # twice). It consumes no Qwen budget; the cross-memory loop below is
-        # untouched in shape, and a truncated cross loop still reports the
-        # internal findings already landed this run.
-        # 0.16.2 (owner, unified flow): the internal check uses the SAME
-        # filter-plus-slot-extraction logic as the cross-memory route. A
-        # contradiction a reader would flag in one document must not become
-        # invisible just because it was written inside ONE memory.
-        # 0.16.4 §0.5/§2: the whole filter sequence is ONE shared gate —
-        # internal_pair_admission (scan_pipeline) — called identically by
-        # the scan side; the callers differ only in what an admitted pair
-        # means. Here: EVERY admitted shape (check AND notify) collects for
-        # the Qwen final review — a real in-memory self-contradiction has a
-        # recognition duty, and Qwen's verdict is the triple
-        # ready→pending+attribution / definitive negative→dismissed veto /
-        # technical failure→pending unannotated (fail-open).
-        internal_found = 0
-        internal_version = int(record.get("version") or 1)
-        text_units = [unit for unit, _embedding in unit_vectors]
-        from ..scan_pipeline import internal_pair_admission
-
-        internal_qwen_pairs: list[tuple[Any, Any, Any]] = []
-        for i in range(len(text_units)):
-            for j in range(i + 1, len(text_units)):
-                unit_a, unit_b = text_units[i], text_units[j]
-                internal_decision = decide_evidence(unit_a.text, unit_b.text)
-                admitted = internal_pair_admission(
-                    unit_a.text, unit_b.text,
-                    (unit_a.start_offset, unit_a.end_offset),
-                    (unit_b.start_offset, unit_b.end_offset),
-                    internal_decision,
-                    exists_probe=lambda: self.db.internal_conflicts.exists_on_conn(
-                        job_conn, int(memory_id), internal_version,
-                        unit_a.unit_index, unit_b.unit_index,
-                    ),
-                )
-                if not admitted:
-                    continue
-                internal_qwen_pairs.append((unit_a, unit_b, internal_decision))
-        units_examined = 0
-        # 0.16.2 write-time pre-gates (owner, data-driven): two deterministic
-        # filters run in the KNN collection loop, BEFORE the per-peer dedup —
-        # a cleared representative would otherwise burn a peer slot that a
-        # kept hit of the same peer could have taken (live-library
-        # simulation: 86 slots recoverable).
-        # Gate 0 (0.16.4 §1, evolution domain): cross-memory notify shapes
-        # die above, before all of the following — timeline phenomena are
-        # not conflicts.
-        # Gate 1 (provenance, zero loss): a notice needs BOTH sides' entity
-        # AND scope metadata present and equal (the post-Qwen slot builder
-        # drops anything else with slot_provenance_insufficient) — skipping
-        # early saves the two Qwen inferences per pair. Cheapest and biggest
-        # kill (~95% of representatives), so it runs FIRST.
-        # Gate 2 (difference classifier): no extractable value difference
-        # means the pair can never satisfy Qwen's same-attribute-different-
-        # value gate.
-        provenance_filtered = 0
-        no_difference_filtered = 0
-        raw_own_meta = record.get("metadata")
-        own_metadata = raw_own_meta if isinstance(raw_own_meta, dict) else {}
-        own_entity = str(own_metadata.get("entity") or "").strip()
-        own_scope = str(own_metadata.get("scope") or "").strip()
-        # Spec §15.5: a bounded check that ran out of budget must not later
-        # claim checked_no_notice. The two truncation causes report
-        # distinctly (2026-09-10 #957/#959 diagnosis: the shared string cost
-        # an extra investigation round): the per-memory evidence-unit cap is
-        # evidence_units_capped; the fair job deadline stays
-        # notice_budget_exhausted. The cap is checked first so a state where
-        # both hold attributes to the more specific cause.
-        truncation_reason: str | None = None
-        for unit, embedding in unit_vectors:
-            active_deadline = backlog_deadline()
-            if units_examined >= max_units:
-                truncation_reason = "evidence_units_capped"
-                break
-            if active_deadline is not None and time.monotonic() >= active_deadline:
-                truncation_reason = "notice_budget_exhausted"
-                break
-            units_examined += 1
-            for hit in self.db.evidence_knn(
-                embedding, k=5, workspace=workspace,
-                exclude_memory_id=memory_id, conn=job_conn,
+        if published.get("published"):
+            # C2: the space-rebuild self-heal moved with the indexing duty —
+            # once every non-deleted memory has rows in the target space, the
+            # vec channel flips back to ready (spec §19).
+            vec_state = self.db.get_vec_index_state()
+            if (
+                vec_state.get("state") == "mismatch"
+                and vec_state.get("target_space_id") == embedder.embedding_space_id
             ):
-                if hit.get("kind") != "text":
-                    continue
-                decision = decide_evidence(unit.text, str(hit.get("text") or ""))
-                if decision.action == "ignore":
-                    continue
-                # 0.16.4 §1: cross-memory evolution domain — the earliest
-                # kill. It happens BEFORE the provenance gate, so a notify
-                # shape never consumes provenance/classifier work, a peer
-                # slot, a sort position, or Qwen budget. Same predicate as
-                # the scan side (§0.5 single implementation).
-                if is_cross_evolution(decision):
-                    continue
-                peer_id = int(hit["memory_id"])
-                raw_hit_meta = hit.get("metadata")
-                if isinstance(raw_hit_meta, str) and raw_hit_meta:
-                    try:
-                        raw_hit_meta = json.loads(raw_hit_meta)
-                    except (TypeError, ValueError):
-                        raw_hit_meta = {}
-                hit_metadata = raw_hit_meta if isinstance(raw_hit_meta, dict) else {}
-                hit_entity = str(hit_metadata.get("entity") or "").strip()
-                hit_scope = str(hit_metadata.get("scope") or "").strip()
-                if not (
-                    own_entity and hit_entity and own_entity == hit_entity
-                    and own_scope and hit_scope and own_scope == hit_scope
-                ):
-                    provenance_filtered += 1
-                    continue
-                if classify_pair(
-                    unit.text, str(hit.get("text") or ""), route=str(decision.reason or ""),
-                ) == "clear":
-                    no_difference_filtered += 1
-                    continue
-                existing = by_peer.get(peer_id)
-                closer = existing is not None and float(hit.get("distance") or 9) < float(existing[0].get("distance") or 9)
-                # 0.16.4 §1: only check shapes reach here now, so the
-                # notify-priority protection lost its subject — the closer
-                # neighbour of the same peer wins outright.
-                if existing is None or closer:
-                    by_peer[peer_id] = (hit, unit, decision)
-        if truncation_reason:
-            # E10① order guarantee: internal findings land BEFORE the cross
-            # loop and survive its truncation. The internal Qwen pass has not
-            # run yet at this point (it needs the backend fetched below), so
-            # the collected keepers land unannotated here — fail-open, never
-            # lost. (Adversarial self-review: without this, an evidence-unit
-            # cap or budget exhaustion mid-collection silently dropped every
-            # internal keep pair of this run.)
-            for unit_a, unit_b, internal_decision in internal_qwen_pairs:
-                if self.db.internal_conflicts.create(
-                    memory_id=int(memory_id), memory_version=internal_version,
-                    unit_a=unit_a.unit_index, unit_b=unit_b.unit_index,
-                    quote_a=unit_a.text, quote_b=unit_b.text,
-                    span_a=[unit_a.start_offset, unit_a.end_offset],
-                    span_b=[unit_b.start_offset, unit_b.end_offset],
-                    reason=str(internal_decision.reason or ""),
-                    detector_version=CONFLICT_DETECTOR_VERSION,
-                ):
-                    internal_found += 1
-            record_degradation(truncation_reason)
-            early_result: dict[str, Any] = {
-                "status": "incomplete", "reason": truncation_reason,
-                "notices_created": 0, "reasons_seen": reasons_seen,
-                # Internal-truncation exits before the cross-memory loop even
-                # starts, so no pairs were examined yet (counter not yet live).
-                "pairs_examined": 0,
-            }
-            if internal_found:
-                early_result["internal_conflicts"] = internal_found
-            return early_result
+                self.db.maybe_complete_space_rebuild(embedder.embedding_space_id)
+            receipt = {"status": "indexed", "index_only": True,
+                       "row_count": int(published.get("row_count") or len(segments)),
+                       "notices_created": 0}
+            if _exempted:
+                # B3：豁免可见不静默（index-only 路径与检测相同口径）
+                receipt["table_rows_exempted"] = int(_exempted)
+            return receipt
+        return {"status": "incomplete", "reason": f"publish_{published.get('outcome')}",
+                "index_only": True, "notices_created": 0}
 
-        backend = self._ensure_semantic_backend()
-        # C4 soft ordering (⑦ 定案): rank same-level pairs by subject+tags
-        # overlap before distance — the Qwen budget should spend on pairs the
-        # owner's signals (subject/tag) already flag as related. Zero-overlap
-        # pairs are only ordered later, never excluded. (0.16.4 §1: the
-        # notify-first key lost its subject — only check shapes remain.)
-        from ..semantic_conflict import vector_cosine
-
-        hint_vectors = self.db.memories.subject_tags_vectors(
-            [memory_id, *[peer_id for peer_id in by_peer]],
-        )
-        own_vector = hint_vectors.get(int(memory_id))
-        if own_vector is None:
-            overlap_rank = {peer_id: 0.0 for peer_id in by_peer}
-        else:
-            overlap_rank = {
-                peer_id: vector_cosine(own_vector, hint_vectors.get(peer_id))
-                for peer_id in by_peer
-            }
-        ordered = sorted(
-            by_peer.items(),
-            key=lambda item: (
-                -overlap_rank.get(item[0], 0.0),
-                float(item[1][0].get("distance") or 9),
-            ),
-        )
-        # 0.15.14 (A5): the former surfaced>=max_notice_pairs early stop is
-        # gone — notices are recorded per-pair inside the loop (write-on-
-        # discovery), so an early stop only saved Qwen time, which the
-        # examined-pairs cap now bounds deterministically. The check examines
-        # up to SEMANTIC_MAX_EXAMINED_PAIRS pairs (fair deadline first, cap
-        # second) and surfaces every notice it finds; the notice count is
-        # therefore bounded by the pairs cap.
-        max_examined_pairs = max(1, SEMANTIC_MAX_EXAMINED_PAIRS)
-        pairs_examined = 0
-        surfaced = 0
-        incomplete_reason: str | None = None
-
-        def envelope(memory: dict[str, Any], quote: str) -> dict[str, Any]:
-            metadata_value = memory.get("metadata")
-            metadata = metadata_value if isinstance(metadata_value, dict) else {}
-            return {
-                "quote": quote[:1000], "subject": str(memory.get("subject") or "")[:200],
-                "tags": list(memory.get("tags") or [])[:20],
-                "workspace_canonical": memory.get("workspace_canonical") or memory.get("workspace"),
-                "memory_id": int(memory.get("id") or 0), "version": int(memory.get("version") or 1),
-                "event_time": memory.get("event_time"),
-                "metadata": {key: metadata.get(key) for key in ("entity", "scope") if metadata.get(key)},
-            }
-
-        def classify(left_env: dict[str, Any], right_env: dict[str, Any]) -> Any:
-            if backend is None:
-                # The per-pair guard below never lets a None reach the call;
-                # keep the narrowed local so the closure type-checks.
-                raise RuntimeError("semantic backend unavailable mid-pair")
-            try:
-                # Once a pair starts, only the inference hard timeout may stop
-                # it. The job budget is a fairness gate between pairs; the
-                # retry gate (A6) is the same fairness idea one level down:
-                # with another job queued, a protocol-invalid output fails
-                # fast instead of doubling its own latency.
-                return backend.classify_pair(
-                    left_env, right_env, deadline_monotonic=None,
-                    retry_allowed=not self._semantic_worker.has_pending_jobs(),
-                )
-            except TypeError:
-                # Test/legacy backends implementing the original two-arg protocol.
-                return backend.classify_pair(left_env, right_env)
-
-        # 0.16.2 unified flow: internal check-keepers go through the SAME Qwen
-        # slot extraction as cross-memory pairs, BEFORE the cross loop (E10①
-        # order guarantee: internal findings land first and survive a
-        # truncated cross loop). Shared pairs_examined budget and deadline —
-        # internal keepers are naturally few (filter-calibrated). Verdicts:
-        #   notice_ready  → land pending, reason annotated with the extracted
-        #                    attribute/values
-        #   definitive negative (not the same attribute with different
-        #   values, unknown_field) → land DISMISSED — the veto must outlive
-        #   the write or the scan-side re-examination would resurrect the pair
-        #   (internal_conflicts.exists() blocks any-status-non-stale rows)
-        #   technical failure / no backend → land pending unannotated
-        #   (fail-open: an advisory rule signal must not be lost to an
-        #   unavailable model)
-        internal_qwen_confirmed = 0
-        internal_qwen_vetoed = 0
-        for unit_a, unit_b, internal_decision in internal_qwen_pairs:
-            reason_text = str(internal_decision.reason or "")
-            if backend is not None:
-                active_deadline = backlog_deadline()
-                budget_ok = not (
-                    active_deadline is not None
-                    and active_deadline - time.monotonic() < min_budget * 2
-                ) and pairs_examined < max_examined_pairs
-                if budget_ok:
-                    pairs_examined += 1
-                    env_a = envelope(record, unit_a.text)
-                    env_b = envelope(record, unit_b.text)
-                    if internal_decision.left_value and internal_decision.right_value:
-                        env_a["rule_value"] = internal_decision.left_value
-                        env_b["rule_value"] = internal_decision.right_value
-                    # Single-direction judging (owner 2026-09-17): all three
-                    # paths share the one-forward-extraction gate — the
-                    # bidirectional mirror was falsified on the eval line.
-                    forward = classify(env_a, env_b)
-                    gate = evaluate_single_direction_extraction(
-                        signal_extraction(forward), env_a, env_b,
-                    )
-                    if gate.state == "notice_ready":
-                        reason_text = (
-                            f"{reason_text} | qwen:{gate.attribute}="
-                            f"{gate.value_a}|{gate.value_b}"
-                        )
-                        internal_qwen_confirmed += 1
-                    else:
-                        technical = (
-                            (forward.error and "timeout" in str(forward.error).lower())
-                            or forward.candidate_type == "backend_unavailable"
-                            or forward.candidate_type == "backend_error"
-                            or forward.candidate_type in {"invalid_json", "invalid_schema"}
-                        )
-                        if not technical and gate.reason != "qwen_unverified":
-                            internal_qwen_vetoed += 1
-                            self.db.internal_conflicts.create(
-                                memory_id=int(memory_id), memory_version=internal_version,
-                                unit_a=unit_a.unit_index, unit_b=unit_b.unit_index,
-                                quote_a=unit_a.text, quote_b=unit_b.text,
-                                span_a=[unit_a.start_offset, unit_a.end_offset],
-                                span_b=[unit_b.start_offset, unit_b.end_offset],
-                                reason=reason_text, detector_version=CONFLICT_DETECTOR_VERSION,
-                                status="dismissed",
-                                decided_reason=f"qwen veto: {gate.reason}",
-                            )
-                            continue
-            if self.db.internal_conflicts.create(
-                memory_id=int(memory_id), memory_version=internal_version,
-                unit_a=unit_a.unit_index, unit_b=unit_b.unit_index,
-                quote_a=unit_a.text, quote_b=unit_b.text,
-                span_a=[unit_a.start_offset, unit_a.end_offset],
-                span_b=[unit_b.start_offset, unit_b.end_offset],
-                reason=reason_text, detector_version=CONFLICT_DETECTOR_VERSION,
-            ):
-                internal_found += 1
-
-        # P2-T6: batch-prefetch every candidate peer in ONE id-IN query
-        # instead of one get_memory connection per pair.
-        peer_rows = self.db.get_memories_by_ids(
-            [int(pid) for pid, _triple in ordered], conn=job_conn,
-        )
-        for peer_id, (hit, unit, decision) in ordered:
-            peer = peer_rows.get(int(peer_id))
-            if not peer or peer.get("status") != "active":
-                continue
-            record_row: dict[str, Any] = record or {}
-            peer_row: dict[str, Any] = peer or {}
-            left_version = int(record.get("version") or 1)
-            right_version = int(peer.get("version") or 1)
-            if self.db.semantic_notices.is_semantic_pair_closed_on_conn(
-                job_conn, memory_id, peer_id, left_version, right_version,
-            ):
-                continue
-            # Deterministic direct path (2026-09-16, owner-approved): same
-            # value-stripped key + canonical value difference IS the
-            # same-attribute-different-value shape — land the notice without
-            # spending Qwen, whose budget is reserved for pairs only
-            # judgment can settle. Runs BEFORE the backend/budget checks:
-            # a direct pair consumes no Qwen budget and works even while the
-            # backend is unavailable.
-            direct = direct_value_verdict(
-                unit.text, str(hit.get("text") or ""), decision, embedder=embedder,
-            )
-            if direct is not None:
-                gate = PairGateResult(
-                    "notice_ready", "deterministic_same_key_value_diff",
-                    direct[0], direct[1], direct[2], True,
-                )
-                qwen = {
-                    "status": "bypassed", "reason": gate.reason,
-                    "forward_type": "deterministic", "reverse_type": "deterministic",
-                }
-                forward_signal = None
-            else:
-                if backend is None:
-                    record_degradation("qwen_unavailable")
-                    incomplete_reason = "qwen_unavailable"
-                    continue
-                active_deadline = backlog_deadline()
-                if active_deadline is not None and active_deadline - time.monotonic() < min_budget * 2:
-                    record_degradation("qwen_budget_exhausted")
-                    incomplete_reason = "qwen_budget_exhausted"
-                    continue
-                # A5 deterministic cap: only pairs that actually reach Qwen count;
-                # skipped (closed/inactive) pairs never consume the budget.
-                if pairs_examined >= max_examined_pairs:
-                    record_degradation("pairs_examined_capped")
-                    incomplete_reason = "pairs_examined_capped"
-                    break
-                pairs_examined += 1
-                left_env = envelope(record_row, unit.text)
-                right_env = envelope(peer_row, str(hit.get("text") or ""))
-                # pair-v7: hand Qwen the rule layer's extracted value difference
-                # (numeric check route only) as a locating hint — see _pair_text.
-                if decision.left_value and decision.right_value:
-                    left_env["rule_value"] = decision.left_value
-                    right_env["rule_value"] = decision.right_value
-                started = time.monotonic()
-                # Single-direction gate (owner 2026-09-17): the reverse
-                # extraction was the side-attribution hedge the 0.5B needed;
-                # Qwen3-0.6B doesn't commit that error and the bidirectional
-                # cross-mapping kept killing real conflicts at reverse
-                # attribute drift (eval: 9/12 bidirectional vs 11/12 single,
-                # hard false positives 0/43 on the product chain). One clean
-                # extraction + grounding + veto lands the notice; scan and
-                # internal-conflict paths keep the bidirectional gate.
-                forward_signal = classify(left_env, right_env)
-                reverse_signal = None
-                self._tools._record_pair_sample(
-                    pair_ms=int((time.monotonic() - started) * 1000),
-                    forward=forward_signal,
-                    reverse=None,
-                )
-                gate = evaluate_single_direction_extraction(
-                    signal_extraction(forward_signal), left_env, right_env,
-                )
-                qwen = {
-                    "status": gate.state, "reason": gate.reason,
-                    "forward_type": forward_signal.candidate_type,
-                    "reverse_type": "single_direction",
-                }
-            if gate.state != "notice_ready":
-                signals = tuple(
-                    signal for signal in (forward_signal, reverse_signal) if signal is not None
-                )
-                if any(signal.error and "timeout" in str(signal.error).lower() for signal in signals):
-                    reason = "qwen_timeout"
-                elif any(signal.candidate_type == "backend_unavailable" for signal in signals):
-                    reason = "qwen_unavailable"
-                elif any(signal.candidate_type == "backend_error" for signal in signals):
-                    reason = "qwen_backend_error"
-                elif any(signal.candidate_type in {"invalid_json", "invalid_schema"} for signal in signals):
-                    reason = "qwen_invalid_output"
-                elif any(signal.candidate_type == "unknown_field" for signal in signals):
-                    # The model explicitly reported an unextractable field: a
-                    # completed negative decision (fail-closed for notice), not
-                    # a technical failure (spec §8 diagnostics distinction).
-                    continue
-                else:
-                    reason = gate.reason
-                if reason == "qwen_unverified":
-                    # Grounding failed: uncertain — fail-closed for notices and
-                    # the pair remains a scan review candidate.
-                    record_degradation(reason)
-                    incomplete_reason = reason
-                    continue
-                if reason in _TECHNICAL_REASONS:
-                    sample = None
-                    if reason == "qwen_invalid_output":
-                        # Preserve the offending raw output so the failure mode
-                        # (truncation / prose / malformed) is visible in status.
-                        sample = next(
-                            (
-                                str(signal.raw) for signal in signals
-                                if signal.candidate_type in {"invalid_json", "invalid_schema"} and signal.raw
-                            ),
-                            None,
-                        )
-                    record_degradation(reason, sample)
-                    incomplete_reason = reason
-                    continue
-                # Definitive strict-gate negatives (not_same_attribute_different_value,
-                # coexist_*, direction_invalid, bidirectional_*): the pair was
-                # examined and decided. The check stays complete and no
-                # degradation counter fires (spec §9/§15.5/§8).
-                continue
-            raw_meta = record_row.get("metadata")
-            metadata = raw_meta if isinstance(raw_meta, dict) else {}
-            raw_peer_meta = peer_row.get("metadata")
-            peer_metadata = raw_peer_meta if isinstance(raw_peer_meta, dict) else {}
-            entity = metadata.get("entity") if metadata.get("entity") == peer_metadata.get("entity") else None
-            scope = metadata.get("scope") if metadata.get("scope") == peer_metadata.get("scope") else None
-            if not entity or not scope:
-                incomplete_reason = "slot_provenance_insufficient"
-                continue
-            # B-C4: slot keys are built with canonicalised entity/scope (the
-            # comparison-side counterpart of the storage-side canon in
-            # db/conflicts.py _normalize_slot) so lexical variants like
-            # "MyProject"/"myproject" address the same slot.
-            slot_key = {
-                "entity": canon_entity(entity), "attribute": gate.attribute,
-                "scope": canon_scope(scope),
-            }
-            slot_json = json.dumps(slot_key, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-            raw_slot_json = json.dumps(
-                {"entity": entity, "attribute": gate.attribute, "scope": scope},
-                ensure_ascii=False, sort_keys=True, separators=(",", ":"),
-            )
-            if slot_json in applying_slots or raw_slot_json in applying_slots:
-                # Suppression matches either form: conflict groups stored before
-                # storage-side canonicalisation may still carry the raw
-                # (unnormalised) slot_key. A third-party fact landing on a slot
-                # currently under application: scan review only (spec §15.3),
-                # no new notice.
-                continue
-            member_versions = [
-                {"memory_id": memory_id, "version": left_version, "value": gate.value_a,
-                 "evidence": {"quote": unit.text, "start": unit.start_offset, "end": unit.end_offset}},
-                {"memory_id": peer_id, "version": right_version, "value": gate.value_b,
-                 "evidence": {"quote": hit.get("text"), "start": hit.get("start_offset"), "end": hit.get("end_offset")}},
-            ]
-            # Model output may omit keys (or parsed may not be a dict at all):
-            # fall back to the gate's normalised value instead of raising
-            # KeyError (mirrors the scan-path defence in tools.py).
-            forward_parsed = (
-                forward_signal.parsed
-                if forward_signal is not None and isinstance(forward_signal.parsed, dict)
-                else {}
-            )
-            value_groups = [
-                {"normalized_value": gate.value_a, "display_value": forward_parsed.get("value_a") or gate.value_a,
-                 "members": [f"{memory_id}@{left_version}"]},
-                {"normalized_value": gate.value_b, "display_value": forward_parsed.get("value_b") or gate.value_b,
-                 "members": [f"{peer_id}@{right_version}"]},
-            ]
-            outcome = self.db.record_semantic_notice(
-                memory_id=memory_id, peer_id=peer_id,
-                # 0.16.4 §1: cross-memory notify is excluded at collection,
-                # so the write-time notice severity is uniformly normal.
-                severity="normal",
-                notice_type="semantic_evidence",
-                title=f"Possible memory change with #{peer_id}", message=decision.reason,
-                payload={
-                    "route": "notice_ready", "reason": gate.reason,
-                    "prompt_version": PAIR_PROMPT_VERSION,
-                    "anchors": decision.anchors,
-                    "slot_key": slot_key,
-                    "slot_provenance": {
-                        "entity": "metadata", "scope": "metadata",
-                        "attribute": (
-                            "deterministic_skeleton" if direct is not None
-                            else "single_direction_extraction"
-                        ),
-                    },
-                    "member_versions": member_versions,
-                    "value_groups": value_groups,
-                    "candidate_key": {
-                        "detector_version": CONFLICT_DETECTOR_VERSION,
-                        "members": sorted([f"{memory_id}@{left_version}", f"{peer_id}@{right_version}"]),
-                        "evidence": [],
-                    },
-                    "left_evidence": {
-                        "text": unit.text, "start_offset": unit.start_offset,
-                        "end_offset": unit.end_offset,
-                    },
-                    "right_evidence": {
-                        "text": hit.get("text"), "start_offset": hit.get("start_offset"),
-                        "end_offset": hit.get("end_offset"),
-                    },
-                    "left_content_hash": evidence_content_hash(content),
-                    "right_content_hash": evidence_content_hash(str(peer.get("content") or "")),
-                    "qwen_signal": qwen,
-                },
-                dedupe_key=notice_dedupe_key(
-                    memory_id, peer_id, left_version, right_version, "semantic_evidence",
-                ),
-                left_version=left_version, right_version=right_version,
-                source="semantic_evidence",
-            )
-            # surfaced counts notices actually created (deduped pairs were
-            # already surfaced) — since A5 it is a result summary, not a gate.
-            if outcome.get("outcome") == "created":
-                surfaced += 1
-            elif outcome.get("outcome") not in {"deduped"}:
-                # Second-round review: a ready pair whose notice could not be
-                # persisted (workspace_mismatch / invalid_snapshot /
-                # unavailable / error) must not vanish silently — without this
-                # the run could report checked_no_notice while a real conflict
-                # was found and lost.
-                record_degradation("notice_write_failed")
-                incomplete_reason = "notice_write_failed"
-        if surfaced:
-            result: dict[str, Any] = {
-                "status": "completed", "outcome": "notices_created", "notices_created": surfaced,
-            }
-            if internal_found:
-                result["internal_conflicts"] = internal_found
-            if incomplete_reason:
-                # Notices went out, but later pairs hit a truncation/degradation
-                # — surface it instead of a bare completed (second-round
-                # review): the caller would otherwise read a bounded, partial
-                # check as a full one.
-                result["truncated"] = True
-        elif incomplete_reason:
-            result = {"status": "incomplete", "reason": incomplete_reason, "notices_created": 0}
-        else:
-            result = {"status": "completed", "outcome": "checked_no_notice", "notices_created": 0}
-        if internal_found and "internal_conflicts" not in result:
-            # Internal findings survive a truncated cross-memory loop: they
-            # were landed BEFORE the loop ran (E10① order guarantee).
-            result["internal_conflicts"] = internal_found
-        # 0.16.2 write-time pre-gate visibility (conditional — the unfiltered
-        # zero case keeps the exact-shape response contract unchanged):
-        # what the deterministic filters killed this run, and what the
-        # unified internal Qwen flow confirmed/vetoed.
-        filter_summary: dict[str, int] = {}
-        if provenance_filtered:
-            filter_summary["provenance_skipped"] = provenance_filtered
-        if no_difference_filtered:
-            filter_summary["no_difference_skipped"] = no_difference_filtered
-        if internal_qwen_confirmed:
-            filter_summary["internal_qwen_confirmed"] = internal_qwen_confirmed
-        if internal_qwen_vetoed:
-            filter_summary["internal_qwen_vetoed"] = internal_qwen_vetoed
-        if filter_summary:
-            result["deterministic_filter"] = filter_summary
-        if reasons_seen:
-            # Degradations may also occur on pairs before a later pair surfaces
-            # a notice, so the list is attached to completed outcomes too.
-            result["reasons_seen"] = reasons_seen
-        # 0.16.12 perf baseline: the examination budget actually consumed this
-        # run (additive receipt key; also visible on completed write receipts).
-        result["pairs_examined"] = int(pairs_examined)
-        return result

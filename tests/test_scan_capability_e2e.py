@@ -133,7 +133,7 @@ def _build_library(tools: MemoryTools) -> dict[str, Any]:
         subject="pg-misplaced", tags=["dbpgsql", "postgres"], metadata=dict(_PORT_META),
         workspace="apisvc",
     )["data"]
-    assert tools.wait_evidence_worker_drained(timeout=30)
+    assert tools.wait_semantic_worker_drained(timeout=30)
     return {"port_a": port_a, "port_b": port_b, "misplaced": misplaced}
 
 
@@ -297,6 +297,7 @@ def test_scan_capability_e2e_real_models(
     # read-time stale semantics carried over to the queue), the memory
     # participates in bucket B, and the anomaly check stays quiet about it.
     moved = tools.memory_govern("move_memories_workspace", {
+        "workspace": "default",
         "memory_ids": [misplaced_id], "new_workspace": "dbpgsql",
         "reason": "confirmed placement", "authorized": True,
     })

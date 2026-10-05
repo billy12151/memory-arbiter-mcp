@@ -10,12 +10,15 @@ from ..embedder import ManagedEmbedder
 
 from .. import workspace_rules
 from ..constants import (
+    EMBED_PREFIX_STS,
     WRITE_DUPLICATE_VEC_TOP_K,
-    WRITE_SIMILAR_CONTENT_COSINE,
+    WRITE_SIMILAR_CONTENT_FLOOR,
+    WRITE_SIMILAR_CONTENT_MIN,
+    WRITE_SIMILAR_SUBJECT_FLOOR,
+    WRITE_SIMILAR_SUBJECT_STRONG,
     WRITE_SIMILAR_FALLBACK_SCAN_LIMIT,
     WRITE_SIMILAR_MAX_HINTS,
     WRITE_SIMILAR_MIN_CONTENT_CHARS,
-    WRITE_SIMILAR_SUBJECT_RATIO,
     is_default_workspace_term,
 )
 from ..models import MemoryRecord, MemoryStatus
@@ -52,8 +55,6 @@ class WritePipeline:
     def _ensure_active_embedder(self) -> "tuple[ManagedEmbedder | None, list[str]]":
         return self._tools._ensure_active_embedder()
 
-    def _suggest_workspace_candidate(self, *args: Any, **kwargs: Any) -> Any:
-        return self._tools._suggest_workspace_candidate(*args, **kwargs)
 
     def current_agent_id(self) -> str | None:
         return self._tools.current_agent_id()
@@ -88,21 +89,57 @@ class WritePipeline:
         degrades to the fallback scan.
         """
         subject = str(getattr(record, "subject", None) or "").strip()
-        if not subject:
-            return []
+        # 0.17.0 P2-7: an EMPTY subject no longer disqualifies — the summary
+        # vector carries the body signal the subject gate never could.
+        from ..tools import MemoryTools
+
         embedder, _ = self._ensure_active_embedder()
         if embedder is not None and self.db.state.sqlite_vec_available:
             try:
-                er = embedder.embed_text(
-                    prefix="",
+                # Keep the subject_tags_vec publish (C4 conflict ordering and
+                # the fallback scan read it) — one extra embed per write.
+                er_subject = embedder.embed_text(
+                    prefix=EMBED_PREFIX_STS,
                     body=self._subject_tags_embed_text(
                         subject, getattr(record, "tags", None),
                     ),
                 )
+                if er_subject is not None and er_subject.embedding:
+                    self.db.upsert_subject_tags_vector(
+                        memory_id, [float(x) for x in er_subject.embedding],
+                    )
+                # P2-7: candidates recall on the SUMMARY vector — retitled
+                # near-duplicates stay reachable; content trigram owns the
+                # fine gate (the old subject-first recall killed them).
+                summary_text = MemoryTools._summary_embed_text(
+                    subject, getattr(record, "tags", None),
+                    str(getattr(record, "content", None) or ""),
+                )
+                er = embedder.embed_text(prefix=EMBED_PREFIX_STS, body=summary_text)
                 if er is not None and er.embedding:
                     vector = [float(x) for x in er.embedding]
-                    self.db.upsert_subject_tags_vector(memory_id, vector)
-                    rows = self.db.subject_tags_knn(
+                    # 校准轮：该向量即 refresh_summary_vector 稍后要写的同一条
+                    # ——就地 upsert（此时记忆行已 insert），refresh 侧做输入
+                    # 未变跳过，写路径 inline embed 从 3 次回 2 次。vec0 虚表
+                    # 无视一切 conflict 子句（同库 upsert_summary_vector 的
+                    # docstring：OR IGNORE 在 PK 冲突下也 raise），故 DELETE
+                    # +INSERT——INSERT OR REPLACE 只在「行必不存在」这一
+                    # 未声明前提下成立，一旦既有 id 重入（退休删行失败等）
+                    # 会被 except 吞掉并留下陈旧向量。
+                    try:
+                        import json as _json
+                        with self.db.write_transaction() as conn:
+                            conn.execute(
+                                "DELETE FROM memory_summary_vec WHERE id = ?",
+                                (int(memory_id),),
+                            )
+                            conn.execute(
+                                "INSERT INTO memory_summary_vec(id, embedding) VALUES (?, ?)",
+                                (int(memory_id), _json.dumps(vector)),
+                            )
+                    except Exception:
+                        pass
+                    rows = self.db.memory_summary_knn(
                         vector,
                         k=WRITE_DUPLICATE_VEC_TOP_K,
                         exclude_memory_id=memory_id,
@@ -139,7 +176,7 @@ class WritePipeline:
             if embedder is None or not self.db.state.sqlite_vec_available:
                 return False
             er = embedder.embed_text(
-                prefix="",
+                prefix=EMBED_PREFIX_STS,
                 body=self._subject_tags_embed_text(
                     record.get("subject"), record.get("tags"),
                 ),
@@ -172,7 +209,7 @@ class WritePipeline:
             from ..tools import MemoryTools
 
             er = embedder.embed_text(
-                prefix="",
+                prefix=EMBED_PREFIX_STS,
                 body=MemoryTools._summary_embed_text(
                     record.get("subject"), record.get("tags"), record.get("content"),
                 ),
@@ -194,12 +231,12 @@ class WritePipeline:
         same-workspace active rows over subject_tags_vec (fallback: capped
         legacy scan when no embedder/index is available). The fine-ranking
         then applies TWO gates, both deterministic and model-free:
-          1. normalized-subject ratio ≥ WRITE_SIMILAR_SUBJECT_RATIO;
+          1. 双轴 OR 校准门（0.17.0）：(subject≥0.45 且 content≥0.22) 或
+             (subject≥0.80 且 content≥0.15)；空 subject 纯内容门 ≥0.22；
           2. content confirmation — full-body char-trigram cosine
-             (semantic_conflict's own _char_ngrams/_cosine) ≥
-             WRITE_SIMILAR_CONTENT_COSINE. This replaced the tag-Jaccard
-             gate, which on the real library blocked cross-habit duplicate
-             rewrites while waving through same-subject serials.
+             (semantic_conflict's own _char_ngrams/_cosine)，0.17.0 校准轮
+             起并入双轴 OR 门（单轴 0.40 硬门退役：retitled 近重复 c∈
+             [0.17,0.40] 被结构性漏检，cand3 实测）。
         The old "near-identical subject ⇒ duplicate" assumption is dead:
         98% of subject-similar pairs on the production library are
         same-topic continuations with dissimilar bodies. Bodies under
@@ -214,8 +251,6 @@ class WritePipeline:
             return None
         try:
             subject = self._normalized_subject(str(record.subject or ""))
-            if not subject:
-                return None
             rows = self._duplicate_hint_candidate_rows(
                 int(memory_id), record, workspace_canonical,
             )
@@ -230,30 +265,43 @@ class WritePipeline:
             scored: list[tuple[float, float, bool, dict[str, Any]]] = []
             for row in rows:
                 row_subject = self._normalized_subject(str(row["subject"] or ""))
-                if not row_subject:
-                    continue
-                # Length gate: ratio() = 2*M/(len_a+len_b) with M bounded by
-                # the shorter subject, so when even a full subsequence match
-                # cannot clear the bar the SequenceMatcher run is skipped.
-                shorter = min(len(subject), len(row_subject))
-                if 2.0 * shorter < WRITE_SIMILAR_SUBJECT_RATIO * (len(subject) + len(row_subject)):
-                    continue
-                if row_subject != subject and self._DIGIT_RUN.sub("#", row_subject) == subject_series:
-                    # Series entries: identical modulo digit runs but not
-                    # exact duplicates — stay quiet.
-                    continue
-                ratio = difflib.SequenceMatcher(None, subject, row_subject).ratio()
-                if ratio < WRITE_SIMILAR_SUBJECT_RATIO:
-                    continue
                 row_content = str(row.get("content") or "")
+                # 0.17.0 P2-7: content trigram is the PRIMARY gate; the
+                # subject ratio only runs when BOTH subjects exist and the
+                # content overlap is below the high-similarity exemption
+                # (WRITE_SIMILAR_CONTENT_EXEMPT) — retitled/subject-less
+                # near-duplicates pass on body evidence alone.
                 if own_grams is None or len(row_content) < WRITE_SIMILAR_MIN_CONTENT_CHARS:
                     content_cos = -1.0
                     low_confidence = True
                 else:
                     content_cos = _cosine(own_grams, _char_ngrams(row_content))
-                    if content_cos < WRITE_SIMILAR_CONTENT_COSINE:
-                        continue
                     low_confidence = False
+                    # 0.17.0 校准轮：旧 0.40 单轴硬门退役——双轴 OR 门
+                    # （见下）承担全部准入，空 subject 走 FLOOR 地板。
+                ratio = -1.0
+                if subject and row_subject:
+                    # Series suppression keeps its meaning: identical modulo
+                    # digit runs but not exact — release/checklist series.
+                    if row_subject != subject and self._DIGIT_RUN.sub("#", row_subject) == subject_series:
+                        continue
+                    ratio = difflib.SequenceMatcher(None, subject, row_subject).ratio()
+                    if low_confidence:
+                        # 短文本旁路（旧行为）：方差太高只认强标题，低置信标记。
+                        if ratio < WRITE_SIMILAR_SUBJECT_STRONG:
+                            continue
+                    elif not (
+                        # 0.17.0 校准轮双轴 OR（constants 注释含分布证据）：
+                        # retitled 近重复两轴同降，AND 结构性漏检；样板互撞
+                        # c 高 s 极低被拦。
+                        (ratio >= WRITE_SIMILAR_SUBJECT_FLOOR and content_cos >= WRITE_SIMILAR_CONTENT_FLOOR)
+                        or (ratio >= WRITE_SIMILAR_SUBJECT_STRONG and content_cos >= WRITE_SIMILAR_CONTENT_MIN)
+                    ):
+                        continue
+                elif not low_confidence:
+                    # 空 subject 纯内容门（负例带 ≤0.16，地板同上）。
+                    if content_cos < WRITE_SIMILAR_CONTENT_FLOOR:
+                        continue
                 scored.append((ratio, content_cos, low_confidence, row))
             if not scored:
                 return None
@@ -289,7 +337,7 @@ class WritePipeline:
 
     def memory_write(self, **payload: Any) -> dict[str, Any]:
         payload = dict(payload)
-        validation = validate_product_payload("memory", "remember", payload)
+        validation = validate_product_payload("memory", "remember", payload, enforce_required=False)
         if validation.error is not None:
             error = dict(validation.error)
             if error.get("field") in {"content", "subject"} and str(error.get("reason") or "").startswith("is required"):
@@ -302,6 +350,9 @@ class WritePipeline:
                 {"written": False, "error": "isolation=strict requires a workspace on every write"},
                 ok=False,
             )
+        # 0.17.1：claims.required 门已随 claims 全退退役（检测通道+配置门+
+        # 数据层 DDL 连表删），
+        # 缺失不再教学/硬拒——评审 P1：灰度分支连同教学警告一并删除。
         # The validate_product_payload call above is the single validation
         # funnel: the MCP surface runs it before dispatch, and direct
         # memory_write callers (release smoke, tests) run it here — the
@@ -376,6 +427,9 @@ class WritePipeline:
             # From here the row (or its JSONL backup) is durable; nothing below
             # may turn this call into a failure response.
             insert_done = True
+            # Insert-side publish failure (insert_memory →
+            # publish_workspace_canonical_vector): the retry guidance must
+            # surface as pending_retry in the response.
             if any("workspace canonical vector publish failed" in warning for warning in write_warnings):
                 workspace["vector_publish_pending"] = True
             data: dict[str, Any] = {
@@ -438,8 +492,18 @@ class WritePipeline:
                     response.setdefault("notices", []).append(similar_notice)
                 # C3a summary vector: publish on the write path so the
                 # anomaly index tracks new rows without waiting for a
-                # restart backfill. Best-effort, fail-open.
-                self.refresh_summary_vector(int(memory_id))
+                # restart backfill. Best-effort, fail-open. 校准轮：候选段
+                # 已就地把同一条 summary 向量 upsert（同 record 同事务窗口），
+                # 存在即跳过——inline embed 计数回到基线 2 次。
+                try:
+                    with self.db.connection() as conn:
+                        already = conn.execute(
+                            "SELECT 1 FROM memory_summary_vec WHERE id=?", (int(memory_id),),
+                        ).fetchone()
+                except Exception:
+                    already = None
+                if already is None:
+                    self.refresh_summary_vector(int(memory_id))
             return response
         except Exception as exc:
             if insert_done:
@@ -468,7 +532,6 @@ class WritePipeline:
             "warnings": [],
             "decision": None,
             "decision_reason": None,
-            "candidate": None,
             "vector_publish_pending": False,
             "strict_block": False,
             "canonical_embedding": None,
@@ -479,13 +542,12 @@ class WritePipeline:
         result["warnings"].extend(warnings)
         # Resolution is read-only. Registration of only the final policy result
         # happens atomically in insert_memory.
-        resolved = self.db.resolve_workspace_canonical(raw, embedder, register_new=False)
+        resolved = self.db.resolve_workspace_canonical(raw, embedder)
         result.update({
             "canonical": resolved["canonical"],
             "is_new": bool(resolved["is_new"]),
             "matched_by": resolved["matched_by"],
             "similar": resolved.get("similar") or [],
-            "vector_publish_pending": bool(resolved.get("vector_publish_pending")),
         })
         candidate_embedding = resolved.get("candidate_embedding")
         if result["canonical"] == raw and candidate_embedding:
@@ -494,9 +556,10 @@ class WritePipeline:
         # Confirmed aliases short-circuit before embedding their canonical text.
         # Backfill a missing canonical vector once, outside the memory write
         # transaction; insert_memory publishes this prepared vector post-commit.
-        # Exact matches take the same repair path so the "retry a write using
-        # this workspace" guidance actually republishes a missing vector.
-        if result["matched_by"] in {"confirmed_alias", "exact"}:
+        # Exact matches and mechanical variants (same deterministic identity
+        # class) take the same repair path so the "retry a write using this
+        # workspace" guidance actually republishes a missing vector.
+        if result["matched_by"] in {"confirmed_alias", "exact", "mechanical_variant"}:
             result["canonical_embedding"] = (
                 self.db.workspaces.prepare_missing_workspace_canonical_embedding(
                     result["canonical"], embedder,
@@ -521,48 +584,13 @@ class WritePipeline:
             result["matched_by"] = "rule_keep"
             result["canonical_embedding"] = candidate_embedding
         elif rule["decision"] is None:
-            suggestion = self._suggest_workspace_candidate(raw, evidence, result["similar"])
-            result["candidate"] = suggestion
-            rejected = bool(
-                suggestion is not None and suggestion.candidate
-                and suggestion.candidate in (resolved.get("rejected_canonicals") or [])
+            # 0.17.1 (owner 拍板): the model suggester retired with the Qwen
+            # judge — unresolved normalization asks the caller (ASK), the
+            # human-in-the-loop design this path always fell back to.
+            result["decision"] = "ASK"
+            result["decision_reason"] = (
+                "no_similar_candidates" if not result["similar"] else "suggester_retired_ask"
             )
-            if (
-                suggestion is not None and suggestion.candidate
-                and suggestion.relation in {"alias", "typo", "same_project"}
-                and isolation in {"none", "weak"} and (suggestion.confidence or 0.0) >= 0.85
-                and not rejected
-            ):
-                result["canonical"] = suggestion.candidate
-                result["is_new"] = False
-                result["matched_by"] = "qwen"
-                result["decision"] = "AUTO"
-                result["decision_reason"] = "qwen_high_conf"
-                # The selected candidate already exists; never publish the raw
-                # query embedding under the chosen canonical.
-                result["canonical_embedding"] = None
-            else:
-                # Behavior is unchanged (keep raw canonical + workspace_review);
-                # the reason distinguishes model-absent/timeout/uncertain from a
-                # genuine low-confidence model output (spec §8 diagnostics).
-                result["decision"] = "ASK"
-                err = str(suggestion.error).lower() if (suggestion and suggestion.error) else ""
-                if suggestion is None:
-                    result["decision_reason"] = "qwen_unavailable" if result["similar"] else "no_similar_candidates"
-                elif rejected:
-                    result["decision_reason"] = "qwen_rejected_candidate"
-                elif "timeout" in err or "deadline" in err:
-                    # Admission/inference deadlines surface as "... deadline
-                    # expired ..." not the literal "timeout"; both are technical.
-                    result["decision_reason"] = "qwen_timeout"
-                elif err:
-                    # Any other backend error (disabled/crashed/invalid child)
-                    # is a technical failure, not a low-confidence model output.
-                    result["decision_reason"] = "qwen_backend_error"
-                elif not suggestion.candidate and suggestion.relation == "unrelated":
-                    result["decision_reason"] = "qwen_unrelated"
-                else:
-                    result["decision_reason"] = "qwen_low_conf"
         # Empty/default workspace: offer a NON-binding placement suggestion from
         # the memory's own subject (thought A: nearest existing memory's
         # workspace). A real-library A/B showed this is accurate but its
@@ -644,13 +672,15 @@ class WritePipeline:
         if embedder is None or not self.db.state.sqlite_vec_available:
             return None
         try:
-            er = embedder.embed_text(prefix="", body=subject)
+            er = embedder.embed_text(prefix=EMBED_PREFIX_STS, body=subject)
         except Exception:
             return None
         if not er or not er.embedding:
             return None
         try:
-            hits = self.db.evidence_knn(list(er.embedding), k=8)
+            # C4: row vectors (the subject row carries the strongest
+            # subject-to-subject match this hint lives on — plan A+).
+            hits = self.db.row_knn(list(er.embedding), k=8)
         except Exception:
             return None
         for hit in hits:
@@ -688,17 +718,32 @@ class WritePipeline:
                 "retry": "Write another memory using this workspace after sqlite-vec recovers.",
             }
         if workspace["strict_block"]:
+            # P1-3 hint 修正（owner 2026-10-03 方案 A3）：twin 改道形态下
+            # workspace["canonical"] 已被改成 mema-twin-dev——照它 confirm 会
+            # 写下 mema-twin→mema-twin-dev 毒别名（operations 侧守卫同款拦
+            # 截）。指引改回改道前 raw 名，confirm 走 no-op 分支后由既有
+            # redirect tail 落 -dev 桶。
+            _twin_redirected = workspace.get("matched_by") == "twin_redirect"
+            _hint_canonical = (
+                workspace["redirect_notice"]["requested_workspace"] if _twin_redirected
+                else workspace["canonical"]
+            )
             data.update({
                 "attention_required": True,
                 "action_required": "confirm_new_workspace",
                 "verification_status": "pending_user",
                 "workspace_is_new": True,
                 "pending_workspace": {
-                    "canonical": workspace["canonical"],
+                    "canonical": _hint_canonical,
                     "similar_workspaces": workspace["similar"],
+                    **({"protected_bucket": (
+                        "confirm with the original name; the system redirects "
+                        "mema-twin to mema-twin-dev automatically — never confirm "
+                        "into mema-twin-dev directly"
+                    )} if _twin_redirected else {}),
                 },
                 "attention_summary": (
-                    f"strict isolation: workspace {workspace['canonical']!r} is new; "
+                    f"strict isolation: workspace {_hint_canonical!r} is new; "
                     "confirm it with memory_govern(action='confirm_pending_workspace')"
                 ),
             })
@@ -710,15 +755,12 @@ class WritePipeline:
         if workspace["decision"] is not None:
             data["workspace_decision"] = workspace["decision"]
             data["workspace_decision_reason"] = workspace["decision_reason"]
-        suggestion = workspace.get("candidate")
-        if suggestion is not None and suggestion.candidate:
-            data["workspace_candidate"] = {
-                "candidate": suggestion.candidate,
-                "relation": suggestion.relation,
-                "confidence": suggestion.confidence,
-                "evidence": suggestion.evidence,
-            }
         if workspace["decision"] == "ASK" and not workspace["strict_block"]:
+            # C2 接线（owner 2026-10-03）：新桶裁决指引先查 workspaces 列表，
+            # 确认无既有桶再决定 keep_separate/merge。
+            data.setdefault("write_hints", {})["workspace_discovery"] = {
+                "call": {"tool": "memory_review", "view": "workspaces", "data": {"limit": 50}},  # 查一次复用；拿不准/起新桶前再查
+            }
             similar = workspace["similar"]
             options: list[dict[str, Any]] = [
                 {"decision": "keep_separate", "action": None},

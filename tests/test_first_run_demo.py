@@ -78,7 +78,8 @@ def test_prompt_once_marker_pinned() -> None:
         tools = MemoryTools(settings, MemoryDB(settings))
         written = tools.memory(
             "remember",
-            {"content": "首次功能演示已完成（钉子测试）。",
+            {
+                "workspace": "default","content": "首次功能演示已完成（钉子测试）。",
              "subject": "mema 首次演示状态：已完成", "tags": ["mema-first-run-demo-status"]},
         )
         assert written["ok"] is True

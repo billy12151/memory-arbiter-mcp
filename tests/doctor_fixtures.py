@@ -86,12 +86,13 @@ def _memory(db: MemoryDB, mid: int, subject: str, workspace: str = "ws", tags: s
 
 
 def _evidence(db: MemoryDB, memory_id: int, text: str, *, unit_index: int = 0) -> None:
+    # C5: seed ROWS (the evidence channel's store); unit tables are retired.
     now = _iso(timedelta(0))
     _exec(
         db,
-        """INSERT INTO memory_evidence(memory_id,memory_version,content_hash,unit_index,
+        """INSERT INTO memory_row(memory_id,memory_version,content_hash,row_index,
              kind,text,start_offset,end_offset,created_at)
-           VALUES(?,1,?,?,'body',?,0,?,?)""",
+           VALUES(?,1,?,?,'sentence',?,0,?,?)""",
         (memory_id, hashlib.sha256(text.encode()).hexdigest(), unit_index, text, len(text), now),
     )
 
@@ -135,7 +136,7 @@ def fx_indexed(root: Path) -> tuple[Settings, MemoryDB]:
 def fx_stale_orphan_evidence(root: Path) -> tuple[Settings, MemoryDB]:
     settings, db = fx_indexed(root)
     # memory_version drift = stale.
-    _exec(db, "UPDATE memory_evidence SET memory_version=99 WHERE memory_id=1")
+    _exec(db, "UPDATE memory_row SET memory_version=99 WHERE memory_id=1")
     # Orphan = evidence whose memory is gone. The FK cascade normally prevents
     # this, so reproduce the real-world shape (a cascade that never fired) by
     # dropping the parent row with foreign keys off.
@@ -535,6 +536,14 @@ def _mask(report: dict[str, Any]) -> dict[str, Any]:
         # is the integer 4, so it is masked by key and only its prefixed form
         # ("serves v4") is touched in detail -- a bare "4" replacement would
         # corrupt the counts this gate exists to compare.
+        if check == "vector.space":
+            # space id 是版本绑定值（pipeline version bump 即轮换）——掩码，
+            # 防 embedding 管线版本变更打碎 golden（2026-09-25 前缀重标）。
+            for key in ("active_space_id", "configured_space_id"):
+                if evidence.get(key):
+                    original = str(evidence[key])
+                    evidence[key] = "<SPACE_ID>"
+                    finding["detail"] = finding["detail"].replace(original, "<SPACE_ID>")
         if check == "conflicts.scan_epoch":
             evidence["to"] = "<DETECTOR_VER>"
             finding["detail"] = finding["detail"].replace(CONFLICT_DETECTOR_VERSION, "<DETECTOR_VER>")

@@ -35,7 +35,7 @@ def _write(tools: MemoryTools, content: str, workspace: str = "w") -> dict:
 
 
 def _dismiss_pair(tools: MemoryTools, a: dict, b: dict) -> None:
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     scan = tools.memory_repair("scan_candidates", {
         "anchor_memory_id": 0, "batch": 50, "k": 10, "include_quotes": True,
     })
@@ -96,7 +96,7 @@ def test_page_progress_records_per_group_and_completes(vec_tools: MemoryTools) -
         _write(tools, f"apisvc 记录 {i}。", workspace="apisvc")
     for i in range(2):
         _write(tools, f"dbpgsql 记录 {i}。", workspace="dbpgsql")
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
 
     page = tools.memory_repair("scan_candidates", {
         "anchor_memory_id": 0, "batch": 2, "k": 10,
@@ -129,7 +129,7 @@ def test_page_progress_new_round_resets(vec_tools: MemoryTools) -> None:
     tools = vec_tools
     _write(tools, "one 记录。", workspace="apisvc")
     _write(tools, "two 记录。", workspace="dbpgsql")
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 10, "k": 10})
     state = tools.db.scan_page_progress_state()
     assert state is not None and state["complete"] is True
@@ -149,7 +149,7 @@ def test_doctor_reports_broken_chain_after_one_hour(vec_tools: MemoryTools) -> N
     tools = vec_tools
     for i in range(3):
         _write(tools, f"apisvc 记录 {i}。", workspace="apisvc")
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 2, "k": 10})
 
     # Fresh incomplete progress: no alarm yet.
@@ -186,7 +186,7 @@ def test_doctor_no_chain_alarm_when_complete(vec_tools: MemoryTools) -> None:
 
     tools = vec_tools
     _write(tools, "apisvc 记录。", workspace="apisvc")
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     tools.memory_repair("scan_candidates", {"anchor_memory_id": 0, "batch": 10, "k": 10})
     state = tools.db.scan_page_progress_state()
     assert state is not None and state["complete"] is True

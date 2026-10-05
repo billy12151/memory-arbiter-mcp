@@ -568,6 +568,7 @@ def test_df_cache_invalidates_on_workspace_migration(tmp_path: Path) -> None:
     # 迁移 src→dest：版本/计数不动（7 active 不变），df[proj] 不变，但
     # scope 成员变了——若未失效，dest 的缓存条目仍被认为新鲜
     moved = tools.memory_govern("migrate_workspace", {
+        "workspace": "default",
         "from": "src", "to": "dest", "authorized": True,
     })
     assert moved.get("ok"), moved

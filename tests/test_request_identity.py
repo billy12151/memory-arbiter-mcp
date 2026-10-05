@@ -333,18 +333,18 @@ def test_http_identity_attributes_write_provenance_and_rejects_mismatch(
     identity = RequestIdentity(client="header-client", agent_id="header-agent")
     with request_identity_scope(identity):
         written = _sc(bundle.app.tools["memory"](
-            action="remember", data={"content": "fact", "subject": "identity"},
+            action="remember", data={"workspace": "default", "content": "fact", "subject": "identity"},
         ))
         matching = _sc(bundle.app.tools["memory"](
             action="remember",
-            data={
+            data={"workspace": "default", 
                 "content": "matching", "subject": "identity",
                 "client": "header-client", "agent_id": "header-agent",
             },
         ))
         mismatch = _sc(bundle.app.tools["memory"](
             action="remember",
-            data={"content": "bad", "subject": "identity", "agent_id": "other"},
+            data={"workspace": "default", "content": "bad", "subject": "identity", "agent_id": "other"},
         ))
         status = _sc(bundle.app.tools["memory"](action="status", data={}))
 
@@ -374,7 +374,7 @@ def test_tool_identity_prefers_current_mcp_request_over_stale_context(
     with request_identity_scope(RequestIdentity(client="stale-client", agent_id="stale-agent")):
         status = _sc(bundle.app.tools["memory"](action="status", data={}))
         written = _sc(bundle.app.tools["memory"](
-            action="remember", data={"content": "current", "subject": "session"},
+            action="remember", data={"workspace": "default", "content": "current", "subject": "session"},
         ))
     assert status["data"]["client"] == "current-client"
     assert status["data"]["agent_id"] == "current-agent"
@@ -405,7 +405,7 @@ def test_tool_identity_invalid_request_headers_fail_closed(
 def test_stdio_write_keeps_settings_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     bundle = _runtime(tmp_path, monkeypatch)
     written = _sc(bundle.app.tools["memory"](
-        action="remember", data={"content": "fact", "subject": "stdio"},
+        action="remember", data={"workspace": "default", "content": "fact", "subject": "stdio"},
     ))
     assert written["data"]["record"]["agent_id"] == "settings-agent"
     bundle.tools.shutdown(timeout=1)
@@ -553,7 +553,7 @@ def test_stdio_bridge_status_uses_process_identity(
     # the trusted process identity and is rejected as a mismatch.
     laundered = _sc(bundle.app.tools["memory"](
         action="remember",
-        data={"content": "fact", "subject": "stdio-identity", "agent_id": "other"},
+        data={"workspace": "default", "content": "fact", "subject": "stdio-identity", "agent_id": "other"},
     ))
     assert laundered["ok"] is False
     assert laundered["data"]["error"] == "identity_mismatch"

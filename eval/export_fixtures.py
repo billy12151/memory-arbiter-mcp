@@ -35,11 +35,6 @@ DEFAULT_SOURCE = Path.home() / ".local/share/memory-arbiter/memory.sqlite3"
 CORPUS_VERSION = "recall-v1"
 DEFAULT_DISTRACTORS = 200
 
-ENVELOPE_FIELDS = (
-    "content", "subject", "tags", "workspace", "workspace_canonical",
-    "event_time", "source_type", "metadata",
-)
-
 
 def _open_ro(path: Path) -> sqlite3.Connection:
     return sqlite3.connect(f"file:{path}?immutable=1", uri=True)

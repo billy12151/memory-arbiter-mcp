@@ -334,7 +334,6 @@ def build_runtime() -> ServerBundle:
         app._mcp_server.version = __version__
     tools = MemoryTools(settings)
     tools.start_update_monitor()
-    tools.start_evidence_worker()
     tools.start_semantic_worker()
     # stdio identity bridge: stdio has no per-request headers, so establish the
     # process-level identity from config once and apply it per tool call via
@@ -350,11 +349,16 @@ def build_runtime() -> ServerBundle:
     def memory(action: str = "help", data: dict[str, Any] | None = None) -> Any:
         """Daily memory operations: remember, find, batch_find, read, update, judge, status, help.
 
+        workspace is required on remember — discover buckets once with
+        memory_review(view="workspaces") (e.g., at session start) and reuse
+        that list; re-query only when unsure or before deliberately creating
+        a new bucket ('default' is the global pool).
+
         Call memory(action="help") to discover accepted fields, judge requirements,
         value enums, update modes, and action_required paths before relying on a
         result that requests attention.
 
-        update edits in place: <=3 local edits use patches=[{old_text,new_text}]
+        update edits in place: 1..8 local edits use patches=[{old_text,new_text}]
         (atomic all-or-nothing, one version bump); full rewrites use new_content;
         a single small edit may use old_text/new_text.
 
@@ -366,10 +370,21 @@ def build_runtime() -> ServerBundle:
         content — content_mode (v0.15.10, preview default) is a single-choice
         enum: "hits" adds hit_spans (vector-matched unit text + span
         coordinates, never truncated; >=50% coverage upgrades an item to full
-        text), "full" returns whole texts. Score compares only
-        within the page; if the top page misses, reword the query or add
-        tags_filter instead of deep paging. The size block meters the returned
-        page (tokens_estimate + display_hint).
+        text; hit_window=N (default 0) extends each hit with +/-N
+        neighbouring complete sentences, neighbours marked matched=false;
+        hit_spans appears only on query-recall pages — browse/filter pages
+        carry none; hits whose evidence row lags the memory's current version
+        are dropped with a stale_hit_spans marker plus a re-query warning),
+        "full" returns whole texts. Space-separated short CJK words (each
+        <=4 chars, e.g. "向量 唯一键 冲突") are understood as keywords:
+        semantically close memories whose content/subject contains a keyword
+        rank higher (0.17.0; whole-word matching, generic words ignored).
+        Offsets are 0-based Unicode code-point
+        offsets into the content as indexed for the item's version; the
+        evidence index may lag right after an edit (see vector_lag). Score
+        compares only within the page; if the top page misses, reword the
+        query or add tags_filter instead of deep paging. The size block
+        meters the returned page (tokens_estimate + display_hint).
         """
         identity = _identity_for_tool(app) or stdio_identity
         payload, error = _data_with_request_identity(
@@ -382,7 +397,7 @@ def build_runtime() -> ServerBundle:
 
     @app.tool()
     def memory_review(view: str = "help", data: dict[str, Any] | None = None) -> Any:
-        """Read-only inspection: overview, doctor, conflicts, conflict_detail, history, expired, audit, entities, help.
+        """Read-only inspection: overview, doctor, conflicts, conflict_detail, history, expired, audit, entities, workspaces, help.
 
         Use memory_review(view="help") for accepted fields. Inspect conflict_detail
         before judging a conflict so its members, value groups, revision, and apply
@@ -402,7 +417,11 @@ def build_runtime() -> ServerBundle:
         """Authorized governance: retire, merge near-duplicates, apply/replan/resolve conflicts, confirm, and manage workspaces.
 
         Every state-changing action requires explicit user authorization for that
-        action, then authorized=true. Call memory_govern(action="help") for exact
+        action, then authorized=true. Workspace-mutating actions (confirm_pending_workspace,
+        rename_workspace_canonical, migrate_workspace, separate_workspace_alias,
+        move_memories_workspace) also require workspace — call
+        memory_review(view="workspaces") first to list existing buckets.
+        Call memory_govern(action="help") for exact
         actions, accepted fields, impact notes, and confirmation semantics.
         """
         identity = _identity_for_tool(app) or stdio_identity

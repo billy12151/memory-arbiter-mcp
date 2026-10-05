@@ -18,6 +18,9 @@ dependencies = [
 [project.optional-dependencies]
 vec = ["sqlite-vec>=0.1.6"]
 semantic-local = ["llama-cpp-python>=0.3.0"]
+# 0.17.1: the mDeBERTa conflict judge (V4m checkpoint, CPU fp32). The model
+# file itself ships separately (1.1GB) — see README model-download section.
+mdeberta = ["torch>=2.0", "transformers>=4.40"]
 test = ["pytest>=8.0.0"]
 # Refactor/maintenance tooling, never a runtime dependency. coverage backs the
 # golden-gate branch-coverage check; vulture only generates dead-code
@@ -43,6 +46,9 @@ version = { attr = "memory_arbiter.__version__" }
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+# P2 #11: 兑现「default run 排除」的宣称——bare pytest 即排除 slow；发布纪律
+# 显式 `pytest -m slow` 不变（命令行 -m 覆盖 addopts 的过滤）。
+addopts = "-m \"not slow\""
 # slow = real-Qwen tests (load the resident GGUF; ~minutes). Excluded from the
 # default run and CI; run explicitly before a release: pytest -m slow
 markers = [

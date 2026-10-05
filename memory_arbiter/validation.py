@@ -44,6 +44,25 @@ from .constants import (  # noqa: E402
     MAX_BATCH_FIND_QUERIES,
 )
 
+# owner 2026-10-03 拍板（方案 Part C1）：语义上「动桶」的动作 workspace 必传
+# （=strip 后非空——空串等价缺失，否则下游 explicit_workspace 为 falsy 回到
+# caller=None，strict 隔离门被空串绕过）。读路径与其余 govern（memory_id
+# 语义动作）不强制。
+WORKSPACE_GUIDANCE = (
+    "workspace is required for this action; call "
+    "memory_review(view='workspaces') to list existing buckets, then pass the "
+    "chosen canonical name (pass an existing name; use a new name only when "
+    "deliberately creating a new bucket; 'default' is the global pool)"
+)
+PRODUCT_REQUIRED_FIELDS: dict[tuple[str, str], set[str]] = {
+    ("memory", "remember"): {"workspace"},
+    ("memory_govern", "confirm_pending_workspace"): {"workspace"},
+    ("memory_govern", "rename_workspace_canonical"): {"workspace"},
+    ("memory_govern", "migrate_workspace"): {"workspace"},
+    ("memory_govern", "separate_workspace_alias"): {"workspace"},
+    ("memory_govern", "move_memories_workspace"): {"workspace"},
+}
+
 _SENSITIVE_FIELDS = {
     "authorized", "workspace", "memory_id", "conflict_id", "notice_id",
     "source_type", "protection_level", "status", "content", "new_content",
@@ -63,14 +82,15 @@ PRODUCT_FIELD_REGISTRY: dict[tuple[str, str], set[str]] = {
         "query", "workspace", "tags", "limit", "offset", "debug_ranking",
         "query_embedding", "tags_filter", "after_time", "before_time",
         "source_type", "include_linked_open_items", "include_conflict_signal",
-        "include_size", "content_mode",
+        "include_size", "content_mode", "hit_window",
     },
     ("memory", "batch_find"): {
         "queries", "workspace", "tags_filter", "after_time", "before_time",
-        "source_type", "limit_per_query", "content_mode", "deduplicate",
+        "source_type", "limit_per_query", "content_mode", "hit_window",
+        "deduplicate",
     },
-    ("memory", "read"): {"id", "memory_id", "span", "content_mode", "workspace"},
-    ("memory", "batch_read"): {"memory_ids", "content_mode", "spans", "workspace"},
+    ("memory", "read"): {"id", "memory_id", "span", "content_mode", "hit_window", "workspace"},
+    ("memory", "batch_read"): {"memory_ids", "content_mode", "hit_window", "spans", "workspace"},
     ("memory", "update"): {
         "id", "memory_id", "new_content", "old_text", "new_text", "patches",
         "new_subject", "new_tags", "reason", "authorized", "tags_only", "add_tags",
@@ -83,7 +103,7 @@ PRODUCT_FIELD_REGISTRY: dict[tuple[str, str], set[str]] = {
         "workspace",
     },
     ("memory_review", "overview"): _COMMON,
-    ("memory_review", "doctor"): {"deep", "workspace"},
+    ("memory_review", "doctor"): {"deep"},  # 疑似#3（owner 2026-10-04）：workspace 幽灵参数删除——doctor 恒全局
     ("memory_review", "audit"): {"workspace"},
     ("memory_review", "conflicts"): {"status", "limit", "source", "workspace"},
     ("memory_review", "conflict_detail"): {"id", "conflict_id", "workspace"},
@@ -94,6 +114,7 @@ PRODUCT_FIELD_REGISTRY: dict[tuple[str, str], set[str]] = {
         "source_type", "include_conflict_signal",
     },
     ("memory_review", "entities"): {"limit", "include_unassigned", "workspace"},
+    ("memory_review", "workspaces"): {"limit", "workspace"},
     ("memory_review", "help"): {"topic", "view"},
     ("memory_govern", "retire"): {"id", "memory_id", "reason", "superseded_by", "authorized", "workspace"},
     ("memory_govern", "merge_memories"): {
@@ -111,8 +132,8 @@ PRODUCT_FIELD_REGISTRY: dict[tuple[str, str], set[str]] = {
         "resolution_memory_id", "authorized", "workspace",
     },
     ("memory_govern", "confirm"): {"id", "memory_id", "source_ref", "confidence", "authorized", "workspace"},
-    ("memory_govern", "rename_workspace_canonical"): {"old", "new", "reason", "authorized"},
-    ("memory_govern", "migrate_workspace"): {"from", "to", "reason", "authorized"},
+    ("memory_govern", "rename_workspace_canonical"): {"old", "new", "reason", "authorized", "workspace"},
+    ("memory_govern", "migrate_workspace"): {"from", "to", "reason", "authorized", "workspace"},
     ("memory_govern", "move_memories_workspace"): {"memory_ids", "new_workspace", "reason", "authorized", "workspace", "default_fallback"},
     ("memory_govern", "rollback_auto_move"): {"audit_id", "reason", "authorized", "workspace"},
     ("memory_govern", "confirm_pending_workspace"): {"id", "memory_id", "canonical", "reason", "authorized", "workspace"},
@@ -125,7 +146,7 @@ PRODUCT_FIELD_REGISTRY: dict[tuple[str, str], set[str]] = {
     ("memory_repair", "activate_pending"): {"id", "memory_id", "authorized", "workspace"},
     ("memory_repair", "semantic_control"): {"action", "timeout", "workspace"},
     ("memory_repair", "notice"): {"action", "status", "limit", "id", "notice_id", "reason", "workspace"},
-    ("memory_repair", "scan_pipeline"): {"action", "max_memories", "time_budget_s", "neighbor_k", "workspace"},
+    ("memory_repair", "scan_pipeline"): {"action", "max_memories", "time_budget_s", "neighbor_k", "slow_lane"},  # 疑似#3：同上
     ("memory_repair", "scan_queue"): {"action", "page_size", "page_token", "decisions", "workspace"},
     ("memory_repair", "scan_candidates"): {
         "anchor_memory_id", "batch", "k", "include_check", "max_distance",
@@ -267,13 +288,35 @@ def _v_unknown_fields(
                 "remember field is not valid for update",
                 did_you_mean=update_aliases[key],
             )
-        suggestion = difflib.get_close_matches(key, allowed, n=1, cutoff=0.78)
+        # sorted(): the registry value is a set and difflib iterates it, so
+        # without a fixed order the suggestion is hash-seed-bound.
+        suggestion = difflib.get_close_matches(key, sorted(allowed), n=1, cutoff=0.78)
         if suggestion and suggestion[0] in _SENSITIVE_FIELDS:
             return _error(key, "unknown field resembles a protected field", did_you_mean=suggestion[0])
         result.warnings.append(f"unknown field ignored: {key}")
         unknown_keys.append(key)
     for key in unknown_keys:
         payload.pop(key, None)
+    return None
+
+
+
+def _v_required_fields(
+    surface: str, operation: str, payload: dict[str, Any], result: ValidationResult,
+) -> dict[str, Any] | None:
+    """owner 2026-10-03（方案 C1）：语义动作的 workspace 必传=strip 后非空。
+
+    只拦 MCP 产品面：内部直调（backup_replay 的恢复校验走占位副本、测试
+    直调 MemoryTools）不经本函数。空串与缺失同拒——下游 explicit_workspace
+    对 falsy 一律当未传，strict 隔离门不能被空串绕过。
+    """
+    required = PRODUCT_REQUIRED_FIELDS.get((surface, operation))
+    if not required:
+        return None
+    for field in sorted(required):
+        value = payload.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return _error(field, WORKSPACE_GUIDANCE)
     return None
 
 
@@ -520,6 +563,11 @@ def _v_metadata(
         return None
     if not isinstance(metadata, dict):
         return _error("metadata", "must be a JSON object")
+    # Gate-v2 G3 (owner 拍板 1): entity/scope are retired — accepted but
+    # stripped at storage, and the caller is told here (enforcement is the
+    # storage-level strip, this is only the user-facing hint).
+    if "entity" in metadata or "scope" in metadata:
+        result.warnings.append("metadata entity/scope 已废弃（0.17 门 v2），无需再传")
     try:
         metadata_size = _json_size(metadata)
     except (TypeError, ValueError, RecursionError):
@@ -791,6 +839,7 @@ def _v_enums(
     return None
 
 
+
 def _v_remember_status(
     surface: str, operation: str, payload: dict[str, Any], result: ValidationResult,
 ) -> dict[str, Any] | None:
@@ -837,8 +886,19 @@ _VALIDATORS: tuple[_Validator, ...] = (
 )
 
 
-def validate_product_payload(surface: str, operation: str, payload: dict[str, Any]) -> ValidationResult:
+def validate_product_payload(
+    surface: str, operation: str, payload: dict[str, Any],
+    *, enforce_required: bool = True,
+) -> ValidationResult:
+    """enforce_required：必传门只在 MCP 产品面（surfaces 分派层）强制；
+    管线内部复验（write.py:331 的形状/范围二道校验）与 backup_replay 的
+    历史行校验走 False——内部直调不受产品必传约束（方案 C1 影响面口径）。"""
     result = ValidationResult()
+    if enforce_required:
+        error = _v_required_fields(surface, operation, payload, result)
+        if error is not None:
+            result.error = error
+            return result
     for validator in _VALIDATORS:
         error = validator(surface, operation, payload, result)
         if error is not None:

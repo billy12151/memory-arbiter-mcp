@@ -53,7 +53,7 @@ def test_write_time_internal_skips_noise_shapes(tmp_path: Path) -> None:
         "状态矩阵",
         "## 矩阵甲\n" + TABLE + "\n## 矩阵乙\n| 需求状态 | 运营状态 |\n|---|---|\n| 待受理 | 待受理 |",
     )
-    assert tools.wait_evidence_worker_drained(timeout=10)
+    assert tools.wait_semantic_worker_drained(timeout=10)
     pending = [r for r in tools.db.internal_conflicts.list_pending() if r["memory_id"] == mid]
     assert pending == [], "table slices must not produce internal rows"
 
@@ -69,7 +69,7 @@ def test_write_time_internal_keeps_real_numeric(tmp_path: Path) -> None:
         "不再沿用此前“32 个已上线需求/0.29 人力”口径。\n## 口径乙\n量化人效收益按 Excel"
         "《基础能力&风险识别（1期）》sheet 的“实际收益”列汇总，汇报统一用约 0.25 人力。",
     )
-    assert tools.wait_evidence_worker_drained(timeout=10)
+    assert tools.wait_semantic_worker_drained(timeout=10)
     pending = [r for r in tools.db.internal_conflicts.list_pending() if r["memory_id"] == mid]
     assert pending, "a genuine same-metric two-value pair must land (no cosine gate on internal)"
 
@@ -80,7 +80,7 @@ def test_stock_dismissal_migration(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     now = "2026-09-13T00:00:00+00:00"
     real = _write(tools, "真矛盾", "## 甲\n重试次数为 3 次。\n## 乙\n重试次数为 5 次。")
-    assert tools.wait_evidence_worker_drained(timeout=10)
+    assert tools.wait_semantic_worker_drained(timeout=10)
     with tools.db.write_transaction() as conn:
         # burned at boot; reset to simulate the upgrade boot with stock rows
         conn.execute("DELETE FROM migration_state WHERE key='internal_noise_rule_v1'")

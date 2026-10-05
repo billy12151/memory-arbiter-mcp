@@ -73,6 +73,9 @@ def _confirm_pending(tools: MemoryTools, memory_id: int) -> dict:
     if record["status"] != MemoryStatus.PENDING.value:
         return {"ok": True, "data": {"record": record}}
     return tools.memory_govern("confirm_pending_workspace", {
+        # strict 语义（P1-2 修活的两道校验）：确认者=该 pending 行自己桶的
+        # 写入方——caller workspace 取行自身 canonical。
+        "workspace": record["workspace_canonical"] or record["workspace"] or "default",
         "memory_id": memory_id,
         "canonical": record["workspace_canonical"] or record["workspace"],
         "authorized": True,
@@ -664,7 +667,9 @@ def test_alias_no_embedder_exact_match(tmp_path):
     db = tools.db
     r1 = db.resolve_workspace_canonical("金科营销项目", embedder=None)
     assert r1["canonical"] == "金科营销项目" and r1["is_new"] is True
-    # exact repeat is not new
+    # P2 #9: resolve itself is read-only — a write registers the canonical
+    # atomically (insert_memory), so the next resolve is an exact hit.
+    tools.memory_write(content="正文", subject="s", workspace="金科营销项目")
     r2 = db.resolve_workspace_canonical("金科营销项目", embedder=None)
     assert r2["is_new"] is False and r2["matched_by"] == "exact"
     # a different string is a distinct new canonical (no vector merge)
@@ -751,7 +756,7 @@ except Exception:
 
 
 @pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not installed")
-def test_strict_evidence_knn_excludes_closer_cross_workspace_vector(tmp_path):
+def test_strict_row_knn_excludes_closer_cross_workspace_vector(tmp_path):
     """Adversarial vector channel: a cross-workspace memory whose vector is
     CLOSER to the query than the same-workspace hit must still be excluded
     under strict. Verifies vec_knn's workspace_predicate is wired and its
@@ -764,18 +769,27 @@ def test_strict_evidence_knn_excludes_closer_cross_workspace_vector(tmp_path):
     assert _confirm_pending(tools, a_mid)["ok"] is True
     b_mid = _write(tools, "beta cross ws exact", "projB")["data"]["id"]
     assert _confirm_pending(tools, b_mid)["ok"] is True
-    from memory_arbiter.evidence import EvidenceUnit, evidence_content_hash
-    db.evidence.publish(a_mid, 2, evidence_content_hash("alpha same ws"), [EvidenceUnit("text", "alpha same ws", 0, 13, 0)], [[0.9, 0.1]])
-    db.evidence.publish(b_mid, 2, evidence_content_hash("beta cross ws exact"), [EvidenceUnit("text", "beta cross ws exact", 0, 19, 0)], [[1.0, 0.0]])
+    from memory_arbiter.evidence import evidence_content_hash
+    from memory_arbiter.rowseg import RowSegment
+    db.evidence.publish_rows(
+        a_mid, 2, evidence_content_hash("alpha same ws"),
+        [RowSegment(kind="sentence", text="alpha same ws", start_offset=0, end_offset=13, row_index=0)],
+        [[0.9, 0.1]],
+    )
+    db.evidence.publish_rows(
+        b_mid, 2, evidence_content_hash("beta cross ws exact"),
+        [RowSegment(kind="sentence", text="beta cross ws exact", start_offset=0, end_offset=19, row_index=0)],
+        [[1.0, 0.0]],
+    )
     res = tools.memory_search(query="x", workspace="projA", limit=10, query_embedding=[1.0, 0.0])
     rows = _results(res)
     assert {r["workspace"] for r in rows} == {"projA"}, (
         f"vec_knn leaked closer cross-workspace vector: {[r['workspace'] for r in rows]}"
     )
     # Direct evidence KNN confirms the predicate (not just the search wrapper).
-    knn_a = db.evidence_knn([1.0, 0.0], k=10, parent_status_filter="active", workspace="projA")
+    knn_a = db.row_knn([1.0, 0.0], k=10, parent_status_filter="active", workspace="projA")
     assert all(r.get("workspace") == "projA" for r in knn_a)
-    knn_b = db.evidence_knn([1.0, 0.0], k=10, parent_status_filter="active", workspace="projB")
+    knn_b = db.row_knn([1.0, 0.0], k=10, parent_status_filter="active", workspace="projB")
     assert all(r.get("workspace") == "projB" for r in knn_b)
 
 
@@ -809,7 +823,7 @@ def test_placement_suggestion_for_empty_workspace(tmp_path):
     t = _placement_tools(tmp_path)
     # Nearest neighbor lives in a real workspace.
     # 0.16.12 P2-T5: hits carry m.status/workspace fields (production SELECT)
-    t.db.evidence_knn = lambda *a, **k: [{"memory_id": 42, "distance": 5.0, "status": "active",
+    t.db.row_knn = lambda *a, **k: [{"memory_id": 42, "distance": 5.0, "status": "active",
                                           "workspace": "金营项目", "workspace_canonical": "金营项目"}]  # type: ignore
     t.db.get_memory = lambda mid: {"id": 42, "status": "active", "workspace": "金营项目",  # type: ignore
                                    "workspace_canonical": "金营项目"} if mid == 42 else None
@@ -828,7 +842,7 @@ def test_no_placement_suggestion_when_neighbor_is_default(tmp_path):
     from memory_arbiter.models import MemoryRecord
     t = _placement_tools(tmp_path)
     # Only default-workspace neighbors → global memory stays in default, no hint.
-    t.db.evidence_knn = lambda *a, **k: [{"memory_id": 7, "distance": 5.0, "status": "superseded",
+    t.db.row_knn = lambda *a, **k: [{"memory_id": 7, "distance": 5.0, "status": "superseded",
                                           "workspace": "别家项目", "workspace_canonical": "别家项目"}]  # type: ignore
     t.db.get_memory = lambda mid: {"id": 7, "status": "active", "workspace": "default",  # type: ignore
                                    "workspace_canonical": "default"} if mid == 7 else None
@@ -843,7 +857,7 @@ def test_no_placement_suggestion_when_neighbor_is_default(tmp_path):
 def test_no_placement_suggestion_without_subject(tmp_path):
     from memory_arbiter.models import MemoryRecord
     t = _placement_tools(tmp_path)
-    t.db.evidence_knn = lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not embed"))  # type: ignore
+    t.db.row_knn = lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not embed"))  # type: ignore
     rec = MemoryRecord.from_input(
         {"content": "正文", "subject": "", "workspace": ""},
         t.settings.defaults(),
@@ -855,7 +869,7 @@ def test_no_placement_suggestion_without_subject(tmp_path):
 def test_non_default_workspace_gets_no_placement_suggestion(tmp_path):
     from memory_arbiter.models import MemoryRecord
     t = _placement_tools(tmp_path)
-    t.db.evidence_knn = lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not run for a real ws"))  # type: ignore
+    t.db.row_knn = lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not run for a real ws"))  # type: ignore
     rec = MemoryRecord.from_input(
         {"content": "正文", "subject": "某主题", "workspace": "some-real-project"},
         t.settings.defaults(),
@@ -963,7 +977,7 @@ def strict_admission_make_tools(
         # modules that read it at call time.
         monkeypatch.setattr("memory_arbiter.tools.WORKSPACE_RECALL_ADMISSION", False)
         monkeypatch.setattr(
-            "memory_arbiter.pipeline.operations.WORKSPACE_RECALL_ADMISSION", False,
+            "memory_arbiter.pipeline._ops_status.WORKSPACE_RECALL_ADMISSION", False,
         )
     model = tmp_path / "fake.gguf"
     model.write_bytes(b"fake")
@@ -1007,6 +1021,7 @@ def active_write(tools: MemoryTools, content: str, workspace: str, subject: str 
     record = tools.db.get_memory(mid)
     if record["status"] == MemoryStatus.PENDING.value:
         confirmed = tools.memory_govern("confirm_pending_workspace", {
+            "workspace": record["workspace_canonical"] or record["workspace"] or "default",
             "memory_id": mid,
             "canonical": record["workspace_canonical"] or record["workspace"],
             "authorized": True,
@@ -1079,33 +1094,35 @@ def test_admitted_canonicals_do_not_truncate_valid_neighbors(tmp_path):
     assert "neighbor-024" in admitted
 
 
-def test_evidence_knn_does_not_starve_scoped_hit_after_global_2048(tmp_path):
+def test_row_knn_does_not_starve_scoped_hit_after_global_2048(tmp_path):
     """A scoped evidence hit after >2048 closer out-of-scope units remains
     reachable; admission is not a fixed global-window post-filter."""
     tools = strict_admission_make_tools(tmp_path)
     far_memory = active_write(tools, "far evidence owner", "unrelated-ws", "far evidence")
     target_memory = active_write(tools, "target admitted evidence", "agent-rail", "target evidence")
     with tools.db.write_transaction() as conn:
+        # 0.17.0: unit tables retired — the evidence channel's vectors are
+        # memory_row/memory_row_vec (row_index, kind sentence/table_row).
         for index in range(2050):
             cur = conn.execute(
-                "INSERT INTO memory_evidence(memory_id,memory_version,content_hash,unit_index,kind,text,start_offset,end_offset,created_at) "
+                "INSERT INTO memory_row(memory_id,memory_version,content_hash,row_index,kind,text,start_offset,end_offset,created_at) "
                 "VALUES(?,1,?,?,?,?,0,1,'2026-01-01T00:00:00Z')",
                 (far_memory, "f" * 64, index, "sentence", f"far-{index}"),
             )
             conn.execute(
-                "INSERT INTO memory_evidence_vec(id,parent_status,embedding) VALUES(?,'active',?)",
+                "INSERT INTO memory_row_vec(id,parent_status,embedding) VALUES(?,'active',?)",
                 (int(cur.lastrowid), json.dumps(VEC_SELF)),
             )
         cur = conn.execute(
-            "INSERT INTO memory_evidence(memory_id,memory_version,content_hash,unit_index,kind,text,start_offset,end_offset,created_at) "
+            "INSERT INTO memory_row(memory_id,memory_version,content_hash,row_index,kind,text,start_offset,end_offset,created_at) "
             "VALUES(?,1,?,0,'sentence','target',0,6,'2026-01-01T00:00:00Z')",
             (target_memory, "t" * 64),
         )
         conn.execute(
-            "INSERT INTO memory_evidence_vec(id,parent_status,embedding) VALUES(?,'active',?)",
+            "INSERT INTO memory_row_vec(id,parent_status,embedding) VALUES(?,'active',?)",
             (int(cur.lastrowid), json.dumps(VEC_FAR)),
         )
-    hits = tools.db.evidence_knn(
+    hits = tools.db.row_knn(
         VEC_SELF, k=1, workspace=("agent-lane", "agent-rail"),
     )
     assert [int(hit["memory_id"]) for hit in hits] == [target_memory]
@@ -1244,6 +1261,7 @@ def test_over_cutoff_abbreviation_uses_workspace_migration(tmp_path):
         tools.memory_search(query="mema abbreviation", workspace="memory-arbiter-mcp")
     )
     merged = tools.memory_govern("migrate_workspace", {
+        "workspace": "default",
         "from": "mema", "to": "memory-arbiter-mcp", "authorized": True,
     })
     assert merged["ok"] is True
@@ -1393,9 +1411,22 @@ def test_entities_listing_scopes_to_admitted_set(tmp_path):
     lane_id = active_write(tools, "lane content", "agent-lane", "lane subject")
     rail_id = active_write(tools, "rail content", "agent-rail", "rail subject")
     far_id = active_write(tools, "far content", "unrelated-ws", "far subject")
-    tools.memory_set_entity(memory_id=lane_id, entity="lane-entity", workspace="agent-lane")
-    tools.memory_set_entity(memory_id=rail_id, entity="rail-entity", workspace="agent-rail")
-    tools.memory_set_entity(memory_id=far_id, entity="far-entity", workspace="unrelated-ws")
+    # Gate-v2 G3: the storage strip retires metadata.entity on every write
+    # path, so the entity rows are seeded the way a pre-purge 0.16 library
+    # would look — raw SQL, deliberately bypassing the strip (this pins the
+    # list_entities workspace scoping itself, not the write path).
+    import json as _json
+
+    def _seed_entity(memory_id: int, entity: str) -> None:
+        with tools.db.write_transaction() as conn:
+            conn.execute(
+                "UPDATE memories SET metadata=json_set(COALESCE(metadata,'{}'),'$.entity',?) WHERE id=?",
+                (entity, memory_id),
+            )
+
+    _seed_entity(lane_id, "lane-entity")
+    _seed_entity(rail_id, "rail-entity")
+    _seed_entity(far_id, "far-entity")
 
     data = tools.memory_list_entities(workspace="agent-lane")["data"]
     listed = json.dumps(data, ensure_ascii=False)
@@ -1773,7 +1804,7 @@ from memory_arbiter.constants import (
     DEFAULT_TERMS,
     DEFAULT_WORKSPACE_NAME,
     is_default_workspace_term,
-)
+    )
 from memory_arbiter.db import MemoryDB
 from memory_arbiter.tools import MemoryTools
 
@@ -1863,7 +1894,7 @@ def test_knn_never_merges_into_default_even_with_published_vector(tmp_path):
     # proving the embedder/distances work and default is excluded by name.
     _register_canonical_with_vector(tools, "claw", [0.0, 1.0])
     merged = tools.db.resolve_workspace_canonical(
-        "clawproj", FixedEmbedder([0.0, 1.0]), register_new=False,
+        "clawproj", FixedEmbedder([0.0, 1.0]),
     )
     assert merged["matched_by"] == "vector"
     assert merged["canonical"] == "claw"
@@ -1871,7 +1902,7 @@ def test_knn_never_merges_into_default_even_with_published_vector(tmp_path):
     # A name embedding to distance ~0 FROM DEFAULT must stay NEW: the only
     # ≤cutoff neighbour is the excluded default row (claw sits at 1.0).
     resolved = tools.db.resolve_workspace_canonical(
-        "defaultproj", FixedEmbedder([1.0, 0.0]), register_new=False,
+        "defaultproj", FixedEmbedder([1.0, 0.0]),
     )
     assert resolved["matched_by"] == "new"
     assert resolved["canonical"] == "defaultproj"
@@ -1887,7 +1918,7 @@ def test_knn_excludes_every_default_synonym_canonical(tmp_path, term):
     # vector) can never attract merges: the candidate SQL excludes all terms.
     _register_canonical_with_vector(tools, term, [1.0, 0.0])
     resolved = tools.db.resolve_workspace_canonical(
-        f"{term}project", FixedEmbedder([1.0, 0.0]), register_new=False,
+        f"{term}project", FixedEmbedder([1.0, 0.0]),
     )
     assert resolved["matched_by"] == "new"
     assert term not in [s["name"] for s in resolved["similar"]]
@@ -1896,7 +1927,7 @@ def test_knn_excludes_every_default_synonym_canonical(tmp_path, term):
 @pytest.mark.parametrize("term", NON_EMPTY_DEFAULT_TERMS + ["Default", "DEFAULT", " None ", "未知 "])
 def test_default_synonyms_resolve_to_single_pool(tmp_path, term):
     tools = default_insulation_make_tools(tmp_path)
-    resolved = tools.db.resolve_workspace_canonical(term, None, register_new=True)
+    resolved = tools.db.resolve_workspace_canonical(term, None)
     assert resolved["canonical"] == DEFAULT_WORKSPACE_NAME
     assert resolved["matched_by"] == "fallback"
     assert resolved["is_new"] is False
@@ -1920,10 +1951,9 @@ def test_vector_publish_paths_skip_default_terms(tmp_path):
             )
     result = {"warnings": [], "vector_publish_pending": False}
 
-    store._publish_missing_workspace_canonical_vector("default", embedder, result)
-    assert _canonical_vec_row(tools, "default") is None
-    assert result["vector_publish_pending"] is False
-
+    # 2026-10-05：一步式 _publish_missing_workspace_canonical_vector 已随死代码
+    # 清理移除（生产零调用，写路径自 P2 #9 起走 prepare+publish 两步）；
+    # default 绝缘断言由下方两步 API 覆盖。
     assert store.prepare_missing_workspace_canonical_embedding("默认", embedder) is None
     assert store.prepare_workspace_canonical_embedding("null", embedder) is None
     assert store.publish_workspace_canonical_vector("default", [1.0, 0.0]) == []
@@ -1931,7 +1961,7 @@ def test_vector_publish_paths_skip_default_terms(tmp_path):
         assert _canonical_vec_row(tools, name) is None
 
     # Control: a normal canonical publishes through the same path.
-    store._publish_missing_workspace_canonical_vector("projx", embedder, result)
+    assert store.publish_workspace_canonical_vector("projx", [1.0, 0.0]) == []
     assert _canonical_vec_row(tools, "projx") is not None
 
 
@@ -1942,14 +1972,15 @@ def test_rename_refuses_default_in_both_directions(tmp_path, term):
     tools = default_insulation_make_tools(tmp_path)
     _default_insulation_write(tools, "projX memory", "projX")
 
-    updated, warnings = tools.db.rename_workspace_canonical("projX", term)
+    updated, warnings, _committed = tools.db.rename_workspace_canonical("projX", term)
     assert updated == 0
     assert warnings and "reserved" in warnings[0]
-    updated, warnings = tools.db.rename_workspace_canonical(term, "projY")
+    updated, warnings, _committed = tools.db.rename_workspace_canonical(term, "projY")
     assert updated == 0
     assert warnings and "reserved" in warnings[0]
 
     r = tools.memory_govern("rename_workspace_canonical", {
+        "workspace": "default",
         "old": "projX", "new": term, "reason": "try merge into default", "authorized": True,
     })
     assert r["ok"] is False
@@ -1986,9 +2017,9 @@ def test_removed_pairwise_actions_and_internal_decisions_never_touch_default(tmp
 def test_migrate_refuses_default_in_both_directions(tmp_path):
     tools = default_insulation_make_tools(tmp_path)
     _default_insulation_write(tools, "projX memory", "projX")
-    updated, warnings = tools.db.migrate_workspace("projX", "default")
+    updated, warnings, _committed = tools.db.migrate_workspace("projX", "default")
     assert updated == 0 and warnings
-    updated, warnings = tools.db.migrate_workspace("默认", "projX")
+    updated, warnings, _committed = tools.db.migrate_workspace("默认", "projX")
     assert updated == 0 and warnings
 
 
@@ -2013,7 +2044,7 @@ def test_placement_hint_still_fires_for_default_synonym(tmp_path, monkeypatch):
     proj = _default_insulation_write(tools, "projA memory", "projA", subject="projA subject")
     monkeypatch.setattr(tools, "_ensure_embedder", lambda: (FixedEmbedder([1.0, 0.0]), []))
     monkeypatch.setattr(
-        tools.db, "evidence_knn",
+        tools.db, "row_knn",
         lambda emb, k=8: [{"memory_id": proj["data"]["id"], "distance": 0.1,
                             "status": "active", "workspace": "projA",
                             "workspace_canonical": "projA"}],
@@ -2054,6 +2085,7 @@ def test_move_refuses_full_width_default_destination(tmp_path):
     tools = default_insulation_make_tools(tmp_path)
     memory_id = int(_default_insulation_write(tools, "x", "proj-a", subject="s")["data"]["id"])
     outcome = tools.memory_govern("move_memories_workspace", {
+        "workspace": "default",
         "memory_ids": [memory_id], "new_workspace": "ＮＵＬＬ", "authorized": True,
     })
     assert not outcome["ok"]

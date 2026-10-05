@@ -78,7 +78,14 @@ class BackupReplayStore:
         offset = max(0, int(offset))
         if not self.path.exists():
             return {"entries": [], "invalid_entries": [], "total": 0, "importable": 0, "already_replayed": 0, "conflicts": 0, "invalid": 0, "offset": offset, "next_offset": None, "has_more": False}
-        fh = self.path.open("rb")
+        # P2 #18: an unreadable backup path (directory, permissions, vanished
+        # between exists() and open) must degrade to a structured ValueError —
+        # the product surface's _forward catches it; a bare OSError would
+        # crash the tool call.
+        try:
+            fh = self.path.open("rb")
+        except OSError as exc:
+            raise ValueError(f"backup replay file unavailable: {exc}") from exc
         has_more = False
         line_number = 0
         try:
@@ -87,6 +94,8 @@ class BackupReplayStore:
                 fcntl.flock(fh.fileno(), fcntl.LOCK_SH)
             except ImportError:  # pragma: no cover
                 fcntl = None  # type: ignore[assignment]
+            except OSError as exc:
+                raise ValueError(f"backup replay file unavailable: {exc}") from exc
             while True:
                 raw_line, oversized = self._read_bounded_line(fh)
                 if not raw_line:
@@ -124,8 +133,12 @@ class BackupReplayStore:
                     seen.add(replay_key)
                     if not isinstance(record, dict):
                         raise ValueError("record must be an object")
+                    # C1 3c（owner 2026-10-03 拍板）：remember 的 workspace 必传
+                    # 不适用于历史备份行——workspace 可选年代的全局池记录其
+                    # raw workspace 为空串，恢复是数据抢救通道不得被新校验
+                    # 斩断（enforce_required=False，record 原样校验原样落盘）。
                     validation = validate_product_payload(
-                        "memory", "remember", dict(record),
+                        "memory", "remember", dict(record), enforce_required=False,
                     )
                     if validation.error is not None:
                         raise ValueError(f"invalid record: {validation.error.get('field')}: {validation.error.get('reason')}")
@@ -247,9 +260,7 @@ class BackupReplayStore:
             trusted_agent_id=(entry.get("record") or {}).get("agent_id"),
         )
         captured_workspace = str(entry.get("workspace_canonical") or record.workspace)
-        resolved = self._db.resolve_workspace_canonical(
-            captured_workspace, None, register_new=False,
-        )
+        resolved = self._db.resolve_workspace_canonical(captured_workspace, None)
         canonical = str(resolved.get("canonical") or captured_workspace)
         replay_key = str(entry["replay_key"])
         payload_hash = str(entry["payload_hash"])
@@ -276,6 +287,14 @@ class BackupReplayStore:
                     self._db.settings.isolation == "strict"
                     and record.status == "pending"
                 ):
+                    # A9（0.17.1 修复批）：历史行回放不得注册保护桶变体。
+                    from ..twin_redirect import protected_bucket_variant
+
+                    if protected_bucket_variant(canonical):
+                        raise ValueError(
+                            f"workspace {canonical!r} is a protected-bucket spelling "
+                            "variant and cannot be registered during replay"
+                        )
                     conn.execute(
                         "INSERT OR IGNORE INTO workspace_canonicals(name, created_at) VALUES (?, ?)",
                         (canonical, utc_now_iso()),

@@ -38,9 +38,9 @@ _OLD_SELECT = """SELECT e.*, v.distance AS distance, m.status, m.subject, m.tags
                    m.ingest_time, m.metadata, m.content,
                    m.version AS memory_row_version, m.agent_id,
                    m.source_ref, m.created_at AS memory_created_at
-            FROM memory_evidence_vec v
-            JOIN memory_evidence e ON e.id=v.id
-            JOIN memories m ON m.id=e.memory_id
+            FROM memory_row_vec v
+            JOIN memory_row r ON r.id=v.id
+            JOIN memories m ON m.id=r.memory_id
             WHERE v.embedding MATCH ? AND k=? AND {clauses}
             ORDER BY v.distance"""
 
@@ -61,14 +61,14 @@ def _old_knn(conn, query, k, *, status_sql, memory_status_sql, workspace=None,
         clauses.append(excl_sql)
         params.extend(excl_params)
     if exclude_memory_id is not None:
-        clauses.append("e.memory_id!=?")
+        clauses.append("r.memory_id!=?")
         params.append(int(exclude_memory_id))
     filtered = bool(workspace_sql or exclude_memory_id is not None or excl_sql)
     query_json = json.dumps(query)
     count_sql = (
-        f"SELECT COUNT(*) FROM memory_evidence_vec v "
-        f"JOIN memory_evidence e ON e.id=v.id "
-        f"JOIN memories m ON m.id=e.memory_id "
+        f"SELECT COUNT(*) FROM memory_row_vec v "
+        f"JOIN memory_row r ON r.id=v.id "
+        f"JOIN memories m ON m.id=r.memory_id "
         f"WHERE {status_sql} AND {memory_status_sql}"
     )
     candidate_count = int(conn.execute(count_sql).fetchone()[0])
@@ -104,17 +104,17 @@ def _new_knn(conn, query, k, *, status_sql, memory_status_sql, workspace=None,
         eligible.append(excl_sql)
         params.extend(excl_params)
     if exclude_memory_id is not None:
-        eligible.append("e.memory_id != ?")
+        eligible.append("r.memory_id != ?")
         params.append(int(exclude_memory_id))
     id_constraint = (
-        f" AND v.id IN (SELECT e.id FROM memory_evidence e "
-        f"JOIN memories m ON m.id=e.memory_id WHERE {' AND '.join(eligible)})"
+        f" AND v.id IN (SELECT r.id FROM memory_row r "
+        f"JOIN memories m ON m.id=r.memory_id WHERE {' AND '.join(eligible)})"
         if len(eligible) > 1 else ""
     )
     sql = (
         "SELECT e.id, v.distance FROM memory_evidence_vec v "
-        "JOIN memory_evidence e ON e.id=v.id "
-        "JOIN memories m ON m.id=e.memory_id "
+        "JOIN memory_row r ON r.id=v.id "
+        "JOIN memories m ON m.id=r.memory_id "
         f"WHERE v.embedding MATCH ? AND k=? AND {status_sql} AND {memory_status_sql}"
         f"{id_constraint} ORDER BY v.distance"
     )

@@ -25,7 +25,8 @@ def test_top_level_help_describes_commands(monkeypatch, capsys) -> None:
 
 def test_product_tool_docstrings_use_current_exact_review_contract() -> None:
     source = Path(server.__file__).read_text(encoding="utf-8")
-    assert "conflicts, conflict_detail, history, expired, audit, entities, help" in source
+    # D 部（0.17.1 修复批）：视图枚举补 workspaces（C2 发现接口）
+    assert "conflicts, conflict_detail, history, expired, audit, entities, workspaces, help" in source
     assert "judgments" not in source
     assert "before judging a conflict" in source
 

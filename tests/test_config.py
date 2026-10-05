@@ -127,7 +127,7 @@ def test_server_memory_edit_preserves_tags_when_new_tags_omitted(tmp_path: Path,
     assert set(app.tools) == {"memory", "memory_review", "memory_govern", "memory_repair"}
     written = _sc(app.tools["memory"](
         action="remember",
-        data={
+        data={"workspace": "default", 
             "content": "draft content",
             "subject": "server-wrapper",
             "tags": ["keep-me"],
@@ -192,11 +192,13 @@ def test_product_memory_review_and_govern_wrappers(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     written = tools.memory(
         action="remember",
-        data={"content": "old whole fact", "subject": "old", "tags": ["govern"]},
+        data={"workspace": "default", 
+            "workspace": "default","content": "old whole fact", "subject": "old", "tags": ["govern"]},
     )
     replacement = tools.memory(
         action="remember",
-        data={"content": "new whole fact", "subject": "new", "tags": ["govern"]},
+        data={"workspace": "default", 
+            "workspace": "default","content": "new whole fact", "subject": "new", "tags": ["govern"]},
     )
     old_id = written["data"]["id"]
     new_id = replacement["data"]["id"]
@@ -237,7 +239,8 @@ def test_product_memory_review_and_govern_wrappers(tmp_path: Path) -> None:
 
 def test_product_wrappers_validate_aliases_and_bad_inputs(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
-    written = tools.memory(action="remember", data={"content": "old", "subject": "old"})
+    written = tools.memory(action="remember", data={"workspace": "default", 
+        "workspace": "default","content": "old", "subject": "old"})
     memory_id = written["data"]["id"]
     tools.memory(action="update", data={"id": memory_id, "new_content": "new"})
 
@@ -268,8 +271,10 @@ def test_product_wrappers_validate_aliases_and_bad_inputs(tmp_path: Path) -> Non
 
 def test_product_repair_cleanup_history_id_alias_is_not_full_cleanup(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
-    first = tools.memory(action="remember", data={"content": "a", "subject": "a"})["data"]["id"]
-    second = tools.memory(action="remember", data={"content": "b", "subject": "b"})["data"]["id"]
+    first = tools.memory(action="remember", data={"workspace": "default", 
+        "workspace": "default","content": "a", "subject": "a"})["data"]["id"]
+    second = tools.memory(action="remember", data={"workspace": "default", 
+        "workspace": "default","content": "b", "subject": "b"})["data"]["id"]
     tools.memory(action="update", data={"id": first, "new_content": "a2"})
     tools.memory(action="update", data={"id": second, "new_content": "b2"})
     assert tools.memory_review(view="history", data={"id": first})["data"]["count"] == 1
@@ -298,7 +303,8 @@ def test_product_repair_cleanup_history_id_alias_is_not_full_cleanup(tmp_path: P
 
 def test_string_false_authorized_fails_closed_across_product_surfaces(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
-    memory_id = tools.memory(action="remember", data={
+    memory_id = tools.memory(action="remember", data={"workspace": "default", 
+        "workspace": "default",
         "content": "protected fact", "subject": "protected",
         "source_type": "user_confirmed", "protection_level": "locked",
     })["data"]["id"]
@@ -325,7 +331,8 @@ def test_string_false_authorized_fails_closed_across_product_surfaces(tmp_path: 
 
 def test_string_true_authorized_remains_compatible(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
-    memory_id = tools.memory(action="remember", data={
+    memory_id = tools.memory(action="remember", data={"workspace": "default", 
+        "workspace": "default",
         "content": "protected fact", "subject": "protected",
         "source_type": "user_confirmed", "protection_level": "locked",
     })["data"]["id"]
@@ -350,9 +357,9 @@ def test_all_governance_actions_require_explicit_user_authorization(tmp_path: Pa
             "conflict_id": 1, "expected_revision": 2, "memory_id": 1,
             "action": "update_current_claim", "content": "corrected fact",
         },
-        "rename_workspace_canonical": {"old": "old", "new": "new"},
-        "migrate_workspace": {"from": "old", "to": "new"},
-        "confirm_pending_workspace": {"memory_id": 1, "canonical": "canonical"},
+        "rename_workspace_canonical": {"old": "old", "new": "new", "workspace": "ws"},
+        "migrate_workspace": {"from": "old", "to": "new", "workspace": "ws"},
+        "confirm_pending_workspace": {"memory_id": 1, "canonical": "canonical", "workspace": "ws"},
     }
 
     for action, payload in valid_payloads.items():
@@ -540,14 +547,16 @@ def test_product_forwards_handle_bad_secondary_int_args(tmp_path: Path) -> None:
     (``"5"``), which MCP clients commonly send, still coerce and succeed.
     """
     tools = make_tools(tmp_path)
-    new_id = tools.memory(action="remember", data={"content": "new", "subject": "s"})["data"]["id"]
+    new_id = tools.memory(action="remember", data={"workspace": "default", 
+        "workspace": "default","content": "new", "subject": "s"})["data"]["id"]
 
     def assert_clean(label: str, result: dict) -> None:
         assert result["ok"] is False, f"{label} unexpectedly succeeded: {result}"
         assert "error" in result["data"], f"{label} must attach an error"
 
     # retire: non-int superseded_by (primary memory_id coerced, secondary not)
-    old = tools.memory(action="remember", data={"content": "old", "subject": "s"})["data"]["id"]
+    old = tools.memory(action="remember", data={"workspace": "default", 
+        "workspace": "default","content": "old", "subject": "s"})["data"]["id"]
     assert_clean(
         "govern.retire superseded_by=xyz",
         tools.memory_govern(action="retire", data={
@@ -615,7 +624,7 @@ def test_product_non_dict_data_returns_error(tmp_path: Path) -> None:
     assert_clean("memory.remember data=list", tools.memory(action="remember", data=["x"]))
     assert_clean("memory.find data=int", tools.memory(action="find", data=123))
     assert_clean("govern.retire data=str", tools.memory_govern(action="retire", data="bad"))
-    assert_clean("repair.rebuild_claims data=str", tools.memory_repair(task="rebuild_claims", data="bad"))
+    assert_clean("repair.claims_backfill data=str", tools.memory_repair(task="claims_backfill", data="bad"))
     assert_clean("review.conflicts data=int", tools.memory_review(view="conflicts", data=123))
 
     # data=None (explicit) is the default and must still work.
@@ -627,26 +636,31 @@ def test_product_memory_write_rejects_non_list_tags(tmp_path: Path) -> None:
     """The product schema rejects wrong tag types instead of coercing them."""
     tools = make_tools(tmp_path)
 
-    r = tools.memory(action="remember", data={"content": "a", "subject": "s", "tags": "todo"})
+    r = tools.memory(action="remember", data={"workspace": "default", 
+        "workspace": "default","content": "a", "subject": "s", "tags": "todo"})
     assert r["ok"] is False
     assert r["data"]["field"] == "tags"
 
-    r = tools.memory(action="remember", data={"content": "b", "subject": "s", "tags": 123})
+    r = tools.memory(action="remember", data={"workspace": "default", 
+        "workspace": "default","content": "b", "subject": "s", "tags": 123})
     assert r["ok"] is False
     assert r["data"]["field"] == "tags"
 
     # None → []
-    r = tools.memory(action="remember", data={"content": "c", "subject": "s"})
+    r = tools.memory(action="remember", data={"workspace": "default", 
+        "workspace": "default","content": "c", "subject": "s"})
     assert r["ok"] is True
     assert r["data"]["record"]["tags"] == []
 
     # list preserved
-    r = tools.memory(action="remember", data={"content": "d", "subject": "s", "tags": ["todo", "project"]})
+    r = tools.memory(action="remember", data={"workspace": "default", 
+        "workspace": "default","content": "d", "subject": "s", "tags": ["todo", "project"]})
     assert r["ok"] is True
     assert r["data"]["record"]["tags"] == ["todo", "project"]
 
     # Product JSON accepts arrays only; Python tuples are rejected at the boundary.
-    r = tools.memory(action="remember", data={"content": "e", "subject": "s", "tags": ("a", "b")})
+    r = tools.memory(action="remember", data={"workspace": "default", 
+        "workspace": "default","content": "e", "subject": "s", "tags": ("a", "b")})
     assert r["ok"] is False
     assert r["data"]["field"] == "tags"
 
@@ -1010,7 +1024,7 @@ def test_server_delegates_generation_gate_to_memorydb(
         server.build_runtime()
     with sqlite3.connect(legacy) as conn:
         assert conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE name='memory_evidence'"
+            "SELECT 1 FROM sqlite_master WHERE name='memory_row'"
         ).fetchone() is None
 
 
@@ -1070,7 +1084,6 @@ from memory_arbiter.constants import (
     EMBEDDING_RESERVED_TOKENS,
     REMOVED_ENV_NAMES,
     SEMANTIC_PRELOAD,
-    SEMANTIC_RESIDENT,
 )
 from memory_arbiter.db import MemoryDB
 from memory_arbiter.db.meta import vec_table_dimension
@@ -1156,6 +1169,10 @@ SLIM_SETTINGS_FIELDS = frozenset(
         "include_size",
         "semantic_conflict_enabled",
         "semantic_conflict_model_path",
+        "semantic_conflict_mdeberta_ckpt",
+        "semantic_conflict_mdeberta_model_dir",
+        "semantic_conflict_mdeberta_notice_min_prob",
+        "semantic_conflict_mdeberta_batch",
         "semantic_conflict_on_write",
         "semantic_conflict_gpu_layers",
         "semantic_conflict_notice_sync_wait_ms",
@@ -1170,7 +1187,9 @@ def test_settings_field_set_matches_slim_contract() -> None:
     # semantic_conflict_max_notice_pairs removed (A5) and policy_path/policy
     # removed (B1: AgentPolicy deleted). config_file_loaded stays a
     # runtime-injected field (never a file key, not in the registry).
-    assert len(SLIM_SETTINGS_FIELDS) == 21
+    # 0.17.0 P2-5.2: claims_required added (grey-period switch, default off).
+    # 0.17.1: mdeberta judge keys added (ckpt/model_dir/notice_min_prob/batch).
+    assert len(SLIM_SETTINGS_FIELDS) == 25
     assert set(Settings.__dataclass_fields__) == SLIM_SETTINGS_FIELDS
 
 
@@ -1275,7 +1294,41 @@ def test_no_embedding_model_path_means_embedding_off(
     assert MemoryTools(settings)._embedding_configured() is False
 
 
-def test_semantic_model_path_alone_auto_enables_and_preloads(
+def test_semantic_mdeberta_ckpt_alone_auto_enables_and_preloads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ckpt = tmp_path / "mdeberta-v4m.pt"
+    ckpt.write_bytes(b"fake")
+    (tmp_path / "mdeberta-base").mkdir()
+    _hermetic_env(
+        monkeypatch,
+        tmp_path,
+        {
+            "db_path": str(tmp_path / "b.sqlite3"),
+            "backup_jsonl": str(tmp_path / "b.jsonl"),
+            "semantic_conflict": {"mdeberta_ckpt": str(ckpt)},
+        },
+    )
+
+    settings = Settings.from_env()
+    assert settings.semantic_conflict_enabled is True
+    assert settings.semantic_conflict_mdeberta_ckpt == ckpt
+    # model_dir default = ckpt-adjacent mdeberta-base (§3.6)
+    assert settings.semantic_conflict_mdeberta_model_dir == tmp_path / "mdeberta-base"
+    assert settings.semantic_conflict_mdeberta_notice_min_prob == 0.5  # owner 2026-10-05 终拍 T=0.5
+    assert any("auto-enabled" in warning for warning in settings.config_warnings)
+
+    tools = MemoryTools(settings)
+    status = tools._semantic_status()
+    assert status["enabled"] is True
+    assert status["configured"] is True
+    assert status["engine"] == "mdeberta"
+    # preload froze to true: a configured checkpoint loads at startup.
+    assert SEMANTIC_PRELOAD is True
+
+
+def test_semantic_legacy_model_path_warns_and_does_not_enable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1292,18 +1345,12 @@ def test_semantic_model_path_alone_auto_enables_and_preloads(
     )
 
     settings = Settings.from_env()
-    assert settings.semantic_conflict_enabled is True
-    assert settings.semantic_conflict_model_path == model
-    assert any("auto-enabled" in warning for warning in settings.config_warnings)
-
-    tools = MemoryTools(settings)
-    status = tools._semantic_status()
-    assert status["enabled"] is True
-    assert status["configured"] is True
-    # preload/resident froze to true: a configured model loads at startup and
-    # stays resident (former from_env default false — approved behavior change).
-    assert SEMANTIC_PRELOAD is True
-    assert SEMANTIC_RESIDENT is True
+    # 0.17.1: the Qwen/GGUF path is retired — configured legacy key warns and
+    # does NOT enable; intent now lives in mdeberta_ckpt.
+    assert settings.semantic_conflict_enabled is False
+    assert MemoryTools(settings)._semantic_configured() is False
+    assert any("model_path is retired" in w for w in settings.config_warnings)
+    assert any("mdeberta_ckpt" in w for w in settings.config_warnings)
 
 
 def test_semantic_explicit_false_wins_over_model_path(
@@ -1439,7 +1486,7 @@ def test_fake_embedder_dim_creates_lazy_tables_and_records_active_dim(
     with db.connection() as conn:
         assert (
             conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_evidence_vec'"
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_row_vec'"
             ).fetchone()
             is None
         )
@@ -1461,11 +1508,11 @@ def test_fake_embedder_dim_creates_lazy_tables_and_records_active_dim(
     with db.connection() as conn:
         assert (
             conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_evidence_vec'"
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_row_vec'"
             ).fetchone()
             is not None
         )
-        assert vec_table_dimension(conn, "memory_evidence_vec") == 4
+        assert vec_table_dimension(conn, "memory_row_vec") == 4
         assert vec_table_dimension(conn, "workspace_canonicals_vec") == 4
     assert db.meta.get_active_dim() == 4
     assert db.get_vec_index_state()["state"] == "ready"
@@ -1488,7 +1535,7 @@ def test_dim_change_drops_and_recreates_vec_tables(tmp_path: Path) -> None:
     # and re-create them at the new dim atomically with the mismatch flip.
     db.init_vec_index_state("new-space", True, active_dim=2)
     with db.connection() as conn:
-        assert vec_table_dimension(conn, "memory_evidence_vec") == 2
+        assert vec_table_dimension(conn, "memory_row_vec") == 2
         assert vec_table_dimension(conn, "workspace_canonicals_vec") == 2
     assert db.meta.get_active_dim() == 2
     state = db.get_vec_index_state()
@@ -1519,11 +1566,11 @@ def test_dim_swap_back_arms_rebuild_on_native_dim_tables(tmp_path: Path) -> None
     db.init_vec_index_state("space-a", True, active_dim=4)  # swap back
 
     with db.connection() as conn:
-        assert vec_table_dimension(conn, "memory_evidence_vec") == 4
+        assert vec_table_dimension(conn, "memory_row_vec") == 4
         assert vec_table_dimension(conn, "workspace_canonicals_vec") == 4
         # A native-dim vector must be insertable — the wedged state failed here.
         conn.execute(
-            "INSERT INTO memory_evidence_vec(id, parent_status, embedding) VALUES(1,'active',?)",
+            "INSERT INTO memory_row_vec(id, parent_status, embedding) VALUES(1,'active',?)",
             ("[" + ", ".join("0.1" for _ in range(4)) + "]",),
         )
     state = db.get_vec_index_state()
@@ -1561,7 +1608,7 @@ def test_default_model_space_id_unchanged_vs_literal_former_defaults(
     from_literals = compute_embedding_space_id(
         digest,
         768,
-        2,
+        2,  # 0.17.0 终局（owner 2026-09-26）：存储侧裸文本=已发版 v2 语义，版本不轮换
         {"n_ctx": 2048, "reserved_tokens": 64, "max_section_chars": 3600},
     )
     assert from_constants == from_literals
@@ -1622,7 +1669,7 @@ def test_model_configured_library_without_vec_tables_is_healthy(tmp_path: Path) 
     assert db.db_available is True
     assert not any("sqlite-vec unavailable" in w for w in db.state.warnings)
     with db.connection() as conn:
-        for table in ("memory_evidence_vec", "workspace_canonicals_vec"):
+        for table in ("memory_row_vec", "workspace_canonicals_vec"):
             assert (
                 conn.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",

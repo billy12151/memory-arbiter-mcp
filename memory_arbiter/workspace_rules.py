@@ -247,8 +247,13 @@ def rule_decision(
         str(ws_raw or ""), ev.get("title", ""), ev.get("first_para", ""),
     ]).casefold()
 
-    # AUTO: the mechanical layer already found high-confidence identity.
-    if matched_by in {"confirmed_alias", "exact"}:
+    # AUTO: the mechanical layer already found high-confidence identity. This
+    # return is the row's own identity REUSE (canonical == the matched name),
+    # never a cross-bucket merge: mechanical_variant is the same deterministic
+    # identity class as exact (spec §11: reuse without vector/model); with the
+    # 0.17.1 suggester retired there is no model layer to ask, and an ASK here
+    # would contradict data the resolver has already folded.
+    if matched_by in {"confirmed_alias", "exact", "mechanical_variant"}:
         return {"decision": "AUTO", "reason": matched_by, "canonical": resolved.get("canonical")}
 
     # KEEP: reference/borrowed material must not be merged into what it cites.
@@ -264,10 +269,13 @@ def rule_decision(
     similar = resolved.get("similar") or []
     non_rejected = [s for s in similar if s.get("name") not in rejected]
 
-    # KEEP: the resolver's chosen canonical is itself a rejected pair. The
-    # resolver skips rejected candidates on the vector path, so this only bites
-    # when the chosen canonical *equals* a rejected name (e.g. an exact/confirmed
-    # path that a later rejection should override) — keep the memory separate.
+    # KEEP: the resolver's chosen canonical is itself a rejected pair. Reachable
+    # only in the matched_by="new" window: exact/confirmed/mechanical_variant
+    # already returned AUTO above (their canonical IS the row's own identity
+    # reuse), and the vector path's `best` is filtered against the same
+    # rejected set at the resolver. The new-path shape is a raw name that is
+    # itself a rejected canonical target for its own alias key (alias≈name,
+    # target==name) — keep the memory separate.
     if resolved.get("canonical") in rejected:
         return {"decision": "KEEP", "reason": "rejected_pair", "canonical": ws_raw}
 

@@ -31,10 +31,6 @@ from dataclasses import dataclass
 _CJK_RE = re.compile(
     r"[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF\u3040-\u309F\u30A0-\u30FF\uAC00-\uD7AF]"
 )
-# ASCII run = letters, digits, dots, hyphens, underscores, plus, slash — i.e.
-# things that commonly appear in version ids (v0.2.6), identifiers
-# (memory-arbiter), file paths, etc. We keep them whole rather than chopping.
-_ASCII_RUN_RE = re.compile(r"[A-Za-z0-9._\-+/]+")
 # Separators are everything else (whitespace, CJK punctuation, hyphens acting
 # as separators, parentheses, slashes when surrounded by spaces, etc.). They
 # bound runs but don't become anchors themselves.
@@ -74,12 +70,6 @@ GENERIC_ANCHORS: frozenset[str] = frozenset({
     "文档", "业务", "数据", "接口", "功能", "模块", "状态", "规则", "策略",
     "交付", "处理", "管理",
 })
-
-
-def _is_cjk_char(ch: str) -> bool:
-    """True if a char is CJK. Implementation: text.is_cjk_char (Phase 1); re-export."""
-    from .text import is_cjk_char
-    return is_cjk_char(ch)
 
 
 def _split_runs(text: str) -> list[tuple[str, str]]:

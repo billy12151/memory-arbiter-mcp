@@ -8,6 +8,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": 5,
    "queries": [
     {
@@ -28,6 +29,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": 5,
    "queries": [
     {
@@ -49,6 +51,7 @@
   "operation": "batch_read",
   "payload_in": {
    "content_mode": "preview",
+   "hit_window": 2,
    "memory_ids": [
     1,
     2
@@ -64,6 +67,7 @@
   "warnings": [],
   "payload_out": {
    "content_mode": "preview",
+   "hit_window": 2,
    "memory_ids": [
     1,
     2
@@ -86,6 +90,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -112,6 +117,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -197,6 +203,7 @@
   "operation": "read",
   "payload_in": {
    "content_mode": "preview",
+   "hit_window": 2,
    "id": 1,
    "memory_id": 1,
    "span": {
@@ -208,6 +215,7 @@
   "warnings": [],
   "payload_out": {
    "content_mode": "preview",
+   "hit_window": 2,
    "id": 1,
    "memory_id": 1,
    "span": {
@@ -240,7 +248,9 @@
    "workspace": "ws"
   },
   "error": null,
-  "warnings": [],
+  "warnings": [
+   "metadata entity/scope \u5df2\u5e9f\u5f03\uff080.17 \u95e8 v2\uff09\uff0c\u65e0\u9700\u518d\u4f20"
+  ],
   "payload_out": {
    "confidence": 0.5,
    "content": "body text",
@@ -499,7 +509,8 @@
    "authorized": true,
    "from": "ws-a",
    "reason": "because",
-   "to": "ws-b"
+   "to": "ws-b",
+   "workspace": "ws"
   },
   "error": null,
   "warnings": [],
@@ -507,7 +518,8 @@
    "authorized": true,
    "from": "ws-a",
    "reason": "because",
-   "to": "ws-b"
+   "to": "ws-b",
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -549,7 +561,8 @@
    "authorized": true,
    "new": "ws-b",
    "old": "ws-a",
-   "reason": "because"
+   "reason": "because",
+   "workspace": "ws"
   },
   "error": null,
   "warnings": [],
@@ -557,7 +570,8 @@
    "authorized": true,
    "new": "ws-b",
    "old": "ws-a",
-   "reason": "because"
+   "reason": "because",
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -947,8 +961,8 @@
    "action": "page",
    "max_memories": 10,
    "neighbor_k": 5,
-   "time_budget_s": 5,
-   "workspace": "ws"
+   "slow_lane": false,
+   "time_budget_s": 5
   },
   "error": null,
   "warnings": [],
@@ -956,8 +970,8 @@
    "action": "page",
    "max_memories": 10,
    "neighbor_k": 5,
-   "time_budget_s": 5,
-   "workspace": "ws"
+   "slow_lane": false,
+   "time_budget_s": 5
   },
   "raises": null
  },
@@ -1098,14 +1112,12 @@
   "surface": "memory_review",
   "operation": "doctor",
   "payload_in": {
-   "deep": false,
-   "workspace": "ws"
+   "deep": false
   },
   "error": null,
   "warnings": [],
   "payload_out": {
-   "deep": false,
-   "workspace": "ws"
+   "deep": false
   },
   "raises": null
  },
@@ -1228,6 +1240,22 @@
   "raises": null
  },
  {
+  "case_id": "A/memory_review.workspaces",
+  "surface": "memory_review",
+  "operation": "workspaces",
+  "payload_in": {
+   "limit": 10,
+   "workspace": "ws"
+  },
+  "error": null,
+  "warnings": [],
+  "payload_out": {
+   "limit": 10,
+   "workspace": "ws"
+  },
+  "raises": null
+ },
+ {
   "case_id": "B/memory.batch_find/after_time/wrongtype",
   "surface": "memory",
   "operation": "batch_find",
@@ -1236,6 +1264,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": 5,
    "queries": [
     {
@@ -1260,6 +1289,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": 5,
    "queries": [
     {
@@ -1284,6 +1314,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": 5,
    "queries": [
     {
@@ -1308,6 +1339,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": 5,
    "queries": [
     {
@@ -1332,6 +1364,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": 5,
    "queries": [
     {
@@ -1356,6 +1389,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": 5,
    "queries": [
     {
@@ -1380,6 +1414,7 @@
    "before_time": 123,
    "content_mode": "preview",
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": 5,
    "queries": [
     {
@@ -1404,6 +1439,7 @@
    "before_time": 123,
    "content_mode": "preview",
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": 5,
    "queries": [
     {
@@ -1428,6 +1464,7 @@
    "before_time": "not-a-timestamp",
    "content_mode": "preview",
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": 5,
    "queries": [
     {
@@ -1452,6 +1489,7 @@
    "before_time": "not-a-timestamp",
    "content_mode": "preview",
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": 5,
    "queries": [
     {
@@ -1476,6 +1514,7 @@
    "before_time": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
    "content_mode": "preview",
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": 5,
    "queries": [
     {
@@ -1500,6 +1539,7 @@
    "before_time": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
    "content_mode": "preview",
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": 5,
    "queries": [
     {
@@ -1526,6 +1566,7 @@
     "unexpected": "object"
    },
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": 5,
    "queries": [
     {
@@ -1548,6 +1589,7 @@
     "unexpected": "object"
    },
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": 5,
    "queries": [
     {
@@ -1574,6 +1616,7 @@
    "deduplicate": {
     "unexpected": "object"
    },
+   "hit_window": 2,
    "limit_per_query": 5,
    "queries": [
     {
@@ -1595,6 +1638,291 @@
    "content_mode": "preview",
    "deduplicate": {
     "unexpected": "object"
+   },
+   "hit_window": 2,
+   "limit_per_query": 5,
+   "queries": [
+    {
+     "id": "q1",
+     "query": "hello"
+    }
+   ],
+   "source_type": "agent_generated",
+   "tags_filter": [
+    "t"
+   ],
+   "workspace": "ws"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory.batch_find/hit_window/wrongtype",
+  "surface": "memory",
+  "operation": "batch_find",
+  "payload_in": {
+   "after_time": "2026-01-01T00:00:00+00:00",
+   "before_time": "2026-12-31T00:00:00+00:00",
+   "content_mode": "preview",
+   "deduplicate": true,
+   "hit_window": "abc",
+   "limit_per_query": 5,
+   "queries": [
+    {
+     "id": "q1",
+     "query": "hello"
+    }
+   ],
+   "source_type": "agent_generated",
+   "tags_filter": [
+    "t"
+   ],
+   "workspace": "ws"
+  },
+  "error": null,
+  "warnings": [],
+  "payload_out": {
+   "after_time": "2026-01-01T00:00:00+00:00",
+   "before_time": "2026-12-31T00:00:00+00:00",
+   "content_mode": "preview",
+   "deduplicate": true,
+   "hit_window": "abc",
+   "limit_per_query": 5,
+   "queries": [
+    {
+     "id": "q1",
+     "query": "hello"
+    }
+   ],
+   "source_type": "agent_generated",
+   "tags_filter": [
+    "t"
+   ],
+   "workspace": "ws"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory.batch_find/hit_window/under",
+  "surface": "memory",
+  "operation": "batch_find",
+  "payload_in": {
+   "after_time": "2026-01-01T00:00:00+00:00",
+   "before_time": "2026-12-31T00:00:00+00:00",
+   "content_mode": "preview",
+   "deduplicate": true,
+   "hit_window": -1,
+   "limit_per_query": 5,
+   "queries": [
+    {
+     "id": "q1",
+     "query": "hello"
+    }
+   ],
+   "source_type": "agent_generated",
+   "tags_filter": [
+    "t"
+   ],
+   "workspace": "ws"
+  },
+  "error": null,
+  "warnings": [],
+  "payload_out": {
+   "after_time": "2026-01-01T00:00:00+00:00",
+   "before_time": "2026-12-31T00:00:00+00:00",
+   "content_mode": "preview",
+   "deduplicate": true,
+   "hit_window": -1,
+   "limit_per_query": 5,
+   "queries": [
+    {
+     "id": "q1",
+     "query": "hello"
+    }
+   ],
+   "source_type": "agent_generated",
+   "tags_filter": [
+    "t"
+   ],
+   "workspace": "ws"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory.batch_find/hit_window/over",
+  "surface": "memory",
+  "operation": "batch_find",
+  "payload_in": {
+   "after_time": "2026-01-01T00:00:00+00:00",
+   "before_time": "2026-12-31T00:00:00+00:00",
+   "content_mode": "preview",
+   "deduplicate": true,
+   "hit_window": 6,
+   "limit_per_query": 5,
+   "queries": [
+    {
+     "id": "q1",
+     "query": "hello"
+    }
+   ],
+   "source_type": "agent_generated",
+   "tags_filter": [
+    "t"
+   ],
+   "workspace": "ws"
+  },
+  "error": null,
+  "warnings": [],
+  "payload_out": {
+   "after_time": "2026-01-01T00:00:00+00:00",
+   "before_time": "2026-12-31T00:00:00+00:00",
+   "content_mode": "preview",
+   "deduplicate": true,
+   "hit_window": 6,
+   "limit_per_query": 5,
+   "queries": [
+    {
+     "id": "q1",
+     "query": "hello"
+    }
+   ],
+   "source_type": "agent_generated",
+   "tags_filter": [
+    "t"
+   ],
+   "workspace": "ws"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory.batch_find/hit_window/atmin",
+  "surface": "memory",
+  "operation": "batch_find",
+  "payload_in": {
+   "after_time": "2026-01-01T00:00:00+00:00",
+   "before_time": "2026-12-31T00:00:00+00:00",
+   "content_mode": "preview",
+   "deduplicate": true,
+   "hit_window": 0,
+   "limit_per_query": 5,
+   "queries": [
+    {
+     "id": "q1",
+     "query": "hello"
+    }
+   ],
+   "source_type": "agent_generated",
+   "tags_filter": [
+    "t"
+   ],
+   "workspace": "ws"
+  },
+  "error": null,
+  "warnings": [],
+  "payload_out": {
+   "after_time": "2026-01-01T00:00:00+00:00",
+   "before_time": "2026-12-31T00:00:00+00:00",
+   "content_mode": "preview",
+   "deduplicate": true,
+   "hit_window": 0,
+   "limit_per_query": 5,
+   "queries": [
+    {
+     "id": "q1",
+     "query": "hello"
+    }
+   ],
+   "source_type": "agent_generated",
+   "tags_filter": [
+    "t"
+   ],
+   "workspace": "ws"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory.batch_find/hit_window/atmax",
+  "surface": "memory",
+  "operation": "batch_find",
+  "payload_in": {
+   "after_time": "2026-01-01T00:00:00+00:00",
+   "before_time": "2026-12-31T00:00:00+00:00",
+   "content_mode": "preview",
+   "deduplicate": true,
+   "hit_window": 5,
+   "limit_per_query": 5,
+   "queries": [
+    {
+     "id": "q1",
+     "query": "hello"
+    }
+   ],
+   "source_type": "agent_generated",
+   "tags_filter": [
+    "t"
+   ],
+   "workspace": "ws"
+  },
+  "error": null,
+  "warnings": [],
+  "payload_out": {
+   "after_time": "2026-01-01T00:00:00+00:00",
+   "before_time": "2026-12-31T00:00:00+00:00",
+   "content_mode": "preview",
+   "deduplicate": true,
+   "hit_window": 5,
+   "limit_per_query": 5,
+   "queries": [
+    {
+     "id": "q1",
+     "query": "hello"
+    }
+   ],
+   "source_type": "agent_generated",
+   "tags_filter": [
+    "t"
+   ],
+   "workspace": "ws"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory.batch_find/hit_window/hugedigits",
+  "surface": "memory",
+  "operation": "batch_find",
+  "payload_in": {
+   "after_time": "2026-01-01T00:00:00+00:00",
+   "before_time": "2026-12-31T00:00:00+00:00",
+   "content_mode": "preview",
+   "deduplicate": true,
+   "hit_window": {
+    "$rep": "9",
+    "$n": 5000,
+    "$pad": true
+   },
+   "limit_per_query": 5,
+   "queries": [
+    {
+     "id": "q1",
+     "query": "hello"
+    }
+   ],
+   "source_type": "agent_generated",
+   "tags_filter": [
+    "t"
+   ],
+   "workspace": "ws"
+  },
+  "error": null,
+  "warnings": [],
+  "payload_out": {
+   "after_time": "2026-01-01T00:00:00+00:00",
+   "before_time": "2026-12-31T00:00:00+00:00",
+   "content_mode": "preview",
+   "deduplicate": true,
+   "hit_window": {
+    "$rep": "9",
+    "$n": 5000,
+    "$pad": true
    },
    "limit_per_query": 5,
    "queries": [
@@ -1620,6 +1948,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": "abc",
    "queries": [
     {
@@ -1644,6 +1973,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": "abc",
    "queries": [
     {
@@ -1668,6 +1998,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": 0,
    "queries": [
     {
@@ -1692,6 +2023,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": 0,
    "queries": [
     {
@@ -1716,6 +2048,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": 21,
    "queries": [
     {
@@ -1740,6 +2073,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": 21,
    "queries": [
     {
@@ -1764,6 +2098,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": 1,
    "queries": [
     {
@@ -1784,6 +2119,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": 1,
    "queries": [
     {
@@ -1808,6 +2144,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": 20,
    "queries": [
     {
@@ -1828,6 +2165,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": 20,
    "queries": [
     {
@@ -1852,6 +2190,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": {
     "$rep": "9",
     "$n": 5000,
@@ -1880,6 +2219,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": {
     "$rep": "9",
     "$n": 5000,
@@ -1908,6 +2248,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": 5,
    "queries": [
     {
@@ -1939,6 +2280,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": 5,
    "queries": [
     {
@@ -1963,6 +2305,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": 5,
    "queries": [
     {
@@ -1998,6 +2341,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": 5,
    "queries": [
     {
@@ -2026,6 +2370,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": 5,
    "queries": [
     {
@@ -2048,6 +2393,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": 5,
    "queries": [
     {
@@ -2070,6 +2416,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": 5,
    "queries": [
     {
@@ -2194,6 +2541,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": 5,
    "queries": [
     {
@@ -2318,6 +2666,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": 5,
    "queries": [
     {
@@ -2342,6 +2691,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": 5,
    "queries": [
     {
@@ -2366,6 +2716,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": 5,
    "queries": [
     {
@@ -2485,6 +2836,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": 5,
    "queries": [
     {
@@ -2608,6 +2960,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": 5,
    "queries": [
     {
@@ -2632,6 +2985,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": 5,
    "queries": [
     {
@@ -2656,6 +3010,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": 5,
    "queries": [
     {
@@ -2680,6 +3035,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": 5,
    "queries": [
     {
@@ -2704,6 +3060,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": 5,
    "queries": [
     {
@@ -2732,6 +3089,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": 5,
    "queries": [
     {
@@ -2760,6 +3118,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": 5,
    "queries": [
     {
@@ -2784,6 +3143,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": 5,
    "queries": [
     {
@@ -2812,6 +3172,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": 5,
    "queries": [
     {
@@ -2836,6 +3197,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "deduplicate": true,
+   "hit_window": 2,
    "limit_per_query": 5,
    "queries": [
     {
@@ -2859,6 +3221,7 @@
    "content_mode": {
     "unexpected": "object"
    },
+   "hit_window": 2,
    "memory_ids": [
     1,
     2
@@ -2880,6 +3243,231 @@
    "content_mode": {
     "unexpected": "object"
    },
+   "hit_window": 2,
+   "memory_ids": [
+    1,
+    2
+   ],
+   "spans": {
+    "1": {
+     "start": 0
+    }
+   },
+   "workspace": "ws"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory.batch_read/hit_window/wrongtype",
+  "surface": "memory",
+  "operation": "batch_read",
+  "payload_in": {
+   "content_mode": "preview",
+   "hit_window": "abc",
+   "memory_ids": [
+    1,
+    2
+   ],
+   "spans": {
+    "1": {
+     "start": 0
+    }
+   },
+   "workspace": "ws"
+  },
+  "error": null,
+  "warnings": [],
+  "payload_out": {
+   "content_mode": "preview",
+   "hit_window": "abc",
+   "memory_ids": [
+    1,
+    2
+   ],
+   "spans": {
+    "1": {
+     "start": 0
+    }
+   },
+   "workspace": "ws"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory.batch_read/hit_window/under",
+  "surface": "memory",
+  "operation": "batch_read",
+  "payload_in": {
+   "content_mode": "preview",
+   "hit_window": -1,
+   "memory_ids": [
+    1,
+    2
+   ],
+   "spans": {
+    "1": {
+     "start": 0
+    }
+   },
+   "workspace": "ws"
+  },
+  "error": null,
+  "warnings": [],
+  "payload_out": {
+   "content_mode": "preview",
+   "hit_window": -1,
+   "memory_ids": [
+    1,
+    2
+   ],
+   "spans": {
+    "1": {
+     "start": 0
+    }
+   },
+   "workspace": "ws"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory.batch_read/hit_window/over",
+  "surface": "memory",
+  "operation": "batch_read",
+  "payload_in": {
+   "content_mode": "preview",
+   "hit_window": 6,
+   "memory_ids": [
+    1,
+    2
+   ],
+   "spans": {
+    "1": {
+     "start": 0
+    }
+   },
+   "workspace": "ws"
+  },
+  "error": null,
+  "warnings": [],
+  "payload_out": {
+   "content_mode": "preview",
+   "hit_window": 6,
+   "memory_ids": [
+    1,
+    2
+   ],
+   "spans": {
+    "1": {
+     "start": 0
+    }
+   },
+   "workspace": "ws"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory.batch_read/hit_window/atmin",
+  "surface": "memory",
+  "operation": "batch_read",
+  "payload_in": {
+   "content_mode": "preview",
+   "hit_window": 0,
+   "memory_ids": [
+    1,
+    2
+   ],
+   "spans": {
+    "1": {
+     "start": 0
+    }
+   },
+   "workspace": "ws"
+  },
+  "error": null,
+  "warnings": [],
+  "payload_out": {
+   "content_mode": "preview",
+   "hit_window": 0,
+   "memory_ids": [
+    1,
+    2
+   ],
+   "spans": {
+    "1": {
+     "start": 0
+    }
+   },
+   "workspace": "ws"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory.batch_read/hit_window/atmax",
+  "surface": "memory",
+  "operation": "batch_read",
+  "payload_in": {
+   "content_mode": "preview",
+   "hit_window": 5,
+   "memory_ids": [
+    1,
+    2
+   ],
+   "spans": {
+    "1": {
+     "start": 0
+    }
+   },
+   "workspace": "ws"
+  },
+  "error": null,
+  "warnings": [],
+  "payload_out": {
+   "content_mode": "preview",
+   "hit_window": 5,
+   "memory_ids": [
+    1,
+    2
+   ],
+   "spans": {
+    "1": {
+     "start": 0
+    }
+   },
+   "workspace": "ws"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory.batch_read/hit_window/hugedigits",
+  "surface": "memory",
+  "operation": "batch_read",
+  "payload_in": {
+   "content_mode": "preview",
+   "hit_window": {
+    "$rep": "9",
+    "$n": 5000,
+    "$pad": true
+   },
+   "memory_ids": [
+    1,
+    2
+   ],
+   "spans": {
+    "1": {
+     "start": 0
+    }
+   },
+   "workspace": "ws"
+  },
+  "error": null,
+  "warnings": [],
+  "payload_out": {
+   "content_mode": "preview",
+   "hit_window": {
+    "$rep": "9",
+    "$n": 5000,
+    "$pad": true
+   },
    "memory_ids": [
     1,
     2
@@ -2899,6 +3487,7 @@
   "operation": "batch_read",
   "payload_in": {
    "content_mode": "preview",
+   "hit_window": 2,
    "memory_ids": [
     1,
     2
@@ -2914,6 +3503,7 @@
   "warnings": [],
   "payload_out": {
    "content_mode": "preview",
+   "hit_window": 2,
    "memory_ids": [
     1,
     2
@@ -2929,6 +3519,7 @@
   "operation": "batch_read",
   "payload_in": {
    "content_mode": "preview",
+   "hit_window": 2,
    "memory_ids": [
     1,
     2
@@ -2948,6 +3539,7 @@
   "warnings": [],
   "payload_out": {
    "content_mode": "preview",
+   "hit_window": 2,
    "memory_ids": [
     1,
     2
@@ -2967,6 +3559,7 @@
   "operation": "batch_read",
   "payload_in": {
    "content_mode": "preview",
+   "hit_window": 2,
    "memory_ids": [
     1,
     2
@@ -2986,6 +3579,7 @@
   "warnings": [],
   "payload_out": {
    "content_mode": "preview",
+   "hit_window": 2,
    "memory_ids": [
     1,
     2
@@ -3005,6 +3599,7 @@
   "operation": "batch_read",
   "payload_in": {
    "content_mode": "preview",
+   "hit_window": 2,
    "memory_ids": [
     1,
     2
@@ -3025,6 +3620,7 @@
   "warnings": [],
   "payload_out": {
    "content_mode": "preview",
+   "hit_window": 2,
    "memory_ids": [
     1,
     2
@@ -3045,6 +3641,7 @@
   "operation": "batch_read",
   "payload_in": {
    "content_mode": "preview",
+   "hit_window": 2,
    "memory_ids": [
     1,
     2
@@ -3065,6 +3662,7 @@
   "warnings": [],
   "payload_out": {
    "content_mode": "preview",
+   "hit_window": 2,
    "memory_ids": [
     1,
     2
@@ -3085,6 +3683,7 @@
   "operation": "batch_read",
   "payload_in": {
    "content_mode": "preview",
+   "hit_window": 2,
    "memory_ids": [
     1,
     2
@@ -3104,6 +3703,7 @@
   "warnings": [],
   "payload_out": {
    "content_mode": "preview",
+   "hit_window": 2,
    "memory_ids": [
     1,
     2
@@ -3123,6 +3723,7 @@
   "operation": "batch_read",
   "payload_in": {
    "content_mode": "preview",
+   "hit_window": 2,
    "memory_ids": [
     1,
     2
@@ -3146,6 +3747,7 @@
   "warnings": [],
   "payload_out": {
    "content_mode": "preview",
+   "hit_window": 2,
    "memory_ids": [
     1,
     2
@@ -3169,6 +3771,7 @@
   "operation": "batch_read",
   "payload_in": {
    "content_mode": "preview",
+   "hit_window": 2,
    "memory_ids": [
     1,
     2
@@ -3188,6 +3791,7 @@
   "warnings": [],
   "payload_out": {
    "content_mode": "preview",
+   "hit_window": 2,
    "memory_ids": [
     1,
     2
@@ -3211,6 +3815,7 @@
   "operation": "batch_read",
   "payload_in": {
    "content_mode": "preview",
+   "hit_window": 2,
    "memory_ids": [
     1,
     2
@@ -3230,6 +3835,7 @@
   "warnings": [],
   "payload_out": {
    "content_mode": "preview",
+   "hit_window": 2,
    "memory_ids": [
     1,
     2
@@ -3252,6 +3858,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -3282,6 +3889,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -3312,6 +3920,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -3342,6 +3951,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -3372,6 +3982,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -3402,6 +4013,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -3432,6 +4044,7 @@
    "before_time": 123,
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -3462,6 +4075,7 @@
    "before_time": 123,
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -3492,6 +4106,7 @@
    "before_time": "not-a-timestamp",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -3522,6 +4137,7 @@
    "before_time": "not-a-timestamp",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -3552,6 +4168,7 @@
    "before_time": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -3582,6 +4199,7 @@
    "before_time": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -3614,6 +4232,7 @@
     "unexpected": "object"
    },
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -3642,6 +4261,7 @@
     "unexpected": "object"
    },
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -3674,6 +4294,7 @@
    "debug_ranking": {
     "unexpected": "object"
    },
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -3701,6 +4322,363 @@
    "content_mode": "preview",
    "debug_ranking": {
     "unexpected": "object"
+   },
+   "hit_window": 2,
+   "include_conflict_signal": false,
+   "include_linked_open_items": false,
+   "include_size": false,
+   "limit": 10,
+   "offset": 0,
+   "query": "hello",
+   "query_embedding": [
+    0.1,
+    0.2
+   ],
+   "source_type": "agent_generated",
+   "tags": [
+    "t"
+   ],
+   "tags_filter": [
+    "t"
+   ],
+   "workspace": "ws"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory.find/hit_window/wrongtype",
+  "surface": "memory",
+  "operation": "find",
+  "payload_in": {
+   "after_time": "2026-01-01T00:00:00+00:00",
+   "before_time": "2026-12-31T00:00:00+00:00",
+   "content_mode": "preview",
+   "debug_ranking": false,
+   "hit_window": "abc",
+   "include_conflict_signal": false,
+   "include_linked_open_items": false,
+   "include_size": false,
+   "limit": 10,
+   "offset": 0,
+   "query": "hello",
+   "query_embedding": [
+    0.1,
+    0.2
+   ],
+   "source_type": "agent_generated",
+   "tags": [
+    "t"
+   ],
+   "tags_filter": [
+    "t"
+   ],
+   "workspace": "ws"
+  },
+  "error": null,
+  "warnings": [],
+  "payload_out": {
+   "after_time": "2026-01-01T00:00:00+00:00",
+   "before_time": "2026-12-31T00:00:00+00:00",
+   "content_mode": "preview",
+   "debug_ranking": false,
+   "hit_window": "abc",
+   "include_conflict_signal": false,
+   "include_linked_open_items": false,
+   "include_size": false,
+   "limit": 10,
+   "offset": 0,
+   "query": "hello",
+   "query_embedding": [
+    0.1,
+    0.2
+   ],
+   "source_type": "agent_generated",
+   "tags": [
+    "t"
+   ],
+   "tags_filter": [
+    "t"
+   ],
+   "workspace": "ws"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory.find/hit_window/under",
+  "surface": "memory",
+  "operation": "find",
+  "payload_in": {
+   "after_time": "2026-01-01T00:00:00+00:00",
+   "before_time": "2026-12-31T00:00:00+00:00",
+   "content_mode": "preview",
+   "debug_ranking": false,
+   "hit_window": -1,
+   "include_conflict_signal": false,
+   "include_linked_open_items": false,
+   "include_size": false,
+   "limit": 10,
+   "offset": 0,
+   "query": "hello",
+   "query_embedding": [
+    0.1,
+    0.2
+   ],
+   "source_type": "agent_generated",
+   "tags": [
+    "t"
+   ],
+   "tags_filter": [
+    "t"
+   ],
+   "workspace": "ws"
+  },
+  "error": null,
+  "warnings": [],
+  "payload_out": {
+   "after_time": "2026-01-01T00:00:00+00:00",
+   "before_time": "2026-12-31T00:00:00+00:00",
+   "content_mode": "preview",
+   "debug_ranking": false,
+   "hit_window": -1,
+   "include_conflict_signal": false,
+   "include_linked_open_items": false,
+   "include_size": false,
+   "limit": 10,
+   "offset": 0,
+   "query": "hello",
+   "query_embedding": [
+    0.1,
+    0.2
+   ],
+   "source_type": "agent_generated",
+   "tags": [
+    "t"
+   ],
+   "tags_filter": [
+    "t"
+   ],
+   "workspace": "ws"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory.find/hit_window/over",
+  "surface": "memory",
+  "operation": "find",
+  "payload_in": {
+   "after_time": "2026-01-01T00:00:00+00:00",
+   "before_time": "2026-12-31T00:00:00+00:00",
+   "content_mode": "preview",
+   "debug_ranking": false,
+   "hit_window": 6,
+   "include_conflict_signal": false,
+   "include_linked_open_items": false,
+   "include_size": false,
+   "limit": 10,
+   "offset": 0,
+   "query": "hello",
+   "query_embedding": [
+    0.1,
+    0.2
+   ],
+   "source_type": "agent_generated",
+   "tags": [
+    "t"
+   ],
+   "tags_filter": [
+    "t"
+   ],
+   "workspace": "ws"
+  },
+  "error": null,
+  "warnings": [],
+  "payload_out": {
+   "after_time": "2026-01-01T00:00:00+00:00",
+   "before_time": "2026-12-31T00:00:00+00:00",
+   "content_mode": "preview",
+   "debug_ranking": false,
+   "hit_window": 6,
+   "include_conflict_signal": false,
+   "include_linked_open_items": false,
+   "include_size": false,
+   "limit": 10,
+   "offset": 0,
+   "query": "hello",
+   "query_embedding": [
+    0.1,
+    0.2
+   ],
+   "source_type": "agent_generated",
+   "tags": [
+    "t"
+   ],
+   "tags_filter": [
+    "t"
+   ],
+   "workspace": "ws"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory.find/hit_window/atmin",
+  "surface": "memory",
+  "operation": "find",
+  "payload_in": {
+   "after_time": "2026-01-01T00:00:00+00:00",
+   "before_time": "2026-12-31T00:00:00+00:00",
+   "content_mode": "preview",
+   "debug_ranking": false,
+   "hit_window": 0,
+   "include_conflict_signal": false,
+   "include_linked_open_items": false,
+   "include_size": false,
+   "limit": 10,
+   "offset": 0,
+   "query": "hello",
+   "query_embedding": [
+    0.1,
+    0.2
+   ],
+   "source_type": "agent_generated",
+   "tags": [
+    "t"
+   ],
+   "tags_filter": [
+    "t"
+   ],
+   "workspace": "ws"
+  },
+  "error": null,
+  "warnings": [],
+  "payload_out": {
+   "after_time": "2026-01-01T00:00:00+00:00",
+   "before_time": "2026-12-31T00:00:00+00:00",
+   "content_mode": "preview",
+   "debug_ranking": false,
+   "hit_window": 0,
+   "include_conflict_signal": false,
+   "include_linked_open_items": false,
+   "include_size": false,
+   "limit": 10,
+   "offset": 0,
+   "query": "hello",
+   "query_embedding": [
+    0.1,
+    0.2
+   ],
+   "source_type": "agent_generated",
+   "tags": [
+    "t"
+   ],
+   "tags_filter": [
+    "t"
+   ],
+   "workspace": "ws"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory.find/hit_window/atmax",
+  "surface": "memory",
+  "operation": "find",
+  "payload_in": {
+   "after_time": "2026-01-01T00:00:00+00:00",
+   "before_time": "2026-12-31T00:00:00+00:00",
+   "content_mode": "preview",
+   "debug_ranking": false,
+   "hit_window": 5,
+   "include_conflict_signal": false,
+   "include_linked_open_items": false,
+   "include_size": false,
+   "limit": 10,
+   "offset": 0,
+   "query": "hello",
+   "query_embedding": [
+    0.1,
+    0.2
+   ],
+   "source_type": "agent_generated",
+   "tags": [
+    "t"
+   ],
+   "tags_filter": [
+    "t"
+   ],
+   "workspace": "ws"
+  },
+  "error": null,
+  "warnings": [],
+  "payload_out": {
+   "after_time": "2026-01-01T00:00:00+00:00",
+   "before_time": "2026-12-31T00:00:00+00:00",
+   "content_mode": "preview",
+   "debug_ranking": false,
+   "hit_window": 5,
+   "include_conflict_signal": false,
+   "include_linked_open_items": false,
+   "include_size": false,
+   "limit": 10,
+   "offset": 0,
+   "query": "hello",
+   "query_embedding": [
+    0.1,
+    0.2
+   ],
+   "source_type": "agent_generated",
+   "tags": [
+    "t"
+   ],
+   "tags_filter": [
+    "t"
+   ],
+   "workspace": "ws"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory.find/hit_window/hugedigits",
+  "surface": "memory",
+  "operation": "find",
+  "payload_in": {
+   "after_time": "2026-01-01T00:00:00+00:00",
+   "before_time": "2026-12-31T00:00:00+00:00",
+   "content_mode": "preview",
+   "debug_ranking": false,
+   "hit_window": {
+    "$rep": "9",
+    "$n": 5000,
+    "$pad": true
+   },
+   "include_conflict_signal": false,
+   "include_linked_open_items": false,
+   "include_size": false,
+   "limit": 10,
+   "offset": 0,
+   "query": "hello",
+   "query_embedding": [
+    0.1,
+    0.2
+   ],
+   "source_type": "agent_generated",
+   "tags": [
+    "t"
+   ],
+   "tags_filter": [
+    "t"
+   ],
+   "workspace": "ws"
+  },
+  "error": null,
+  "warnings": [],
+  "payload_out": {
+   "after_time": "2026-01-01T00:00:00+00:00",
+   "before_time": "2026-12-31T00:00:00+00:00",
+   "content_mode": "preview",
+   "debug_ranking": false,
+   "hit_window": {
+    "$rep": "9",
+    "$n": 5000,
+    "$pad": true
    },
    "include_conflict_signal": false,
    "include_linked_open_items": false,
@@ -3732,6 +4710,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": {
     "unexpected": "object"
    },
@@ -3760,6 +4739,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": {
     "unexpected": "object"
    },
@@ -3792,6 +4772,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": {
     "unexpected": "object"
@@ -3820,6 +4801,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": {
     "unexpected": "object"
@@ -3852,6 +4834,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": {
@@ -3880,6 +4863,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": {
@@ -3912,6 +4896,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -3942,6 +4927,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -3972,6 +4958,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -4002,6 +4989,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -4032,6 +5020,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -4062,6 +5051,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -4092,6 +5082,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -4118,6 +5109,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -4148,6 +5140,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -4174,6 +5167,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -4204,6 +5198,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -4238,6 +5233,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -4272,6 +5268,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -4302,6 +5299,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -4332,6 +5330,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -4362,6 +5361,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -4392,6 +5392,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -4422,6 +5423,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -4452,6 +5454,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -4478,6 +5481,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -4508,6 +5512,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -4534,6 +5539,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -4564,6 +5570,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -4598,6 +5605,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -4632,6 +5640,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -4662,6 +5671,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -4692,6 +5702,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -4726,6 +5737,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -4760,6 +5772,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -4790,6 +5803,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -4824,6 +5838,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -4854,6 +5869,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -4884,6 +5900,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -4911,6 +5928,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -4938,6 +5956,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -4965,6 +5984,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -4992,6 +6012,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -5021,6 +6042,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -5050,6 +6072,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -5079,6 +6102,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -5108,6 +6132,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -5145,6 +6170,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -5175,6 +6201,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -5216,6 +6243,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -5250,6 +6278,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -5278,6 +6307,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -5306,6 +6336,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -5436,6 +6467,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -5566,6 +6598,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -5596,6 +6629,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -5626,6 +6660,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -5751,6 +6786,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -5880,6 +6916,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -5910,6 +6947,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -5940,6 +6978,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -5968,6 +7007,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -5996,6 +7036,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -6126,6 +7167,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -6256,6 +7298,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -6286,6 +7329,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -6316,6 +7360,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -6441,6 +7486,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -6570,6 +7616,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -6600,6 +7647,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -6630,6 +7678,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -6660,6 +7709,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -6690,6 +7740,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -6724,6 +7775,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -6758,6 +7810,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -6788,6 +7841,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -6822,6 +7876,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -6852,6 +7907,7 @@
    "before_time": "2026-12-31T00:00:00+00:00",
    "content_mode": "preview",
    "debug_ranking": false,
+   "hit_window": 2,
    "include_conflict_signal": false,
    "include_linked_open_items": false,
    "include_size": false,
@@ -10301,6 +11357,7 @@
    "content_mode": {
     "unexpected": "object"
    },
+   "hit_window": 2,
    "id": 1,
    "memory_id": 1,
    "span": {
@@ -10313,6 +11370,183 @@
   "payload_out": {
    "content_mode": {
     "unexpected": "object"
+   },
+   "hit_window": 2,
+   "id": 1,
+   "memory_id": 1,
+   "span": {
+    "start": 0
+   },
+   "workspace": "ws"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory.read/hit_window/wrongtype",
+  "surface": "memory",
+  "operation": "read",
+  "payload_in": {
+   "content_mode": "preview",
+   "hit_window": "abc",
+   "id": 1,
+   "memory_id": 1,
+   "span": {
+    "start": 0
+   },
+   "workspace": "ws"
+  },
+  "error": null,
+  "warnings": [],
+  "payload_out": {
+   "content_mode": "preview",
+   "hit_window": "abc",
+   "id": 1,
+   "memory_id": 1,
+   "span": {
+    "start": 0
+   },
+   "workspace": "ws"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory.read/hit_window/under",
+  "surface": "memory",
+  "operation": "read",
+  "payload_in": {
+   "content_mode": "preview",
+   "hit_window": -1,
+   "id": 1,
+   "memory_id": 1,
+   "span": {
+    "start": 0
+   },
+   "workspace": "ws"
+  },
+  "error": null,
+  "warnings": [],
+  "payload_out": {
+   "content_mode": "preview",
+   "hit_window": -1,
+   "id": 1,
+   "memory_id": 1,
+   "span": {
+    "start": 0
+   },
+   "workspace": "ws"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory.read/hit_window/over",
+  "surface": "memory",
+  "operation": "read",
+  "payload_in": {
+   "content_mode": "preview",
+   "hit_window": 6,
+   "id": 1,
+   "memory_id": 1,
+   "span": {
+    "start": 0
+   },
+   "workspace": "ws"
+  },
+  "error": null,
+  "warnings": [],
+  "payload_out": {
+   "content_mode": "preview",
+   "hit_window": 6,
+   "id": 1,
+   "memory_id": 1,
+   "span": {
+    "start": 0
+   },
+   "workspace": "ws"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory.read/hit_window/atmin",
+  "surface": "memory",
+  "operation": "read",
+  "payload_in": {
+   "content_mode": "preview",
+   "hit_window": 0,
+   "id": 1,
+   "memory_id": 1,
+   "span": {
+    "start": 0
+   },
+   "workspace": "ws"
+  },
+  "error": null,
+  "warnings": [],
+  "payload_out": {
+   "content_mode": "preview",
+   "hit_window": 0,
+   "id": 1,
+   "memory_id": 1,
+   "span": {
+    "start": 0
+   },
+   "workspace": "ws"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory.read/hit_window/atmax",
+  "surface": "memory",
+  "operation": "read",
+  "payload_in": {
+   "content_mode": "preview",
+   "hit_window": 5,
+   "id": 1,
+   "memory_id": 1,
+   "span": {
+    "start": 0
+   },
+   "workspace": "ws"
+  },
+  "error": null,
+  "warnings": [],
+  "payload_out": {
+   "content_mode": "preview",
+   "hit_window": 5,
+   "id": 1,
+   "memory_id": 1,
+   "span": {
+    "start": 0
+   },
+   "workspace": "ws"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory.read/hit_window/hugedigits",
+  "surface": "memory",
+  "operation": "read",
+  "payload_in": {
+   "content_mode": "preview",
+   "hit_window": {
+    "$rep": "9",
+    "$n": 5000,
+    "$pad": true
+   },
+   "id": 1,
+   "memory_id": 1,
+   "span": {
+    "start": 0
+   },
+   "workspace": "ws"
+  },
+  "error": null,
+  "warnings": [],
+  "payload_out": {
+   "content_mode": "preview",
+   "hit_window": {
+    "$rep": "9",
+    "$n": 5000,
+    "$pad": true
    },
    "id": 1,
    "memory_id": 1,
@@ -10329,6 +11563,7 @@
   "operation": "read",
   "payload_in": {
    "content_mode": "preview",
+   "hit_window": 2,
    "id": "abc",
    "memory_id": 1,
    "span": {
@@ -10344,6 +11579,7 @@
   "warnings": [],
   "payload_out": {
    "content_mode": "preview",
+   "hit_window": 2,
    "id": "abc",
    "memory_id": 1,
    "span": {
@@ -10359,6 +11595,7 @@
   "operation": "read",
   "payload_in": {
    "content_mode": "preview",
+   "hit_window": 2,
    "id": 0,
    "memory_id": 1,
    "span": {
@@ -10374,6 +11611,7 @@
   "warnings": [],
   "payload_out": {
    "content_mode": "preview",
+   "hit_window": 2,
    "id": 0,
    "memory_id": 1,
    "span": {
@@ -10389,6 +11627,7 @@
   "operation": "read",
   "payload_in": {
    "content_mode": "preview",
+   "hit_window": 2,
    "id": -1,
    "memory_id": 1,
    "span": {
@@ -10404,6 +11643,7 @@
   "warnings": [],
   "payload_out": {
    "content_mode": "preview",
+   "hit_window": 2,
    "id": -1,
    "memory_id": 1,
    "span": {
@@ -10419,6 +11659,7 @@
   "operation": "read",
   "payload_in": {
    "content_mode": "preview",
+   "hit_window": 2,
    "id": 1.5,
    "memory_id": 1,
    "span": {
@@ -10434,6 +11675,7 @@
   "warnings": [],
   "payload_out": {
    "content_mode": "preview",
+   "hit_window": 2,
    "id": 1.5,
    "memory_id": 1,
    "span": {
@@ -10449,6 +11691,7 @@
   "operation": "read",
   "payload_in": {
    "content_mode": "preview",
+   "hit_window": 2,
    "id": true,
    "memory_id": 1,
    "span": {
@@ -10464,6 +11707,7 @@
   "warnings": [],
   "payload_out": {
    "content_mode": "preview",
+   "hit_window": 2,
    "id": true,
    "memory_id": 1,
    "span": {
@@ -10479,6 +11723,7 @@
   "operation": "read",
   "payload_in": {
    "content_mode": "preview",
+   "hit_window": 2,
    "id": {
     "$rep": "9",
     "$n": 5000,
@@ -10498,6 +11743,7 @@
   "warnings": [],
   "payload_out": {
    "content_mode": "preview",
+   "hit_window": 2,
    "id": {
     "$rep": "9",
     "$n": 5000,
@@ -10517,6 +11763,7 @@
   "operation": "read",
   "payload_in": {
    "content_mode": "preview",
+   "hit_window": 2,
    "id": 1,
    "memory_id": "abc",
    "span": {
@@ -10532,6 +11779,7 @@
   "warnings": [],
   "payload_out": {
    "content_mode": "preview",
+   "hit_window": 2,
    "id": 1,
    "memory_id": "abc",
    "span": {
@@ -10547,6 +11795,7 @@
   "operation": "read",
   "payload_in": {
    "content_mode": "preview",
+   "hit_window": 2,
    "id": 1,
    "memory_id": 0,
    "span": {
@@ -10562,6 +11811,7 @@
   "warnings": [],
   "payload_out": {
    "content_mode": "preview",
+   "hit_window": 2,
    "id": 1,
    "memory_id": 0,
    "span": {
@@ -10577,6 +11827,7 @@
   "operation": "read",
   "payload_in": {
    "content_mode": "preview",
+   "hit_window": 2,
    "id": 1,
    "memory_id": -1,
    "span": {
@@ -10592,6 +11843,7 @@
   "warnings": [],
   "payload_out": {
    "content_mode": "preview",
+   "hit_window": 2,
    "id": 1,
    "memory_id": -1,
    "span": {
@@ -10607,6 +11859,7 @@
   "operation": "read",
   "payload_in": {
    "content_mode": "preview",
+   "hit_window": 2,
    "id": 1,
    "memory_id": 1.5,
    "span": {
@@ -10622,6 +11875,7 @@
   "warnings": [],
   "payload_out": {
    "content_mode": "preview",
+   "hit_window": 2,
    "id": 1,
    "memory_id": 1.5,
    "span": {
@@ -10637,6 +11891,7 @@
   "operation": "read",
   "payload_in": {
    "content_mode": "preview",
+   "hit_window": 2,
    "id": 1,
    "memory_id": true,
    "span": {
@@ -10652,6 +11907,7 @@
   "warnings": [],
   "payload_out": {
    "content_mode": "preview",
+   "hit_window": 2,
    "id": 1,
    "memory_id": true,
    "span": {
@@ -10667,6 +11923,7 @@
   "operation": "read",
   "payload_in": {
    "content_mode": "preview",
+   "hit_window": 2,
    "id": 1,
    "memory_id": {
     "$rep": "9",
@@ -10686,6 +11943,7 @@
   "warnings": [],
   "payload_out": {
    "content_mode": "preview",
+   "hit_window": 2,
    "id": 1,
    "memory_id": {
     "$rep": "9",
@@ -10705,6 +11963,7 @@
   "operation": "read",
   "payload_in": {
    "content_mode": "preview",
+   "hit_window": 2,
    "id": 1,
    "memory_id": 1,
    "span": {
@@ -10716,6 +11975,7 @@
   "warnings": [],
   "payload_out": {
    "content_mode": "preview",
+   "hit_window": 2,
    "id": 1,
    "memory_id": 1,
    "span": {
@@ -10731,6 +11991,7 @@
   "operation": "read",
   "payload_in": {
    "content_mode": "preview",
+   "hit_window": 2,
    "id": 1,
    "memory_id": 1,
    "span": {
@@ -10746,6 +12007,7 @@
   "warnings": [],
   "payload_out": {
    "content_mode": "preview",
+   "hit_window": 2,
    "id": 1,
    "memory_id": 1,
    "span": {
@@ -10761,6 +12023,7 @@
   "operation": "read",
   "payload_in": {
    "content_mode": "preview",
+   "hit_window": 2,
    "id": 1,
    "memory_id": 1,
    "span": {
@@ -10780,6 +12043,7 @@
   "warnings": [],
   "payload_out": {
    "content_mode": "preview",
+   "hit_window": 2,
    "id": 1,
    "memory_id": 1,
    "span": {
@@ -10799,6 +12063,7 @@
   "operation": "read",
   "payload_in": {
    "content_mode": "preview",
+   "hit_window": 2,
    "id": 1,
    "memory_id": 1,
    "span": {
@@ -10814,6 +12079,7 @@
   "warnings": [],
   "payload_out": {
    "content_mode": "preview",
+   "hit_window": 2,
    "id": 1,
    "memory_id": 1,
    "span": {
@@ -10833,6 +12099,7 @@
   "operation": "read",
   "payload_in": {
    "content_mode": "preview",
+   "hit_window": 2,
    "id": 1,
    "memory_id": 1,
    "span": {
@@ -10848,6 +12115,7 @@
   "warnings": [],
   "payload_out": {
    "content_mode": "preview",
+   "hit_window": 2,
    "id": 1,
    "memory_id": 1,
    "span": {
@@ -10884,7 +12152,9 @@
    "field": "confidence",
    "reason": "must be a finite number between 0 and 1"
   },
-  "warnings": [],
+  "warnings": [
+   "metadata entity/scope \u5df2\u5e9f\u5f03\uff080.17 \u95e8 v2\uff09\uff0c\u65e0\u9700\u518d\u4f20"
+  ],
   "payload_out": {
    "confidence": "abc",
    "content": "body text",
@@ -10932,7 +12202,9 @@
    "field": "confidence",
    "reason": "must be a finite number between 0 and 1"
   },
-  "warnings": [],
+  "warnings": [
+   "metadata entity/scope \u5df2\u5e9f\u5f03\uff080.17 \u95e8 v2\uff09\uff0c\u65e0\u9700\u518d\u4f20"
+  ],
   "payload_out": {
    "confidence": 1.5,
    "content": "body text",
@@ -10980,7 +12252,9 @@
    "field": "confidence",
    "reason": "must be a finite number between 0 and 1"
   },
-  "warnings": [],
+  "warnings": [
+   "metadata entity/scope \u5df2\u5e9f\u5f03\uff080.17 \u95e8 v2\uff09\uff0c\u65e0\u9700\u518d\u4f20"
+  ],
   "payload_out": {
    "confidence": -0.1,
    "content": "body text",
@@ -11024,7 +12298,9 @@
    "workspace": "ws"
   },
   "error": null,
-  "warnings": [],
+  "warnings": [
+   "metadata entity/scope \u5df2\u5e9f\u5f03\uff080.17 \u95e8 v2\uff09\uff0c\u65e0\u9700\u518d\u4f20"
+  ],
   "payload_out": {
    "confidence": 1.0,
    "content": "body text",
@@ -11072,7 +12348,9 @@
    "field": "confidence",
    "reason": "must be a finite number between 0 and 1"
   },
-  "warnings": [],
+  "warnings": [
+   "metadata entity/scope \u5df2\u5e9f\u5f03\uff080.17 \u95e8 v2\uff09\uff0c\u65e0\u9700\u518d\u4f20"
+  ],
   "payload_out": {
    "confidence": true,
    "content": "body text",
@@ -11273,7 +12551,9 @@
    "field": "event_time",
    "reason": "must be a valid ISO 8601 timestamp of at most 128 characters"
   },
-  "warnings": [],
+  "warnings": [
+   "metadata entity/scope \u5df2\u5e9f\u5f03\uff080.17 \u95e8 v2\uff09\uff0c\u65e0\u9700\u518d\u4f20"
+  ],
   "payload_out": {
    "confidence": 0.5,
    "content": "body text",
@@ -11321,7 +12601,9 @@
    "field": "event_time",
    "reason": "must be a valid ISO 8601 timestamp of at most 128 characters"
   },
-  "warnings": [],
+  "warnings": [
+   "metadata entity/scope \u5df2\u5e9f\u5f03\uff080.17 \u95e8 v2\uff09\uff0c\u65e0\u9700\u518d\u4f20"
+  ],
   "payload_out": {
    "confidence": 0.5,
    "content": "body text",
@@ -11369,7 +12651,9 @@
    "field": "event_time",
    "reason": "must be a valid ISO 8601 timestamp of at most 128 characters"
   },
-  "warnings": [],
+  "warnings": [
+   "metadata entity/scope \u5df2\u5e9f\u5f03\uff080.17 \u95e8 v2\uff09\uff0c\u65e0\u9700\u518d\u4f20"
+  ],
   "payload_out": {
    "confidence": 0.5,
    "content": "body text",
@@ -11417,7 +12701,9 @@
    "field": "ingest_time",
    "reason": "must be a valid ISO 8601 timestamp of at most 128 characters"
   },
-  "warnings": [],
+  "warnings": [
+   "metadata entity/scope \u5df2\u5e9f\u5f03\uff080.17 \u95e8 v2\uff09\uff0c\u65e0\u9700\u518d\u4f20"
+  ],
   "payload_out": {
    "confidence": 0.5,
    "content": "body text",
@@ -11465,7 +12751,9 @@
    "field": "ingest_time",
    "reason": "must be a valid ISO 8601 timestamp of at most 128 characters"
   },
-  "warnings": [],
+  "warnings": [
+   "metadata entity/scope \u5df2\u5e9f\u5f03\uff080.17 \u95e8 v2\uff09\uff0c\u65e0\u9700\u518d\u4f20"
+  ],
   "payload_out": {
    "confidence": 0.5,
    "content": "body text",
@@ -11513,7 +12801,9 @@
    "field": "ingest_time",
    "reason": "must be a valid ISO 8601 timestamp of at most 128 characters"
   },
-  "warnings": [],
+  "warnings": [
+   "metadata entity/scope \u5df2\u5e9f\u5f03\uff080.17 \u95e8 v2\uff09\uff0c\u65e0\u9700\u518d\u4f20"
+  ],
   "payload_out": {
    "confidence": 0.5,
    "content": "body text",
@@ -11666,7 +12956,9 @@
     "protected"
    ]
   },
-  "warnings": [],
+  "warnings": [
+   "metadata entity/scope \u5df2\u5e9f\u5f03\uff080.17 \u95e8 v2\uff09\uff0c\u65e0\u9700\u518d\u4f20"
+  ],
   "payload_out": {
    "confidence": 0.5,
    "content": "body text",
@@ -11723,7 +13015,9 @@
     "protected"
    ]
   },
-  "warnings": [],
+  "warnings": [
+   "metadata entity/scope \u5df2\u5e9f\u5f03\uff080.17 \u95e8 v2\uff09\uff0c\u65e0\u9700\u518d\u4f20"
+  ],
   "payload_out": {
    "confidence": 0.5,
    "content": "body text",
@@ -11879,7 +13173,9 @@
    "workspace": "ws"
   },
   "error": null,
-  "warnings": [],
+  "warnings": [
+   "metadata entity/scope \u5df2\u5e9f\u5f03\uff080.17 \u95e8 v2\uff09\uff0c\u65e0\u9700\u518d\u4f20"
+  ],
   "payload_out": {
    "confidence": 0.5,
    "content": "body text",
@@ -11986,7 +13282,9 @@
     "user_confirmed"
    ]
   },
-  "warnings": [],
+  "warnings": [
+   "metadata entity/scope \u5df2\u5e9f\u5f03\uff080.17 \u95e8 v2\uff09\uff0c\u65e0\u9700\u518d\u4f20"
+  ],
   "payload_out": {
    "confidence": 0.5,
    "content": "body text",
@@ -12045,7 +13343,9 @@
     "user_confirmed"
    ]
   },
-  "warnings": [],
+  "warnings": [
+   "metadata entity/scope \u5df2\u5e9f\u5f03\uff080.17 \u95e8 v2\uff09\uff0c\u65e0\u9700\u518d\u4f20"
+  ],
   "payload_out": {
    "confidence": 0.5,
    "content": "body text",
@@ -12201,7 +13501,9 @@
    "workspace": "ws"
   },
   "error": null,
-  "warnings": [],
+  "warnings": [
+   "metadata entity/scope \u5df2\u5e9f\u5f03\uff080.17 \u95e8 v2\uff09\uff0c\u65e0\u9700\u518d\u4f20"
+  ],
   "payload_out": {
    "confidence": 0.5,
    "content": "body text",
@@ -12736,7 +14038,9 @@
    "workspace": "ws"
   },
   "error": null,
-  "warnings": [],
+  "warnings": [
+   "metadata entity/scope \u5df2\u5e9f\u5f03\uff080.17 \u95e8 v2\uff09\uff0c\u65e0\u9700\u518d\u4f20"
+  ],
   "payload_out": {
    "confidence": 0.5,
    "content": "body text",
@@ -13035,7 +14339,9 @@
    }
   },
   "error": null,
-  "warnings": [],
+  "warnings": [
+   "metadata entity/scope \u5df2\u5e9f\u5f03\uff080.17 \u95e8 v2\uff09\uff0c\u65e0\u9700\u518d\u4f20"
+  ],
   "payload_out": {
    "confidence": 0.5,
    "content": "body text",
@@ -22674,7 +23980,8 @@
    },
    "from": "ws-a",
    "reason": "because",
-   "to": "ws-b"
+   "to": "ws-b",
+   "workspace": "ws"
   },
   "error": null,
   "warnings": [],
@@ -22684,7 +23991,8 @@
    },
    "from": "ws-a",
    "reason": "because",
-   "to": "ws-b"
+   "to": "ws-b",
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -22696,7 +24004,8 @@
    "authorized": true,
    "from": 123,
    "reason": "because",
-   "to": "ws-b"
+   "to": "ws-b",
+   "workspace": "ws"
   },
   "error": {
    "error": "invalid_input",
@@ -22708,7 +24017,8 @@
    "authorized": true,
    "from": 123,
    "reason": "because",
-   "to": "ws-b"
+   "to": "ws-b",
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -22724,7 +24034,8 @@
     "$pad": true
    },
    "reason": "because",
-   "to": "ws-b"
+   "to": "ws-b",
+   "workspace": "ws"
   },
   "error": {
    "error": "invalid_input",
@@ -22740,7 +24051,8 @@
     "$pad": true
    },
    "reason": "because",
-   "to": "ws-b"
+   "to": "ws-b",
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -22756,7 +24068,8 @@
     "$pad": true
    },
    "reason": "because",
-   "to": "ws-b"
+   "to": "ws-b",
+   "workspace": "ws"
   },
   "error": null,
   "warnings": [],
@@ -22768,7 +24081,8 @@
     "$pad": true
    },
    "reason": "because",
-   "to": "ws-b"
+   "to": "ws-b",
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -22780,7 +24094,8 @@
    "authorized": true,
    "from": "a\ud800b",
    "reason": "because",
-   "to": "ws-b"
+   "to": "ws-b",
+   "workspace": "ws"
   },
   "error": {
    "error": "invalid_input",
@@ -22792,7 +24107,8 @@
    "authorized": true,
    "from": "a\ud800b",
    "reason": "because",
-   "to": "ws-b"
+   "to": "ws-b",
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -22804,7 +24120,8 @@
    "authorized": true,
    "from": "ws-a",
    "reason": 123,
-   "to": "ws-b"
+   "to": "ws-b",
+   "workspace": "ws"
   },
   "error": {
    "error": "invalid_input",
@@ -22816,7 +24133,8 @@
    "authorized": true,
    "from": "ws-a",
    "reason": 123,
-   "to": "ws-b"
+   "to": "ws-b",
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -22832,7 +24150,8 @@
     "$n": 2001,
     "$pad": true
    },
-   "to": "ws-b"
+   "to": "ws-b",
+   "workspace": "ws"
   },
   "error": {
    "error": "invalid_input",
@@ -22848,7 +24167,8 @@
     "$n": 2001,
     "$pad": true
    },
-   "to": "ws-b"
+   "to": "ws-b",
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -22864,7 +24184,8 @@
     "$n": 2000,
     "$pad": true
    },
-   "to": "ws-b"
+   "to": "ws-b",
+   "workspace": "ws"
   },
   "error": null,
   "warnings": [],
@@ -22876,7 +24197,8 @@
     "$n": 2000,
     "$pad": true
    },
-   "to": "ws-b"
+   "to": "ws-b",
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -22888,7 +24210,8 @@
    "authorized": true,
    "from": "ws-a",
    "reason": "a\ud800b",
-   "to": "ws-b"
+   "to": "ws-b",
+   "workspace": "ws"
   },
   "error": {
    "error": "invalid_input",
@@ -22900,7 +24223,8 @@
    "authorized": true,
    "from": "ws-a",
    "reason": "a\ud800b",
-   "to": "ws-b"
+   "to": "ws-b",
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -22912,7 +24236,8 @@
    "authorized": true,
    "from": "ws-a",
    "reason": "because",
-   "to": 123
+   "to": 123,
+   "workspace": "ws"
   },
   "error": {
    "error": "invalid_input",
@@ -22924,7 +24249,8 @@
    "authorized": true,
    "from": "ws-a",
    "reason": "because",
-   "to": 123
+   "to": 123,
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -22940,7 +24266,8 @@
     "$rep": "x",
     "$n": 2001,
     "$pad": true
-   }
+   },
+   "workspace": "ws"
   },
   "error": {
    "error": "invalid_input",
@@ -22956,7 +24283,8 @@
     "$rep": "x",
     "$n": 2001,
     "$pad": true
-   }
+   },
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -22972,7 +24300,8 @@
     "$rep": "x",
     "$n": 2000,
     "$pad": true
-   }
+   },
+   "workspace": "ws"
   },
   "error": null,
   "warnings": [],
@@ -22984,7 +24313,8 @@
     "$rep": "x",
     "$n": 2000,
     "$pad": true
-   }
+   },
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -22996,7 +24326,8 @@
    "authorized": true,
    "from": "ws-a",
    "reason": "because",
-   "to": "a\ud800b"
+   "to": "a\ud800b",
+   "workspace": "ws"
   },
   "error": {
    "error": "invalid_input",
@@ -23008,7 +24339,124 @@
    "authorized": true,
    "from": "ws-a",
    "reason": "because",
-   "to": "a\ud800b"
+   "to": "a\ud800b",
+   "workspace": "ws"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory_govern.migrate_workspace/workspace/wrongtype",
+  "surface": "memory_govern",
+  "operation": "migrate_workspace",
+  "payload_in": {
+   "authorized": true,
+   "from": "ws-a",
+   "reason": "because",
+   "to": "ws-b",
+   "workspace": 123
+  },
+  "error": {
+   "error": "invalid_input",
+   "field": "workspace",
+   "reason": "must be a string of at most 2000 characters"
+  },
+  "warnings": [],
+  "payload_out": {
+   "authorized": true,
+   "from": "ws-a",
+   "reason": "because",
+   "to": "ws-b",
+   "workspace": 123
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory_govern.migrate_workspace/workspace/over",
+  "surface": "memory_govern",
+  "operation": "migrate_workspace",
+  "payload_in": {
+   "authorized": true,
+   "from": "ws-a",
+   "reason": "because",
+   "to": "ws-b",
+   "workspace": {
+    "$rep": "x",
+    "$n": 2001,
+    "$pad": true
+   }
+  },
+  "error": {
+   "error": "invalid_input",
+   "field": "workspace",
+   "reason": "must be a string of at most 2000 characters"
+  },
+  "warnings": [],
+  "payload_out": {
+   "authorized": true,
+   "from": "ws-a",
+   "reason": "because",
+   "to": "ws-b",
+   "workspace": {
+    "$rep": "x",
+    "$n": 2001,
+    "$pad": true
+   }
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory_govern.migrate_workspace/workspace/atcap",
+  "surface": "memory_govern",
+  "operation": "migrate_workspace",
+  "payload_in": {
+   "authorized": true,
+   "from": "ws-a",
+   "reason": "because",
+   "to": "ws-b",
+   "workspace": {
+    "$rep": "x",
+    "$n": 2000,
+    "$pad": true
+   }
+  },
+  "error": null,
+  "warnings": [],
+  "payload_out": {
+   "authorized": true,
+   "from": "ws-a",
+   "reason": "because",
+   "to": "ws-b",
+   "workspace": {
+    "$rep": "x",
+    "$n": 2000,
+    "$pad": true
+   }
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory_govern.migrate_workspace/workspace/surrogate",
+  "surface": "memory_govern",
+  "operation": "migrate_workspace",
+  "payload_in": {
+   "authorized": true,
+   "from": "ws-a",
+   "reason": "because",
+   "to": "ws-b",
+   "workspace": "a\ud800b"
+  },
+  "error": {
+   "error": "invalid_input",
+   "field": "workspace",
+   "reason": "must be a string of at most 2000 characters"
+  },
+  "warnings": [],
+  "payload_out": {
+   "authorized": true,
+   "from": "ws-a",
+   "reason": "because",
+   "to": "ws-b",
+   "workspace": "a\ud800b"
   },
   "raises": null
  },
@@ -23534,7 +24982,8 @@
    },
    "new": "ws-b",
    "old": "ws-a",
-   "reason": "because"
+   "reason": "because",
+   "workspace": "ws"
   },
   "error": null,
   "warnings": [],
@@ -23544,7 +24993,8 @@
    },
    "new": "ws-b",
    "old": "ws-a",
-   "reason": "because"
+   "reason": "because",
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -23556,7 +25006,8 @@
    "authorized": true,
    "new": 123,
    "old": "ws-a",
-   "reason": "because"
+   "reason": "because",
+   "workspace": "ws"
   },
   "error": {
    "error": "invalid_input",
@@ -23568,7 +25019,8 @@
    "authorized": true,
    "new": 123,
    "old": "ws-a",
-   "reason": "because"
+   "reason": "because",
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -23584,7 +25036,8 @@
     "$pad": true
    },
    "old": "ws-a",
-   "reason": "because"
+   "reason": "because",
+   "workspace": "ws"
   },
   "error": {
    "error": "invalid_input",
@@ -23600,7 +25053,8 @@
     "$pad": true
    },
    "old": "ws-a",
-   "reason": "because"
+   "reason": "because",
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -23616,7 +25070,8 @@
     "$pad": true
    },
    "old": "ws-a",
-   "reason": "because"
+   "reason": "because",
+   "workspace": "ws"
   },
   "error": null,
   "warnings": [],
@@ -23628,7 +25083,8 @@
     "$pad": true
    },
    "old": "ws-a",
-   "reason": "because"
+   "reason": "because",
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -23640,7 +25096,8 @@
    "authorized": true,
    "new": "a\ud800b",
    "old": "ws-a",
-   "reason": "because"
+   "reason": "because",
+   "workspace": "ws"
   },
   "error": {
    "error": "invalid_input",
@@ -23652,7 +25109,8 @@
    "authorized": true,
    "new": "a\ud800b",
    "old": "ws-a",
-   "reason": "because"
+   "reason": "because",
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -23664,7 +25122,8 @@
    "authorized": true,
    "new": "ws-b",
    "old": 123,
-   "reason": "because"
+   "reason": "because",
+   "workspace": "ws"
   },
   "error": {
    "error": "invalid_input",
@@ -23676,7 +25135,8 @@
    "authorized": true,
    "new": "ws-b",
    "old": 123,
-   "reason": "because"
+   "reason": "because",
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -23692,7 +25152,8 @@
     "$n": 2001,
     "$pad": true
    },
-   "reason": "because"
+   "reason": "because",
+   "workspace": "ws"
   },
   "error": {
    "error": "invalid_input",
@@ -23708,7 +25169,8 @@
     "$n": 2001,
     "$pad": true
    },
-   "reason": "because"
+   "reason": "because",
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -23724,7 +25186,8 @@
     "$n": 2000,
     "$pad": true
    },
-   "reason": "because"
+   "reason": "because",
+   "workspace": "ws"
   },
   "error": null,
   "warnings": [],
@@ -23736,7 +25199,8 @@
     "$n": 2000,
     "$pad": true
    },
-   "reason": "because"
+   "reason": "because",
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -23748,7 +25212,8 @@
    "authorized": true,
    "new": "ws-b",
    "old": "a\ud800b",
-   "reason": "because"
+   "reason": "because",
+   "workspace": "ws"
   },
   "error": {
    "error": "invalid_input",
@@ -23760,7 +25225,8 @@
    "authorized": true,
    "new": "ws-b",
    "old": "a\ud800b",
-   "reason": "because"
+   "reason": "because",
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -23772,7 +25238,8 @@
    "authorized": true,
    "new": "ws-b",
    "old": "ws-a",
-   "reason": 123
+   "reason": 123,
+   "workspace": "ws"
   },
   "error": {
    "error": "invalid_input",
@@ -23784,7 +25251,8 @@
    "authorized": true,
    "new": "ws-b",
    "old": "ws-a",
-   "reason": 123
+   "reason": 123,
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -23800,7 +25268,8 @@
     "$rep": "x",
     "$n": 2001,
     "$pad": true
-   }
+   },
+   "workspace": "ws"
   },
   "error": {
    "error": "invalid_input",
@@ -23816,7 +25285,8 @@
     "$rep": "x",
     "$n": 2001,
     "$pad": true
-   }
+   },
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -23832,7 +25302,8 @@
     "$rep": "x",
     "$n": 2000,
     "$pad": true
-   }
+   },
+   "workspace": "ws"
   },
   "error": null,
   "warnings": [],
@@ -23844,7 +25315,8 @@
     "$rep": "x",
     "$n": 2000,
     "$pad": true
-   }
+   },
+   "workspace": "ws"
   },
   "raises": null
  },
@@ -23856,7 +25328,8 @@
    "authorized": true,
    "new": "ws-b",
    "old": "ws-a",
-   "reason": "a\ud800b"
+   "reason": "a\ud800b",
+   "workspace": "ws"
   },
   "error": {
    "error": "invalid_input",
@@ -23868,7 +25341,124 @@
    "authorized": true,
    "new": "ws-b",
    "old": "ws-a",
-   "reason": "a\ud800b"
+   "reason": "a\ud800b",
+   "workspace": "ws"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory_govern.rename_workspace_canonical/workspace/wrongtype",
+  "surface": "memory_govern",
+  "operation": "rename_workspace_canonical",
+  "payload_in": {
+   "authorized": true,
+   "new": "ws-b",
+   "old": "ws-a",
+   "reason": "because",
+   "workspace": 123
+  },
+  "error": {
+   "error": "invalid_input",
+   "field": "workspace",
+   "reason": "must be a string of at most 2000 characters"
+  },
+  "warnings": [],
+  "payload_out": {
+   "authorized": true,
+   "new": "ws-b",
+   "old": "ws-a",
+   "reason": "because",
+   "workspace": 123
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory_govern.rename_workspace_canonical/workspace/over",
+  "surface": "memory_govern",
+  "operation": "rename_workspace_canonical",
+  "payload_in": {
+   "authorized": true,
+   "new": "ws-b",
+   "old": "ws-a",
+   "reason": "because",
+   "workspace": {
+    "$rep": "x",
+    "$n": 2001,
+    "$pad": true
+   }
+  },
+  "error": {
+   "error": "invalid_input",
+   "field": "workspace",
+   "reason": "must be a string of at most 2000 characters"
+  },
+  "warnings": [],
+  "payload_out": {
+   "authorized": true,
+   "new": "ws-b",
+   "old": "ws-a",
+   "reason": "because",
+   "workspace": {
+    "$rep": "x",
+    "$n": 2001,
+    "$pad": true
+   }
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory_govern.rename_workspace_canonical/workspace/atcap",
+  "surface": "memory_govern",
+  "operation": "rename_workspace_canonical",
+  "payload_in": {
+   "authorized": true,
+   "new": "ws-b",
+   "old": "ws-a",
+   "reason": "because",
+   "workspace": {
+    "$rep": "x",
+    "$n": 2000,
+    "$pad": true
+   }
+  },
+  "error": null,
+  "warnings": [],
+  "payload_out": {
+   "authorized": true,
+   "new": "ws-b",
+   "old": "ws-a",
+   "reason": "because",
+   "workspace": {
+    "$rep": "x",
+    "$n": 2000,
+    "$pad": true
+   }
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory_govern.rename_workspace_canonical/workspace/surrogate",
+  "surface": "memory_govern",
+  "operation": "rename_workspace_canonical",
+  "payload_in": {
+   "authorized": true,
+   "new": "ws-b",
+   "old": "ws-a",
+   "reason": "because",
+   "workspace": "a\ud800b"
+  },
+  "error": {
+   "error": "invalid_input",
+   "field": "workspace",
+   "reason": "must be a string of at most 2000 characters"
+  },
+  "warnings": [],
+  "payload_out": {
+   "authorized": true,
+   "new": "ws-b",
+   "old": "ws-a",
+   "reason": "because",
+   "workspace": "a\ud800b"
   },
   "raises": null
  },
@@ -37778,8 +39368,8 @@
    },
    "max_memories": 10,
    "neighbor_k": 5,
-   "time_budget_s": 5,
-   "workspace": "ws"
+   "slow_lane": false,
+   "time_budget_s": 5
   },
   "error": null,
   "warnings": [],
@@ -37789,8 +39379,8 @@
    },
    "max_memories": 10,
    "neighbor_k": 5,
-   "time_budget_s": 5,
-   "workspace": "ws"
+   "slow_lane": false,
+   "time_budget_s": 5
   },
   "raises": null
  },
@@ -37804,8 +39394,8 @@
     "unexpected": "object"
    },
    "neighbor_k": 5,
-   "time_budget_s": 5,
-   "workspace": "ws"
+   "slow_lane": false,
+   "time_budget_s": 5
   },
   "error": null,
   "warnings": [],
@@ -37815,8 +39405,8 @@
     "unexpected": "object"
    },
    "neighbor_k": 5,
-   "time_budget_s": 5,
-   "workspace": "ws"
+   "slow_lane": false,
+   "time_budget_s": 5
   },
   "raises": null
  },
@@ -37830,8 +39420,8 @@
    "neighbor_k": {
     "unexpected": "object"
    },
-   "time_budget_s": 5,
-   "workspace": "ws"
+   "slow_lane": false,
+   "time_budget_s": 5
   },
   "error": null,
   "warnings": [],
@@ -37841,8 +39431,34 @@
    "neighbor_k": {
     "unexpected": "object"
    },
-   "time_budget_s": 5,
-   "workspace": "ws"
+   "slow_lane": false,
+   "time_budget_s": 5
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory_repair.scan_pipeline/slow_lane/wrongtype",
+  "surface": "memory_repair",
+  "operation": "scan_pipeline",
+  "payload_in": {
+   "action": "page",
+   "max_memories": 10,
+   "neighbor_k": 5,
+   "slow_lane": {
+    "unexpected": "object"
+   },
+   "time_budget_s": 5
+  },
+  "error": null,
+  "warnings": [],
+  "payload_out": {
+   "action": "page",
+   "max_memories": 10,
+   "neighbor_k": 5,
+   "slow_lane": {
+    "unexpected": "object"
+   },
+   "time_budget_s": 5
   },
   "raises": null
  },
@@ -37854,97 +39470,9 @@
    "action": "page",
    "max_memories": 10,
    "neighbor_k": 5,
+   "slow_lane": false,
    "time_budget_s": {
     "unexpected": "object"
-   },
-   "workspace": "ws"
-  },
-  "error": null,
-  "warnings": [],
-  "payload_out": {
-   "action": "page",
-   "max_memories": 10,
-   "neighbor_k": 5,
-   "time_budget_s": {
-    "unexpected": "object"
-   },
-   "workspace": "ws"
-  },
-  "raises": null
- },
- {
-  "case_id": "B/memory_repair.scan_pipeline/workspace/wrongtype",
-  "surface": "memory_repair",
-  "operation": "scan_pipeline",
-  "payload_in": {
-   "action": "page",
-   "max_memories": 10,
-   "neighbor_k": 5,
-   "time_budget_s": 5,
-   "workspace": 123
-  },
-  "error": {
-   "error": "invalid_input",
-   "field": "workspace",
-   "reason": "must be a string of at most 2000 characters"
-  },
-  "warnings": [],
-  "payload_out": {
-   "action": "page",
-   "max_memories": 10,
-   "neighbor_k": 5,
-   "time_budget_s": 5,
-   "workspace": 123
-  },
-  "raises": null
- },
- {
-  "case_id": "B/memory_repair.scan_pipeline/workspace/over",
-  "surface": "memory_repair",
-  "operation": "scan_pipeline",
-  "payload_in": {
-   "action": "page",
-   "max_memories": 10,
-   "neighbor_k": 5,
-   "time_budget_s": 5,
-   "workspace": {
-    "$rep": "x",
-    "$n": 2001,
-    "$pad": true
-   }
-  },
-  "error": {
-   "error": "invalid_input",
-   "field": "workspace",
-   "reason": "must be a string of at most 2000 characters"
-  },
-  "warnings": [],
-  "payload_out": {
-   "action": "page",
-   "max_memories": 10,
-   "neighbor_k": 5,
-   "time_budget_s": 5,
-   "workspace": {
-    "$rep": "x",
-    "$n": 2001,
-    "$pad": true
-   }
-  },
-  "raises": null
- },
- {
-  "case_id": "B/memory_repair.scan_pipeline/workspace/atcap",
-  "surface": "memory_repair",
-  "operation": "scan_pipeline",
-  "payload_in": {
-   "action": "page",
-   "max_memories": 10,
-   "neighbor_k": 5,
-   "time_budget_s": 5,
-   "workspace": {
-    "$rep": "x",
-    "$n": 2000,
-    "$pad": true
    }
   },
   "error": null,
@@ -37953,38 +39481,10 @@
    "action": "page",
    "max_memories": 10,
    "neighbor_k": 5,
-   "time_budget_s": 5,
-   "workspace": {
-    "$rep": "x",
-    "$n": 2000,
-    "$pad": true
+   "slow_lane": false,
+   "time_budget_s": {
+    "unexpected": "object"
    }
-  },
-  "raises": null
- },
- {
-  "case_id": "B/memory_repair.scan_pipeline/workspace/surrogate",
-  "surface": "memory_repair",
-  "operation": "scan_pipeline",
-  "payload_in": {
-   "action": "page",
-   "max_memories": 10,
-   "neighbor_k": 5,
-   "time_budget_s": 5,
-   "workspace": "a\ud800b"
-  },
-  "error": {
-   "error": "invalid_input",
-   "field": "workspace",
-   "reason": "must be a string of at most 2000 characters"
-  },
-  "warnings": [],
-  "payload_out": {
-   "action": "page",
-   "max_memories": 10,
-   "neighbor_k": 5,
-   "time_budget_s": 5,
-   "workspace": "a\ud800b"
   },
   "raises": null
  },
@@ -40161,108 +41661,14 @@
   "payload_in": {
    "deep": {
     "unexpected": "object"
-   },
-   "workspace": "ws"
+   }
   },
   "error": null,
   "warnings": [],
   "payload_out": {
    "deep": {
     "unexpected": "object"
-   },
-   "workspace": "ws"
-  },
-  "raises": null
- },
- {
-  "case_id": "B/memory_review.doctor/workspace/wrongtype",
-  "surface": "memory_review",
-  "operation": "doctor",
-  "payload_in": {
-   "deep": false,
-   "workspace": 123
-  },
-  "error": {
-   "error": "invalid_input",
-   "field": "workspace",
-   "reason": "must be a string of at most 2000 characters"
-  },
-  "warnings": [],
-  "payload_out": {
-   "deep": false,
-   "workspace": 123
-  },
-  "raises": null
- },
- {
-  "case_id": "B/memory_review.doctor/workspace/over",
-  "surface": "memory_review",
-  "operation": "doctor",
-  "payload_in": {
-   "deep": false,
-   "workspace": {
-    "$rep": "x",
-    "$n": 2001,
-    "$pad": true
    }
-  },
-  "error": {
-   "error": "invalid_input",
-   "field": "workspace",
-   "reason": "must be a string of at most 2000 characters"
-  },
-  "warnings": [],
-  "payload_out": {
-   "deep": false,
-   "workspace": {
-    "$rep": "x",
-    "$n": 2001,
-    "$pad": true
-   }
-  },
-  "raises": null
- },
- {
-  "case_id": "B/memory_review.doctor/workspace/atcap",
-  "surface": "memory_review",
-  "operation": "doctor",
-  "payload_in": {
-   "deep": false,
-   "workspace": {
-    "$rep": "x",
-    "$n": 2000,
-    "$pad": true
-   }
-  },
-  "error": null,
-  "warnings": [],
-  "payload_out": {
-   "deep": false,
-   "workspace": {
-    "$rep": "x",
-    "$n": 2000,
-    "$pad": true
-   }
-  },
-  "raises": null
- },
- {
-  "case_id": "B/memory_review.doctor/workspace/surrogate",
-  "surface": "memory_review",
-  "operation": "doctor",
-  "payload_in": {
-   "deep": false,
-   "workspace": "a\ud800b"
-  },
-  "error": {
-   "error": "invalid_input",
-   "field": "workspace",
-   "reason": "must be a string of at most 2000 characters"
-  },
-  "warnings": [],
-  "payload_out": {
-   "deep": false,
-   "workspace": "a\ud800b"
   },
   "raises": null
  },
@@ -44239,6 +45645,218 @@
   "raises": null
  },
  {
+  "case_id": "B/memory_review.workspaces/limit/wrongtype",
+  "surface": "memory_review",
+  "operation": "workspaces",
+  "payload_in": {
+   "limit": "abc",
+   "workspace": "ws"
+  },
+  "error": {
+   "error": "invalid_input",
+   "field": "limit",
+   "reason": "must be an integer between 1 and 100"
+  },
+  "warnings": [],
+  "payload_out": {
+   "limit": "abc",
+   "workspace": "ws"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory_review.workspaces/limit/under",
+  "surface": "memory_review",
+  "operation": "workspaces",
+  "payload_in": {
+   "limit": 0,
+   "workspace": "ws"
+  },
+  "error": {
+   "error": "invalid_input",
+   "field": "limit",
+   "reason": "must be an integer between 1 and 100"
+  },
+  "warnings": [],
+  "payload_out": {
+   "limit": 0,
+   "workspace": "ws"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory_review.workspaces/limit/over",
+  "surface": "memory_review",
+  "operation": "workspaces",
+  "payload_in": {
+   "limit": 101,
+   "workspace": "ws"
+  },
+  "error": {
+   "error": "invalid_input",
+   "field": "limit",
+   "reason": "must be an integer between 1 and 100"
+  },
+  "warnings": [],
+  "payload_out": {
+   "limit": 101,
+   "workspace": "ws"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory_review.workspaces/limit/atmin",
+  "surface": "memory_review",
+  "operation": "workspaces",
+  "payload_in": {
+   "limit": 1,
+   "workspace": "ws"
+  },
+  "error": null,
+  "warnings": [],
+  "payload_out": {
+   "limit": 1,
+   "workspace": "ws"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory_review.workspaces/limit/atmax",
+  "surface": "memory_review",
+  "operation": "workspaces",
+  "payload_in": {
+   "limit": 100,
+   "workspace": "ws"
+  },
+  "error": null,
+  "warnings": [],
+  "payload_out": {
+   "limit": 100,
+   "workspace": "ws"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory_review.workspaces/limit/hugedigits",
+  "surface": "memory_review",
+  "operation": "workspaces",
+  "payload_in": {
+   "limit": {
+    "$rep": "9",
+    "$n": 5000,
+    "$pad": true
+   },
+   "workspace": "ws"
+  },
+  "error": {
+   "error": "invalid_input",
+   "field": "limit",
+   "reason": "must be an integer between 1 and 100"
+  },
+  "warnings": [],
+  "payload_out": {
+   "limit": {
+    "$rep": "9",
+    "$n": 5000,
+    "$pad": true
+   },
+   "workspace": "ws"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory_review.workspaces/workspace/wrongtype",
+  "surface": "memory_review",
+  "operation": "workspaces",
+  "payload_in": {
+   "limit": 10,
+   "workspace": 123
+  },
+  "error": {
+   "error": "invalid_input",
+   "field": "workspace",
+   "reason": "must be a string of at most 2000 characters"
+  },
+  "warnings": [],
+  "payload_out": {
+   "limit": 10,
+   "workspace": 123
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory_review.workspaces/workspace/over",
+  "surface": "memory_review",
+  "operation": "workspaces",
+  "payload_in": {
+   "limit": 10,
+   "workspace": {
+    "$rep": "x",
+    "$n": 2001,
+    "$pad": true
+   }
+  },
+  "error": {
+   "error": "invalid_input",
+   "field": "workspace",
+   "reason": "must be a string of at most 2000 characters"
+  },
+  "warnings": [],
+  "payload_out": {
+   "limit": 10,
+   "workspace": {
+    "$rep": "x",
+    "$n": 2001,
+    "$pad": true
+   }
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory_review.workspaces/workspace/atcap",
+  "surface": "memory_review",
+  "operation": "workspaces",
+  "payload_in": {
+   "limit": 10,
+   "workspace": {
+    "$rep": "x",
+    "$n": 2000,
+    "$pad": true
+   }
+  },
+  "error": null,
+  "warnings": [],
+  "payload_out": {
+   "limit": 10,
+   "workspace": {
+    "$rep": "x",
+    "$n": 2000,
+    "$pad": true
+   }
+  },
+  "raises": null
+ },
+ {
+  "case_id": "B/memory_review.workspaces/workspace/surrogate",
+  "surface": "memory_review",
+  "operation": "workspaces",
+  "payload_in": {
+   "limit": 10,
+   "workspace": "a\ud800b"
+  },
+  "error": {
+   "error": "invalid_input",
+   "field": "workspace",
+   "reason": "must be a string of at most 2000 characters"
+  },
+  "warnings": [],
+  "payload_out": {
+   "limit": 10,
+   "workspace": "a\ud800b"
+  },
+  "raises": null
+ },
+ {
   "case_id": "C/timeout_overflow",
   "surface": "memory_repair",
   "operation": "semantic_control",
@@ -44414,6 +46032,7 @@
   "surface": "memory",
   "operation": "remember",
   "payload_in": {
+   "workspace": "default",
    "content": "a",
    "subject": "b",
    "confidence": "garbage"
@@ -44425,6 +46044,7 @@
   },
   "warnings": [],
   "payload_out": {
+   "workspace": "default",
    "content": "a",
    "subject": "b",
    "confidence": "garbage"
@@ -44436,6 +46056,7 @@
   "surface": "memory",
   "operation": "remember",
   "payload_in": {
+   "workspace": "default",
    "content": "a",
    "subject": "b",
    "bogus_field": 1,
@@ -44450,6 +46071,7 @@
    "unknown field ignored: bogus_field"
   ],
   "payload_out": {
+   "workspace": "default",
    "content": "a",
    "subject": "b",
    "confidence": 5
@@ -44620,6 +46242,7 @@
   "surface": "memory_govern",
   "operation": "confirm_pending_workspace",
   "payload_in": {
+   "workspace": "ws",
    "id": "abc"
   },
   "error": {
@@ -44629,6 +46252,7 @@
   },
   "warnings": [],
   "payload_out": {
+   "workspace": "ws",
    "id": "abc"
   },
   "raises": null
@@ -44650,6 +46274,126 @@
   "payload_out": {
    "whatever": "The base class of the class hierarchy.\n\nWhen called, it accepts no arguments and returns a new featureless\ninstance that has no instance attributes and cannot be given any.\n",
    "id": "abc"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "D/required_workspace_missing",
+  "surface": "memory",
+  "operation": "remember",
+  "payload_in": {
+   "content": "a",
+   "subject": "b"
+  },
+  "error": {
+   "error": "invalid_input",
+   "field": "workspace",
+   "reason": "workspace is required for this action; call memory_review(view='workspaces') to list existing buckets, then pass the chosen canonical name (pass an existing name; use a new name only when deliberately creating a new bucket; 'default' is the global pool)"
+  },
+  "warnings": [],
+  "payload_out": {
+   "content": "a",
+   "subject": "b"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "D/required_workspace_empty",
+  "surface": "memory",
+  "operation": "remember",
+  "payload_in": {
+   "workspace": "   ",
+   "content": "a",
+   "subject": "b"
+  },
+  "error": {
+   "error": "invalid_input",
+   "field": "workspace",
+   "reason": "workspace is required for this action; call memory_review(view='workspaces') to list existing buckets, then pass the chosen canonical name (pass an existing name; use a new name only when deliberately creating a new bucket; 'default' is the global pool)"
+  },
+  "warnings": [],
+  "payload_out": {
+   "workspace": "   ",
+   "content": "a",
+   "subject": "b"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "D/required_workspace_pass",
+  "surface": "memory",
+  "operation": "remember",
+  "payload_in": {
+   "workspace": "default",
+   "content": "a",
+   "subject": "b"
+  },
+  "error": null,
+  "warnings": [],
+  "payload_out": {
+   "workspace": "default",
+   "content": "a",
+   "subject": "b"
+  },
+  "raises": null
+ },
+ {
+  "case_id": "D/required_workspace_govern_missing",
+  "surface": "memory_govern",
+  "operation": "confirm_pending_workspace",
+  "payload_in": {
+   "memory_id": 1,
+   "canonical": "ws",
+   "authorized": true
+  },
+  "error": {
+   "error": "invalid_input",
+   "field": "workspace",
+   "reason": "workspace is required for this action; call memory_review(view='workspaces') to list existing buckets, then pass the chosen canonical name (pass an existing name; use a new name only when deliberately creating a new bucket; 'default' is the global pool)"
+  },
+  "warnings": [],
+  "payload_out": {
+   "memory_id": 1,
+   "canonical": "ws",
+   "authorized": true
+  },
+  "raises": null
+ },
+ {
+  "case_id": "D/required_workspace_govern_empty",
+  "surface": "memory_govern",
+  "operation": "rename_workspace_canonical",
+  "payload_in": {
+   "workspace": "",
+   "old": "a",
+   "new": "b",
+   "authorized": true
+  },
+  "error": {
+   "error": "invalid_input",
+   "field": "workspace",
+   "reason": "workspace is required for this action; call memory_review(view='workspaces') to list existing buckets, then pass the chosen canonical name (pass an existing name; use a new name only when deliberately creating a new bucket; 'default' is the global pool)"
+  },
+  "warnings": [],
+  "payload_out": {
+   "workspace": "",
+   "old": "a",
+   "new": "b",
+   "authorized": true
+  },
+  "raises": null
+ },
+ {
+  "case_id": "D/required_workspace_not_enforced_on_read",
+  "surface": "memory",
+  "operation": "find",
+  "payload_in": {
+   "query": "x"
+  },
+  "error": null,
+  "warnings": [],
+  "payload_out": {
+   "query": "x"
   },
   "raises": null
  },
@@ -46464,8 +48208,8 @@
   },
   "error": {
    "error": "invalid_input",
-   "field": "memory_ids",
-   "reason": "must be a list with at most 1000 items"
+   "field": "workspace",
+   "reason": "workspace is required for this action; call memory_review(view='workspaces') to list existing buckets, then pass the chosen canonical name (pass an existing name; use a new name only when deliberately creating a new bucket; 'default' is the global pool)"
   },
   "warnings": [],
   "payload_out": {
@@ -47738,15 +49482,8 @@
   },
   "error": {
    "error": "invalid_input",
-   "field": "source_type",
-   "reason": "invalid enum value",
-   "allowed": [
-    "agent_generated",
-    "document_extracted",
-    "pending",
-    "unknown",
-    "user_confirmed"
-   ]
+   "field": "workspace",
+   "reason": "workspace is required for this action; call memory_review(view='workspaces') to list existing buckets, then pass the chosen canonical name (pass an existing name; use a new name only when deliberately creating a new bucket; 'default' is the global pool)"
   },
   "warnings": [],
   "payload_out": {
@@ -47802,8 +49539,8 @@
   },
   "error": {
    "error": "invalid_input",
-   "field": "status",
-   "reason": "must be 'active' (default) or 'pending'; superseded/conflicted/deleted are lifecycle outcomes, not write inputs"
+   "field": "workspace",
+   "reason": "workspace is required for this action; call memory_review(view='workspaces') to list existing buckets, then pass the chosen canonical name (pass an existing name; use a new name only when deliberately creating a new bucket; 'default' is the global pool)"
   },
   "warnings": [],
   "payload_out": {
@@ -47822,7 +49559,11 @@
    "subject": "b",
    "status": "pending"
   },
-  "error": null,
+  "error": {
+   "error": "invalid_input",
+   "field": "workspace",
+   "reason": "workspace is required for this action; call memory_review(view='workspaces') to list existing buckets, then pass the chosen canonical name (pass an existing name; use a new name only when deliberately creating a new bucket; 'default' is the global pool)"
+  },
   "warnings": [],
   "payload_out": {
    "content": "a",
@@ -48908,9 +50649,9 @@
    }
   },
   "error": {
-   "error": "resource_limit_exceeded",
-   "field": "metadata",
-   "max_bytes": 262144
+   "error": "invalid_input",
+   "field": "workspace",
+   "reason": "workspace is required for this action; call memory_review(view='workspaces') to list existing buckets, then pass the chosen canonical name (pass an existing name; use a new name only when deliberately creating a new bucket; 'default' is the global pool)"
   },
   "warnings": [],
   "payload_out": {
@@ -49173,8 +50914,8 @@
   },
   "error": {
    "error": "invalid_input",
-   "field": "memory_ids",
-   "reason": "must contain positive integer ids"
+   "field": "workspace",
+   "reason": "workspace is required for this action; call memory_review(view='workspaces') to list existing buckets, then pass the chosen canonical name (pass an existing name; use a new name only when deliberately creating a new bucket; 'default' is the global pool)"
   },
   "warnings": [],
   "payload_out": {
@@ -49200,8 +50941,8 @@
   },
   "error": {
    "error": "invalid_input",
-   "field": "memory_ids",
-   "reason": "must contain positive integer ids"
+   "field": "workspace",
+   "reason": "workspace is required for this action; call memory_review(view='workspaces') to list existing buckets, then pass the chosen canonical name (pass an existing name; use a new name only when deliberately creating a new bucket; 'default' is the global pool)"
   },
   "warnings": [],
   "payload_out": {
@@ -49656,8 +51397,8 @@
   },
   "error": {
    "error": "invalid_input",
-   "field": "status",
-   "reason": "must be 'active' (default) or 'pending'; superseded/conflicted/deleted are lifecycle outcomes, not write inputs"
+   "field": "workspace",
+   "reason": "workspace is required for this action; call memory_review(view='workspaces') to list existing buckets, then pass the chosen canonical name (pass an existing name; use a new name only when deliberately creating a new bucket; 'default' is the global pool)"
   },
   "warnings": [],
   "payload_out": {
@@ -49682,8 +51423,8 @@
   },
   "error": {
    "error": "invalid_input",
-   "field": "status",
-   "reason": "must be 'active' (default) or 'pending'; superseded/conflicted/deleted are lifecycle outcomes, not write inputs"
+   "field": "workspace",
+   "reason": "workspace is required for this action; call memory_review(view='workspaces') to list existing buckets, then pass the chosen canonical name (pass an existing name; use a new name only when deliberately creating a new bucket; 'default' is the global pool)"
   },
   "warnings": [],
   "payload_out": {
@@ -49727,8 +51468,8 @@
   },
   "error": {
    "error": "invalid_input",
-   "field": "tags",
-   "reason": "must be a list of at most 100 strings, each at most 256 characters"
+   "field": "workspace",
+   "reason": "workspace is required for this action; call memory_review(view='workspaces') to list existing buckets, then pass the chosen canonical name (pass an existing name; use a new name only when deliberately creating a new bucket; 'default' is the global pool)"
   },
   "warnings": [],
   "payload_out": {
@@ -49817,8 +51558,8 @@
   },
   "error": {
    "error": "invalid_input",
-   "field": "confidence",
-   "reason": "must be a finite number between 0 and 1"
+   "field": "workspace",
+   "reason": "workspace is required for this action; call memory_review(view='workspaces') to list existing buckets, then pass the chosen canonical name (pass an existing name; use a new name only when deliberately creating a new bucket; 'default' is the global pool)"
   },
   "warnings": [],
   "payload_out": {
@@ -49841,8 +51582,8 @@
   },
   "error": {
    "error": "invalid_input",
-   "field": "event_time",
-   "reason": "must be a valid ISO 8601 timestamp of at most 128 characters"
+   "field": "workspace",
+   "reason": "workspace is required for this action; call memory_review(view='workspaces') to list existing buckets, then pass the chosen canonical name (pass an existing name; use a new name only when deliberately creating a new bucket; 'default' is the global pool)"
   },
   "warnings": [],
   "payload_out": {
@@ -49865,15 +51606,8 @@
   },
   "error": {
    "error": "invalid_input",
-   "field": "source_type",
-   "reason": "invalid enum value",
-   "allowed": [
-    "agent_generated",
-    "document_extracted",
-    "pending",
-    "unknown",
-    "user_confirmed"
-   ]
+   "field": "workspace",
+   "reason": "workspace is required for this action; call memory_review(view='workspaces') to list existing buckets, then pass the chosen canonical name (pass an existing name; use a new name only when deliberately creating a new bucket; 'default' is the global pool)"
   },
   "warnings": [],
   "payload_out": {
@@ -49895,14 +51629,17 @@
    "bogus": 1,
    "event_time": "2026-01-01T00:00:00+00:00"
   },
-  "error": null,
-  "warnings": [
-   "unknown field ignored: bogus"
-  ],
+  "error": {
+   "error": "invalid_input",
+   "field": "workspace",
+   "reason": "workspace is required for this action; call memory_review(view='workspaces') to list existing buckets, then pass the chosen canonical name (pass an existing name; use a new name only when deliberately creating a new bucket; 'default' is the global pool)"
+  },
+  "warnings": [],
   "payload_out": {
    "content": "a",
    "subject": "b",
-   "confidence": 0.5,
+   "confidence": "0.5",
+   "bogus": 1,
    "event_time": "2026-01-01T00:00:00+00:00"
   },
   "raises": null
@@ -49914,15 +51651,21 @@
   "payload_in": {
    "content": "a",
    "subject": "b",
-   "confidence": 0.5,
+   "confidence": "0.5",
+   "bogus": 1,
    "event_time": "2026-01-01T00:00:00+00:00"
   },
-  "error": null,
+  "error": {
+   "error": "invalid_input",
+   "field": "workspace",
+   "reason": "workspace is required for this action; call memory_review(view='workspaces') to list existing buckets, then pass the chosen canonical name (pass an existing name; use a new name only when deliberately creating a new bucket; 'default' is the global pool)"
+  },
   "warnings": [],
   "payload_out": {
    "content": "a",
    "subject": "b",
-   "confidence": 0.5,
+   "confidence": "0.5",
+   "bogus": 1,
    "event_time": "2026-01-01T00:00:00+00:00"
   },
   "raises": null

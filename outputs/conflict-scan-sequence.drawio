@@ -1,0 +1,151 @@
+<mxfile host="app.diagrams.net" agent="mema-docs" version="24.7.8">
+  <diagram name="冲突扫描-时序图" id="scan-seq">
+    <mxGraphModel dx="1000" dy="700" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1150" pageHeight="1250" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="t" value="mema 冲突扫描时序图（定期扫描 / 手动触发 repair 类）" style="text;html=1;fontSize=16;fontStyle=1;align=left;" vertex="1" parent="1">
+          <mxGeometry x="20" y="10" width="700" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="p1" value="触发方&#10;（定时任务 / 工具调用）" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="20" y="50" width="160" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p2" value="扫描调度&#10;scan_pipeline.py&#10;ScanPipeline.kick" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="210" y="50" width="160" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p3" value="逐记忆处理&#10;_process_memory" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="400" y="50" width="160" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p4" value="本地库&#10;证据向量 / 冲突待办表 / 扫描台账" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="590" y="50" width="160" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p5" value="判定后端&#10;Qwen 小模型（本地）" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="780" y="50" width="160" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p6" value="结果&#10;冲突待办 + 机器清除 + 抑制" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="970" y="50" width="160" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="l1" style="html=1;endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="100" y="90" as="sourcePoint" />
+            <mxPoint x="100" y="1110" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="l2" style="html=1;endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="290" y="90" as="sourcePoint" />
+            <mxPoint x="290" y="1110" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="l3" style="html=1;endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="480" y="90" as="sourcePoint" />
+            <mxPoint x="480" y="1110" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="l4" style="html=1;endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="670" y="90" as="sourcePoint" />
+            <mxPoint x="670" y="1110" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="l5" style="html=1;endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="860" y="90" as="sourcePoint" />
+            <mxPoint x="860" y="1110" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="l6" style="html=1;endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1050" y="90" as="sourcePoint" />
+            <mxPoint x="1050" y="1110" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m1" value="kick(max_memories≤400, time_budget≤45s, neighbor_k≤10)" style="html=1;endArrow=block;fontSize=11;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="100" y="130" as="sourcePoint" />
+            <mxPoint x="290" y="130" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="s1" value="前置门：向量空间状态 mismatch/failed → 直接报错&#10;（提示需重建向量空间）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="210" y="155" width="160" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="s2" value="决定本轮模式：&#10;全量（首次或台账要求重扫）或增量（从上次记录的 last_id 续扫）；&#10;记预算：最多 400 条记忆 / 45 秒（可用 token：邻边预算、模型对数预算）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="210" y="230" width="160" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="m2" value="取扫描台账与抑制清单（已确认无问题的配对进来就跳）" style="html=1;endArrow=block;fontSize=11;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="290" y="330" as="sourcePoint" />
+            <mxPoint x="670" y="330" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m3" value="批次取活跃记忆（按 id 推进，last_id 续扫）" style="html=1;endArrow=block;fontSize=11;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="290" y="380" as="sourcePoint" />
+            <mxPoint x="670" y="380" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="s3" value="跳过：非 active / 已被取代 / 已在待办表中" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="400" y="405" width="160" height="44" as="geometry" />
+        </mxCell>
+        <mxCell id="m4" value="读证据单元与向量（缺失则现场为这条记忆补建索引）" style="html=1;endArrow=block;fontSize=11;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="480" y="480" as="sourcePoint" />
+            <mxPoint x="670" y="480" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m5" value="同一记忆内部：证据单元两两筛查（共用内部准入过滤），可判的先判&#10;→ 内部冲突直接落冲突待办表" style="html=1;endArrow=block;fontSize=11;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="480" y="525" as="sourcePoint" />
+            <mxPoint x="860" y="525" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m6" value="内部待办行（供后续治理：合并/驳回/应用）" style="html=1;endArrow=block;fontSize=11;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="860" y="570" as="sourcePoint" />
+            <mxPoint x="670" y="570" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m7" value="跨记忆：每个证据单元取向量近邻（top10+1，只计正文类）&#10;并按同桶过滤" style="html=1;endArrow=block;fontSize=11;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="480" y="615" as="sourcePoint" />
+            <mxPoint x="670" y="615" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="s4" value="机器通道（确定性规则）：&#10;忽略类直接跳 → 演进域排除 → 只保留正文类前 3 名机器可判候选 → &#10;差异分类为「清晰」→ 记一次机器清除（噪音再单独计数）&#10;否则进入待办队列" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="400" y="640" width="160" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="m8" value="命中抑制清单 → 跳过" style="html=1;endArrow=block;fontSize=11;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="480" y="755" as="sourcePoint" />
+            <mxPoint x="670" y="755" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m9" value="落冲突待办表（待判断队列；同候选哈希去重、同槽位应用中的变更抑制）" style="html=1;endArrow=block;fontSize=11;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="480" y="800" as="sourcePoint" />
+            <mxPoint x="670" y="800" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m10" value="到预算或全部扫完？" style="html=1;endArrow=block;fontSize=11;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="480" y="845" as="sourcePoint" />
+            <mxPoint x="290" y="845" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="s5" value="收尾：&#10;顺手回收过期内部待办行（pinned 旧版本）&#10;增量→更新续扫游标；全量→记完成时间&#10;输出本轮统计（已处理 / 排队 / 机器清除 / 内部冲突数）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="210" y="870" width="160" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="m11" value="本轮结果（统计 + 待办队列积压量）" style="html=1;endArrow=block;dashed=1;fontSize=11;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="290" y="985" as="sourcePoint" />
+            <mxPoint x="100" y="985" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="note" value="说明：写时判定只给“提示”，扫描把它升级成“待办队列”；机器能确定无冲突的当场清除，不能确定的留给后续判断队列与小模型复核，支持断点续扫。写时与扫描共用同一套内部准入过滤（internal_pair_admission）。" style="shape=note;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;align=left;" vertex="1" parent="1">
+          <mxGeometry x="670" y="870" width="440" height="80" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

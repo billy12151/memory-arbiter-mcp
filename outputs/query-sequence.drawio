@@ -1,0 +1,151 @@
+<mxfile host="app.diagrams.net" agent="mema-docs" version="24.7.8">
+  <diagram name="查询链路-时序图" id="query-seq">
+    <mxGraphModel dx="1000" dy="700" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1100" pageHeight="1200" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="t" value="mema 查询链路时序图（memory action=find / search）" style="text;html=1;fontSize=16;fontStyle=1;align=left;" vertex="1" parent="1">
+          <mxGeometry x="20" y="10" width="600" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="p1" value="调用方&#10;（上层 Agent）" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="20" y="50" width="150" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p2" value="MCP 工具入口&#10;surfaces.py _memory" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="190" y="50" width="150" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p3" value="读取流水线&#10;pipeline/read.py&#10;memory_search(253)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="360" y="50" width="150" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p4" value="召回与排序&#10;search.py&#10;search_memories(995)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="530" y="50" width="150" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p5" value="SQLite&#10;FTS5 / 向量表 / LIKE" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="700" y="50" width="150" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="p6" value="嵌入服务&#10;ManagedEmbedder" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="870" y="50" width="150" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="l1" style="html=1;endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="95" y="90" as="sourcePoint" />
+            <mxPoint x="95" y="1000" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="l2" style="html=1;endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="265" y="90" as="sourcePoint" />
+            <mxPoint x="265" y="1000" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="l3" style="html=1;endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="435" y="90" as="sourcePoint" />
+            <mxPoint x="435" y="1000" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="l4" style="html=1;endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="605" y="90" as="sourcePoint" />
+            <mxPoint x="605" y="1000" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="l5" style="html=1;endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="775" y="90" as="sourcePoint" />
+            <mxPoint x="775" y="1000" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="l6" style="html=1;endArrow=none;dashed=1;strokeColor=#999999;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="945" y="90" as="sourcePoint" />
+            <mxPoint x="945" y="1000" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m1" value="memory(action=&quot;find&quot;, query, content_mode, tags / 时间 / source 过滤…)" style="html=1;endArrow=block;fontSize=11;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="95" y="130" as="sourcePoint" />
+            <mxPoint x="265" y="130" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m2" value="memory_search(...)（read.py:253）" style="html=1;endArrow=block;fontSize=11;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="265" y="175" as="sourcePoint" />
+            <mxPoint x="435" y="175" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="s1" value="参数校验：拒绝 include_content / include_superseded；&#10;content_mode 限 preview | hits | full" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="360" y="200" width="150" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="m3" value="_auto_embed(query)（read.py:527）" style="html=1;endArrow=block;fontSize=11;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="435" y="275" as="sourcePoint" />
+            <mxPoint x="945" y="275" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m4" value="query 向量（vec 状态 mismatch/failed → 附 vec_disabled 警告且不走向量）" style="html=1;endArrow=block;dashed=1;fontSize=11;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="945" y="315" as="sourcePoint" />
+            <mxPoint x="435" y="315" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m5" value="search_memories(status_filter=&quot;active&quot;)" style="html=1;endArrow=block;fontSize=11;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="435" y="355" as="sourcePoint" />
+            <mxPoint x="605" y="355" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="s2" value="三分支判断：①query 空且无过滤→时间倒序兜底 recent_browse；&#10;②query 空但有过滤→recall_by_filters 过滤召回+精确 count；&#10;③query 非空→宽召回" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="530" y="380" width="150" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="m6" value="宽召回 5 通道：FTS AND / FTS OR（池未满）/ subject·tags LIKE（必跑）/ content LIKE（锚点≥2 且池未满）/ evidence KNN（k=pool_cap×8）" style="html=1;endArrow=block;fontSize=11;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="605" y="475" as="sourcePoint" />
+            <mxPoint x="775" y="475" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m7" value="候选池（池上限 RECALL_POOL_CAP=50）" style="html=1;endArrow=block;dashed=1;fontSize=11;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="775" y="515" as="sourcePoint" />
+            <mxPoint x="605" y="515" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="s3" value="RRF 融合 1/(60+rank)（_RRF_K=60）；&#10;双通道配额：lexical 26 / evidence 24，&#10;另留 surface 保留席 10（SURFACE_ADMISSION_QUOTA）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="530" y="540" width="150" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="s4" value="_soft_rerank 软重排（相关性 + 融合分×300 + 信任/时间/工作区加分 − 内容惩罚）；&#10;active 查询过滤 final_score 低于 8.1（QUERY_RECALL_SCORE_FLOOR），&#10;全被滤则附警告；分页组装 has_more" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="530" y="615" width="150" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="m8" value="SearchOutcome(results, warnings, has_more, total)" style="html=1;endArrow=block;dashed=1;fontSize=11;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="605" y="710" as="sourcePoint" />
+            <mxPoint x="435" y="710" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m9" value="挂 conflict_signal / log_attention（仅 direct 命中）" style="html=1;endArrow=block;fontSize=11;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="435" y="750" as="sourcePoint" />
+            <mxPoint x="775" y="750" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="s5" value="强信号（open_table / conflict_guidance）→ 置 attention_required；&#10;按 content_mode 裁剪：preview 只给摘要+outline，hits 给命中片段，&#10;命中覆盖≥50% 自动升级为全文（read.py:157）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="360" y="775" width="150" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="m10" value="{results, count, has_more, warnings, attention_required}" style="html=1;endArrow=block;dashed=1;fontSize=11;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="435" y="865" as="sourcePoint" />
+            <mxPoint x="265" y="865" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m11" value="搜索结果响应" style="html=1;endArrow=block;dashed=1;fontSize=11;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="265" y="905" as="sourcePoint" />
+            <mxPoint x="95" y="905" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="note" value="说明：召回在 SQL 层就按工作区/状态过滤，Python 层再做 admitted_set 二次校验（严格隔离双保险）；v0.15.9 起非空查询不再回退到“最近浏览”，宁可返回诚实的空结果。" style="shape=note;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;align=left;" vertex="1" parent="1">
+          <mxGeometry x="700" y="930" width="320" height="60" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

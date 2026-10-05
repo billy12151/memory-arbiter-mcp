@@ -22,6 +22,7 @@ def test_move_to_default_without_flag_still_refused(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     a = _write(tools, "主题甲", "正文内容甲", workspace="proja")
     result = tools.memory_govern("move_memories_workspace", {
+        "workspace": "default",
         "memory_ids": [a], "new_workspace": "default",
         "reason": "no bucket", "authorized": True,
     })
@@ -33,6 +34,7 @@ def test_move_fallback_requires_reason(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     a = _write(tools, "主题甲", "正文内容甲", workspace="proja")
     result = tools.memory_govern("move_memories_workspace", {
+        "workspace": "default",
         "memory_ids": [a], "new_workspace": "default",
         "default_fallback": True, "authorized": True,
     })
@@ -43,6 +45,7 @@ def test_move_fallback_requires_default_target(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     a = _write(tools, "主题甲", "正文内容甲", workspace="proja")
     result = tools.memory_govern("move_memories_workspace", {
+        "workspace": "default",
         "memory_ids": [a], "new_workspace": "projb",
         "default_fallback": True, "reason": "x", "authorized": True,
     })
@@ -53,6 +56,7 @@ def test_move_fallback_lands_audits_and_notifies(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     a = _write(tools, "主题甲", "正文内容甲", workspace="proja")
     result = tools.memory_govern("move_memories_workspace", {
+        "workspace": "default",
         "memory_ids": [a], "new_workspace": "默认",  # any reserved synonym folds
         "default_fallback": True, "reason": "投票无显著去向，跨项目内容",
         "authorized": True,
@@ -173,6 +177,7 @@ def test_doctor_counts_default_fallback_landings(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     a = _write(tools, "主题甲", "正文内容甲", workspace="proja")
     tools.memory_govern("move_memories_workspace", {
+        "workspace": "default",
         "memory_ids": [a], "new_workspace": "default",
         "default_fallback": True, "reason": "no bucket", "authorized": True,
     })

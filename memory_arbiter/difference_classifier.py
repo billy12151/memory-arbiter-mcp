@@ -171,7 +171,17 @@ _LATIN_STOPWORDS = frozenset({
     "the", "and", "for", "with", "from", "this", "that", "http", "https",
     "www", "com", "org", "net", "io",
 })
-_CN_NUM_VALUE_RE = re.compile(r"[零一二三四五六七八九十百千万两]+(?=[个倍天次条人台轮])")
+# 0.17.0 P2-1.3: duration/clock units join the lookahead so 「十点/半秒/
+# 一刻钟」 anchor as values (12th round: the whole class was unreachable —
+# note 半 itself is not a numeral char, so 半秒/半小时 anchor via 秒/小时).
+# Weekday guard: the negative lookbehind kills the REAL false shape —
+# 周X+点 collocations like 「周四点评会」 (bare 周五/周四 never matched
+# anyway: 周 is not a numeral char); 期 guards the 星期X form.
+_CN_NUM_VALUE_RE = re.compile(
+    r"(?<![周期])[零一二三四五六七八九十百千万两]+"
+    r"(?=[个倍天次条人台轮]|毫秒|秒|分钟|小时|刻钟|刻|点)"
+)
+_CN_HALF_UNIT_RE = re.compile(r"半(毫秒|秒|分钟|小时|天|周)")
 _CN_DIGITS = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
               "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
 _CN_UNITS = {"十": 10, "百": 100, "千": 1000, "万": 10000}
@@ -199,6 +209,10 @@ def _cn_to_int(text: str) -> "int | None":
 def _value_tokens(text: str) -> "tuple[set[str], set[str]]":
     """Return (strong, latin) value-token sets; see the block comment above."""
     scrubbed = _DOTTED_VERSION_SPAN_RE.sub(" ", _DATE_RE.sub(" ", text.casefold()))
+    # 0.17.0 P2-1.3: 半+时长 folds to a decimal so the digit-token path can
+    # see it (半 is not a numeral char and _cn_to_int rejects it) — the
+    # admission layer stays honest while normalize_value does the final fold.
+    scrubbed = _CN_HALF_UNIT_RE.sub(lambda m: "0.5" + m.group(1), scrubbed)
     strong: set[str] = set()
     latin: set[str] = set()
     for token in _tokens(scrubbed):
@@ -242,22 +256,18 @@ def has_value_opposition(a: str, b: str) -> bool:
 
 
 
-def classify_pair(
-    quote_a: "str | None", quote_b: "str | None", *, route: str,
-    entity_a: "str | None" = None, entity_b: "str | None" = None,
-) -> str:
+def classify_pair(quote_a: "str | None", quote_b: "str | None", *, route: str) -> str:
     """Return ``"keep"`` (enqueue for agent judgment) or ``"clear"``
     (machine-cleared, count only, never lands in conflicts).
 
     ``route`` is the check-route reason (``numeric_value_candidate`` or any
-    other check reason, treated as the similarity route). The entity layer
-    (owner ⑪) clears pairs whose BOTH-side metadata.entity values exist and
-    differ — true different-subject pairs; zero hits on the current library,
-    free to run, useful as the library grows.
+    other check reason, treated as the similarity route). The owner-⑪
+    entity layer (different metadata.entity → clear) was removed with its
+    data source: metadata.entity retired in 0.17.0 (G3) and no production
+    caller ever passed the entity parameters after that — the branch was
+    dead code whose docstring claimed it was live.
     """
     if not quote_a or not quote_b:
-        return "clear"
-    if entity_a and entity_b and entity_a.strip() != entity_b.strip():
         return "clear"
     if "numeric_value_candidate" in route:
         return "keep" if name_cosine(quote_a, quote_b) >= DIFFERENCE_COSINE_KEEP else "clear"

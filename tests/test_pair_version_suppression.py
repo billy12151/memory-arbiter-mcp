@@ -104,7 +104,7 @@ def test_dismissed_pair_suppressed_across_unit_slices(vec_tools: MemoryTools) ->
         content="重试次数为 5 次。\n\n另一段与重试无关的背景文字，拉长单元组合。",
         subject="retry-variant", tags=[],
     )["data"]
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
 
     pair_ab = _pair_ids(a, b)
     pair_cd = _pair_ids(c, d)
@@ -136,7 +136,7 @@ def test_edit_lifts_suppression_and_pair_is_reconsidered(vec_tools: MemoryTools)
     tools = vec_tools
     a = tools.memory_write(content="上限 10。", subject="cap", tags=[])["data"]
     b = tools.memory_write(content="上限 99。", subject="cap", tags=[])["data"]
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
 
     pair = _pair_ids(a, b)
     clue = _find(_scan(tools), pair)
@@ -145,7 +145,7 @@ def test_edit_lifts_suppression_and_pair_is_reconsidered(vec_tools: MemoryTools)
     assert _find(_scan(tools), pair) is None
 
     tools.memory("update", {"memory_id": a["id"], "new_content": "上限 20。", "reason": "新版本"})
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
     fresh = _scan(tools)
     resurfaced = _find(fresh, pair)
     assert resurfaced is not None, "edited member lifts the version-pinned suppression"
@@ -158,7 +158,7 @@ def test_open_group_precedence_over_dismissal(vec_tools: MemoryTools) -> None:
     tools = vec_tools
     a = tools.memory_write(content="端口是 8080。", subject="port", tags=[], metadata={"entity": "svc", "scope": "prod"})["data"]
     b = tools.memory_write(content="端口是 9090。", subject="port", tags=[], metadata={"entity": "svc", "scope": "prod"})["data"]
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
 
     pair = _pair_ids(a, b)
     clue = _find(_scan(tools), pair)
@@ -221,7 +221,7 @@ def test_duplicates_pool_respects_pair_version_suppression(vec_tools: MemoryTool
     tools = vec_tools
     tools.memory_write(content="gamma duplicate fact statement", subject="d", tags=[], workspace="w")
     _write_dup_bypass(tools, "gamma duplicate fact statement")
-    assert tools.wait_evidence_worker_drained(timeout=5)
+    assert tools.wait_semantic_worker_drained(timeout=5)
 
     scan = tools.memory_repair("scan_candidates", {
         "anchor_memory_id": 0, "batch": 50, "k": 10,

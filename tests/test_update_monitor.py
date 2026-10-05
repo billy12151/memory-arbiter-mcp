@@ -282,11 +282,14 @@ def test_unwritable_state_path_does_not_raise(tmp_path: Path) -> None:
     assert status["current_version"] == "0.9.5"
 
 
-def test_response_adds_notices_only_for_success() -> None:
+def test_response_notices_only_via_explicit_extra_notices() -> None:
+    # 2026-10-05：state 级 notice_provider 通道随死代码清理移除（生产唯一
+    # 赋值点是主动置 None——通知交付归四个外层产品 wrapper）。response 的
+    # notices 只剩显式 extra_notices 注入路径，且 ok=False 不携带。
     state = DegradeState(mode="sqlite_vec")
-    state.notice_provider = lambda: [{"type": "update_available"}]
+    assert not hasattr(state, "notice_provider")
 
-    ok_resp = state.response({"x": 1})
+    ok_resp = state.response({"x": 1}, extra_notices=[{"type": "update_available"}])
     assert ok_resp["notices"] == [{"type": "update_available"}]
 
     error_resp = state.response({"error": "bad"}, ok=False)

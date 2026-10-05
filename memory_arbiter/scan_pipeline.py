@@ -22,6 +22,7 @@ Per-memory processing (E10 final form):
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 import time
 import uuid
@@ -29,11 +30,23 @@ from typing import Any, TYPE_CHECKING
 
 from .constants import (
     SCAN_MACHINE_ROUTE_TOP_K,
+    SCAN_POISON_MAX_FAILURES,
+    SCAN_SLOW_LANE_PER_KICK,
 )
-from .db_generation import CONFLICT_DETECTOR_VERSION
-from .difference_classifier import classify_pair, internal_noise_pair, is_garbage
+from .db_generation import CONFLICT_DETECTOR_VERSION as CONFLICT_DETECTOR_VERSION  # noqa: F401（显式 re-export：scan_admission 调用期读+测试 patch 缝）
+from .difference_classifier import classify_pair
+from .pipeline.evidence import filter_exempted_scan_rows
 from .semantic_conflict import decide_evidence, is_cross_evolution
 from .normalize_gate import compute_summary_votes, normalize_gate
+from .scan_admission import (  # noqa: F401
+    _candidate_pair_member as _candidate_pair_member,
+    spans_overlap as spans_overlap,
+    genuine_numeric_pair as genuine_numeric_pair,
+    internal_pair_admission as internal_pair_admission,
+    _workspace_identity as _workspace_identity,
+)
+from .scan_admission import _ScanPairsMixin
+from .scan_enumerate import _ScanEnumerate
 
 if TYPE_CHECKING:
     from .tools import MemoryTools
@@ -45,7 +58,7 @@ DEFAULT_MAX_MEMORIES = 400
 DEFAULT_NEIGHBOR_K = 10
 
 
-class ScanPipeline:
+class ScanPipeline(_ScanPairsMixin, _ScanEnumerate):
     def __init__(self, tools: "MemoryTools") -> None:
         self._tools = tools
         self.db = tools.db
@@ -95,6 +108,7 @@ class ScanPipeline:
         max_memories: int = DEFAULT_MAX_MEMORIES,
         time_budget_s: float = DEFAULT_TIME_BUDGET_S,
         neighbor_k: int = DEFAULT_NEIGHBOR_K,
+        slow_lane: bool = True,
     ) -> dict[str, Any]:
         if not self.db.db_available:
             return {"ok": False, "error": "database_unavailable"}
@@ -109,6 +123,7 @@ class ScanPipeline:
                 max_memories=max_memories,
                 time_budget_s=time_budget_s,
                 neighbor_k=neighbor_k,
+                slow_lane=slow_lane,
             )
         finally:
             self._kick_lock.release()
@@ -119,15 +134,19 @@ class ScanPipeline:
         max_memories: int,
         time_budget_s: float,
         neighbor_k: int,
+        slow_lane: bool = True,
     ) -> dict[str, Any]:
         vec_state = self.db.get_vec_index_state()
         if vec_state.get("state") in {"mismatch", "failed"}:
             return {"ok": False, "error": "embedding_space_rebuild_required"}
+        self._expire_confirmed_pair_pending()
         pending_ws = self._pending_workspace_items()
         if pending_ws:
             # 0.16.10 §九 (owner 2026-09-19): workspace 归一判定清完才扫冲突——
             # C3b 同桶配对，桶归属未治理完时扫描基数是错的。门禁放在 round
-            # 状态读写之前：被挡时零副作用（不建 round、不动水位、不写日志）。
+            # 状态读写之前：被挡时零副作用（不建 round、不动水位、不写日志；
+            # 唯一的例外是上面的 _expire_confirmed_pair_pending 自愈——其副作用
+            # 正是清退这些拦路的双确认行，幂等）。
             return {
                 "ok": False,
                 "error": "workspace_backlog_pending",
@@ -138,7 +157,13 @@ class ScanPipeline:
                 ),
             }
         max_memories = max(1, min(int(max_memories), 2000))
-        time_budget_s = max(1.0, min(float(time_budget_s), 300.0))
+        # A10（0.17.1 修复批）：float("nan") 会让 min/max 链静默产出 nan，
+        # 下游 `remaining_budget <= 0.5` 恒 False（nan 比较全假）→ 预算失效。
+        # 非有限值按默认 45s 处理（与缺省一致），不静默变 1.0s。
+        budget_value = float(time_budget_s)
+        if not math.isfinite(budget_value):
+            budget_value = 45.0
+        time_budget_s = max(1.0, min(budget_value, 300.0))
         neighbor_k = max(1, min(int(neighbor_k), 20))
 
         state = self.db.meta.scan_pipeline_state()
@@ -184,26 +209,74 @@ class ScanPipeline:
         auto_rejected = int(state.get("auto_rejected") or 0)
         internal_found = int(state.get("internal_found") or 0)
         machine_cleared = int(state.get("machine_cleared") or 0)
+        # B3（2026-10-05 审查接线）：扫描腿豁免计数进轮级账本——此前
+        # _process_memory 写进 outcome 后全链无消费，kick 回执不可见。
+        table_rows_exempted = int(state.get("table_rows_exempted") or 0)
         anchor_buckets: dict[str, int] = {}
         processed_ids: list[int] = []
+        # A4：跨 kick 的失败计数（随轮状态落盘；不用 migration_state 的
+        # per-id 键——那会让 memory_status 的全量回显无界增长）。
+        poison_failures: dict[str, Any] = dict(state.get("poison_failures") or {})
 
         batch = 50
+        # A4（0.17.1 修复批）：两个推进机制修正。
+        # ①回卷：pending 是"全量"口径，而取数按 id>last_id —— 编辑过的旧
+        #   记忆（id<last_id、watermark 落后）只有重开 round（last_id=0）才
+        #   扫得到。此前的机制是"空页 → complete=True → 下一 kick 重开
+        #   round"，靠一次谎报完成来自愈；而谎报会经 _complete_round 清掉
+        #   conflict_scan_required 门（实测：门被清而毒记忆从未被扫描）。
+        #   改为本轮内显式回卷一次：空页且仍有 pending 时 last_id=0 再取，
+        #   补扫完再判完成——既自愈又不谎报。
+        # ②失败围栏：本轮失败条不得被反复取回（尾位毒记忆此前单 kick 热
+        #   重试 253 次吃光墙钟）。失败条排除在本轮取数之外，跨 kick 由
+        #   poison_failures 计数（随轮状态落盘），达上界后回执可见。
+        wrapped = False
+        failed_this_kick: set[int] = set()
         while processed < max_memories:
             remaining_budget = budget - (time.monotonic() - started)
             if remaining_budget <= 0.5:
                 break
-            ids = self.db.pending_scan_memory_ids(after_id=last_id, limit=batch)
+            ids = [
+                memory_id
+                for memory_id in self.db.pending_scan_memory_ids(after_id=last_id, limit=batch)
+                if memory_id not in failed_this_kick
+            ]
             if not ids:
+                if (
+                    not wrapped
+                    and last_id != 0
+                    and self.db.pending_scan_memory_count() > 0
+                ):
+                    wrapped = True
+                    last_id = 0
+                    continue
                 state["complete"] = True
                 break
             for memory_id in ids:
                 if time.monotonic() - started > budget or processed >= max_memories:
                     break
-                outcome = self._process_memory(
-                    memory_id,
-                    suppression=suppression,
-                    neighbor_k=neighbor_k,
-                )
+                # 疑似#11（owner 2026-10-04 拍板）：单条隔离——一条稳定抛
+                # 异常的"毒记忆"不得永久卡死扫描循环（无它则每轮 kick 都
+                # 死在同一 id，后面的记忆永远扫不到）。失败条不 mark_scanned
+                # （水位不动，下轮重试）、不 processed（不抢预算）、日志可见。
+                try:
+                    outcome = self._process_memory(
+                        memory_id,
+                        suppression=suppression,
+                        neighbor_k=neighbor_k,
+                    )
+                except Exception:
+                    import logging
+
+                    logging.getLogger(__name__).exception(
+                        "scan kick: memory %s failed; skipping (watermark not advanced)",
+                        memory_id,
+                    )
+                    failed_this_kick.add(memory_id)
+                    poison_failures[str(memory_id)] = (
+                        int(poison_failures.get(str(memory_id)) or 0) + 1
+                    )
+                    continue
                 version = outcome["version"]
                 if version is not None:
                     self.db.mark_scanned(memory_id, version)
@@ -214,6 +287,7 @@ class ScanPipeline:
                 auto_rejected += outcome["auto_rejected"]
                 internal_found += outcome["internal"]
                 machine_cleared += int(outcome.get("machine_cleared") or 0)
+                table_rows_exempted += int(outcome.get("table_rows_exempted") or 0)
                 last_id = max(last_id, memory_id)
                 processed_ids.append(memory_id)
                 processed += 1
@@ -233,9 +307,67 @@ class ScanPipeline:
             "updated_at": self._now(),
         })
         pending_left = self.db.pending_scan_memory_count()
-        if pending_left == 0:
-            state["complete"] = True
+        # A4（0.17.1 修复批）：complete 必须由"pending 清零"支撑——此前
+        # 空页即置 True 且不复位，毒记忆（或任何失败条）被跳过时轮次仍
+        # 宣称完成并清掉 conflict_scan_required 门（实测：门被清而该记忆
+        # 从未被扫描，完整性宣称断裂）。回卷已尽力补扫，pending_left>0
+        # 只可能是稳定失败的毒记忆 → 不宣称完成（门不清=覆盖不完整）。
+        state["complete"] = pending_left == 0
         complete = bool(state.get("complete"))
+        poison_skipped = sorted(
+            int(mid)
+            for mid, count in poison_failures.items()
+            if int(count) >= SCAN_POISON_MAX_FAILURES
+            # A4 口径（2026-10-05 审查修正）：只报「本 kick 仍失败」的条目
+            # ——修复后的恢复 kick（水位已推进、覆盖完整）不得继续把
+            # 已扫成的记忆报成 poison，与 complete=True 自相矛盾。
+            and int(mid) in failed_this_kick
+        )
+        # 0.17.0 P2-6.2 slow lane: with the fast lane settled (or its batch
+        # exhausted for this kick), spend a small leftover budget rotating
+        # through the LEAST-recently-scanned watermark-current memories —
+        # full coverage by wall time, no detector-version bump required.
+        # Best-effort: budget exhaustion and errors just defer to next kick.
+        slow_lane_done = 0
+        if slow_lane and (complete or processed < 5):
+            try:
+                remaining = budget - (time.monotonic() - started)
+                if remaining > 2.0:
+                    slow_ids = self.db.least_recently_scanned_ids(
+                        limit=SCAN_SLOW_LANE_PER_KICK, exclude_ids=processed_ids,
+                    )
+                    for slow_id in slow_ids:
+                        if time.monotonic() - started > budget:
+                            break
+                        slow_outcome = self._process_memory(
+                            slow_id, suppression=suppression, neighbor_k=neighbor_k,
+                        )
+                        if slow_outcome.get("version") is not None:
+                            self.db.mark_scanned(slow_id, int(slow_outcome["version"]))
+                        queued += slow_outcome["queued"]
+                        internal_found += slow_outcome["internal"]
+                        # 0.17.0 review R2：慢车道复制快车道记账时漏了
+                        # machine_cleared——轮级「机判清除」计数少账，观测口径
+                        # 与快车道不一致。
+                        machine_cleared += int(slow_outcome.get("machine_cleared") or 0)
+                        table_rows_exempted += int(
+                            slow_outcome.get("table_rows_exempted") or 0
+                        )
+                        slow_lane_done += 1
+            except Exception:
+                pass
+        # 0.17.1 P2 #14: the slow lane's increments used to land only in the
+        # local counters (visible in this kick's receipt but never in the
+        # persisted state table) — merge them before the single record call
+        # below so the state table's round counters include slow-lane work.
+        state.update({
+            "queued": queued,
+            "auto_rejected": auto_rejected,
+            "internal_found": internal_found,
+            "machine_cleared": machine_cleared,
+            "table_rows_exempted": table_rows_exempted,
+            "poison_failures": poison_failures,
+        })
         self.db.meta.record_scan_pipeline_state(state)
         # C5 pacing record + audit line: the same doctor faces the legacy
         # scan path uses (broken-chain alarm, scan_required/scan_stale).
@@ -250,21 +382,28 @@ class ScanPipeline:
         )
         if complete:
             self._complete_round(state)
-        return {
+        receipt: dict[str, Any] = {
             "ok": True,
             "round_id": state.get("round_id"),
             "mode": state.get("mode"),
             "processed_this_kick": processed,
+            "slow_lane_processed": slow_lane_done,
             "processed_round_total": round_processed + processed,
             "queued_total": queued,
             "auto_rejected_total": auto_rejected,
             "machine_cleared_total": machine_cleared,
+            "table_rows_exempted_total": table_rows_exempted,
             "internal_found_total": internal_found,
             "normalize_suspects_total": state.get("normalize_suspects") or 0,
             "pending_memories": pending_left,
             "complete": complete,
             "duration_ms": int((time.monotonic() - started) * 1000),
         }
+        if poison_skipped:
+            # A4：达上界的毒记忆——可见而非静默（水位未推进=覆盖不完整，
+            # 由用户决定处置：修数据 / 显式忽略）。
+            receipt["poison_skipped"] = poison_skipped
+        return receipt
 
     def _pending_workspace_items(self) -> int:
         """0.16.10 §九: conflict scan requires the workspace-normalization
@@ -282,6 +421,50 @@ class ScanPipeline:
         except sqlite3.Error:
             return 0
 
+    def _expire_confirmed_pair_pending(self) -> None:
+        """Self-heal (0.17.x prompt suppression): retire pending kind='workspace'
+        rows whose two buckets are both in the confirmed snapshot — they can
+        never be legitimately judged 'move' anymore, and §九 would otherwise
+        wedge the kick on rows nobody needs to see. Covers the windows the
+        confirm-time sweep (memory_confirm_workspaces) cannot: crash between
+        snapshot write and sweep, and pre-upgrade stock rows. Idempotent;
+        runs BEFORE the §九 backlog gate. Any failure degrades to the original
+        kick behaviour (the gate still sees the rows)."""
+        try:
+            from .doctor import load_confirmed_workspaces
+
+            confirmed = load_confirmed_workspaces(self.db.settings)
+            if not confirmed:
+                return
+            with self.db.write_transaction() as conn:
+                pend = conn.execute(
+                    """SELECT id, detail, workspace_canonical FROM scan_queue
+                       WHERE kind='workspace' AND status='pending'"""
+                ).fetchall()
+                stale: list[int] = []
+                for row in pend:
+                    try:
+                        detail = json.loads(str(row["detail"] or "{}"))
+                    except json.JSONDecodeError:
+                        detail = {}
+                    if not isinstance(detail, dict):
+                        detail = {}
+                    own = str(detail.get("current_workspace") or row["workspace_canonical"] or "")
+                    top = str(detail.get("suspected_workspace") or "")
+                    if own and top and own in confirmed and top in confirmed:
+                        stale.append(int(row["id"]))
+                if stale:
+                    now = self._now()
+                    conn.executemany(
+                        """UPDATE scan_queue SET status='expired',
+                             decided_reason='confirmed pair suppressed (kick self-heal)',
+                             decided_at=?, updated_at=?
+                           WHERE id=? AND status='pending'""",  # CAS（B10 纪律）
+                        [(now, now, rid) for rid in stale],
+                    )
+        except Exception:
+            pass  # 自愈失败不影响 kick 原有行为
+
     # ── internals ───────────────────────────────────────────────────────────
 
     def _process_memory(
@@ -294,253 +477,182 @@ class ScanPipeline:
         outcome: dict[str, Any] = {
             "version": None, "workspace": None,
             "queued": 0, "auto_rejected": 0, "internal": 0,
-            "machine_cleared": 0, "cleared_garbage": 0,
+            "machine_cleared": 0,
         }
-        record = self.db.get_memory(memory_id)
-        if not record or record.get("status") != "active":
-            if record is not None:
-                outcome["version"] = int(record.get("version") or 1)
+        # 0.17.0 R2 单连接收编：下方只读探针（get_memory / KNN / 向量批取 /
+        # claims 向量 SELECT）此前每步各自开/关连接（conn churn），改为穿过
+        # 同一条读连接（先例 P2-T6）。写路径（internal create、scan_queue 入队、
+        # claims 桥接）保持各自事务——WAL 下空闲读连接不挡写。db_available 在
+        # 此显式把关：connection() 直接抛错，而 get_memory 原本降级为 None。
+        if not self.db.db_available:
             return outcome
-        version = int(record.get("version") or 1)
-        workspace = str(
-            record.get("workspace_canonical") or record.get("workspace") or ""
-        ).strip()
-        outcome["version"] = version
-        outcome["workspace"] = workspace
-        units = self.db.evidence.scan_units(memory_id, version)
-        if not units:
-            return outcome
-        # 1) same-memory internal examination (no KNN needed; rule-only).
-        internal = self._examine_internal(memory_id, version, workspace, units)
-        outcome["internal"] = internal
-        entity_a = self._entity_of(record)
-        peer_entities: dict[int, "str | None"] = {}
-        # 2) cross-memory same-bucket rank pairing.
-        for unit in units:
-            if unit.get("embedding") is None:
-                continue
-            hits = self.db.evidence.knn(
-                unit["embedding"], k=neighbor_k + 1,
-                workspace=workspace or None,
-                exclude_memory_id=memory_id,
-            )
-            # Rank counts TEXT hits only — non-text units the KNN interleaves
-            # must not consume a top-3 slot (0.16.2 §1.5 ranks neighbours,
-            # not raw row positions).
-            text_rank = 0
-            for hit in hits:
-                if hit.get("kind") != "text":
-                    continue
-                peer_id = int(hit["memory_id"])
-                if peer_id == memory_id:
-                    continue
-                text_rank += 1
-                peer_bucket = str(
-                    hit.get("workspace_canonical") or hit.get("workspace") or ""
-                ).strip()
-                if peer_bucket and workspace and peer_bucket != workspace:
-                    continue  # C3b: same-bucket pairing only
-                decision = decide_evidence(str(unit["text"]), str(hit.get("text") or ""))
-                if decision.action == "ignore":
-                    continue
-                # 0.16.4 §1: cross-memory evolution domain (todo/polarity
-                # snapshots) is excluded BEFORE any machine route — it never
-                # reaches the rank gate, the classifier, or the queue. The
-                # todo-closure reminder keeps its dedicated channel
-                # (linked_open_items); the same predicate guards the
-                # write-time KNN loop (§0.5 single implementation).
-                if is_cross_evolution(decision):
-                    continue
-                # 0.16.2 §1.5: machine-decidable check routes generate only
-                # within the top-3 neighbour ranks (notify kept top-10 until
-                # 0.16.4 excluded it here — only check shapes remain).
-                if text_rank > SCAN_MACHINE_ROUTE_TOP_K:
-                    continue
-                # 0.16.2 §1.4: difference-based clearance — check-route
-                # pairs must carry an extractable value difference or they
-                # are duplicates/evolution noise. Cleared pairs are
-                # counted, never enqueued, never landed in conflicts.
-                if peer_id not in peer_entities:
-                    peer_record = self.db.get_memory(peer_id)
-                    peer_entities[peer_id] = (
-                        self._entity_of(peer_record) if peer_record else None
-                    )
-                verdict = classify_pair(
-                    str(unit["text"]), str(hit.get("text") or ""),
-                    route=str(decision.reason or ""),
-                    entity_a=entity_a, entity_b=peer_entities[peer_id],
-                )
-                if verdict == "clear":
-                    outcome["machine_cleared"] += 1
-                    if is_garbage(str(unit["text"])) or is_garbage(str(hit.get("text") or "")):
-                        outcome["cleared_garbage"] += 1
-                    continue
-                refs, candidate_key, candidate_hash = self._pair_identity(
-                    memory_id, version, unit, peer_id, hit,
-                )
-                if self._suppressed(refs, candidate_hash, suppression):
-                    continue
-                # E11③ live retirement (0.16.2 plan §6④/§7): numeric pairs
-                # that survive the difference classifier are same-sentence
-                # two-value candidates — they enqueue for agent judgment;
-                # the noise the old auto-reject consumed is cleared above
-                # without conflicts rows. No new scan_numeric_autoreject
-                # rows are created (existing ones stay as audit history,
-                # excluded from suppression per §1.8).
-                enqueued = self._enqueue_pair(
-                    workspace, memory_id, version, unit, peer_id, hit,
-                    decision=decision, candidate_key=candidate_key,
-                    candidate_hash=candidate_hash,
-                )
-                if enqueued:
-                    outcome["queued"] += 1
-        return outcome
-
-    @staticmethod
-    def _entity_of(record: dict[str, Any]) -> "str | None":
-        """metadata.entity of a memory row (0.16.2 §1.6 subject layer)."""
-        raw = record.get("metadata")
-        if isinstance(raw, dict):
-            value = raw.get("entity")
-            return str(value).strip() or None if value is not None else None
-        if isinstance(raw, str) and raw:
-            try:
-                value = json.loads(raw).get("entity")
-            except (TypeError, ValueError):
-                return None
-            return str(value).strip() or None if value is not None else None
-        return None
-
-    def _examine_internal(
-        self, memory_id: int, version: int, workspace: str,
-        units: list[dict[str, Any]],
-    ) -> int:
-        """Same-memory unit×unit contradictions (E10 ①, §6⑳).
-
-        0.16.4 §0.5/§2: the whole filter sequence is ONE shared gate —
-        ``internal_pair_admission`` below — called identically by the
-        write-time side; the callers differ only in what an admitted pair
-        means. Here: admitted shapes (check AND notify) land pending for
-        agent judgment — no Qwen on the scan side (E11①); a write-time Qwen
-        veto row survives via exists() and is never resurrected.
-        """
-        landed = 0
-        count = len(units)
-        for i in range(count):
-            for j in range(i + 1, count):
-                a, b = units[i], units[j]
-                if not a.get("text") or not b.get("text"):
-                    continue
-                decision = decide_evidence(str(a["text"]), str(b["text"]))
-                if not internal_pair_admission(
-                    str(a["text"]), str(b["text"]),
-                    (int(a["start_offset"]), int(a["end_offset"])),
-                    (int(b["start_offset"]), int(b["end_offset"])),
-                    decision,
-                    exists_probe=lambda: self.db.internal_conflicts.exists(
-                        memory_id, version, int(a["unit_index"]), int(b["unit_index"]),
-                    ),
-                ):
-                    continue
-                created = self.db.internal_conflicts.create(
-                    memory_id=memory_id, memory_version=version,
-                    unit_a=int(a["unit_index"]), unit_b=int(b["unit_index"]),
-                    quote_a=str(a["text"]), quote_b=str(b["text"]),
-                    span_a=[int(a["start_offset"]), int(a["end_offset"])],
-                    span_b=[int(b["start_offset"]), int(b["end_offset"])],
-                    reason=decision.reason,
-                    detector_version=CONFLICT_DETECTOR_VERSION,
-                )
-                if created:
-                    landed += 1
-        return landed
-
-    def _pair_identity(
-        self, memory_id: int, version: int, unit: dict[str, Any],
-        peer_id: int, hit: dict[str, Any],
-    ) -> tuple[frozenset[str], dict[str, Any], str]:
-        """Candidate identity shared with the legacy scan path — the exact
-        ``_unit_pair_identity`` contract, so suppression recorded by either
-        producer (or record_conflict) suppresses both."""
-        from .db.evidence_store import EvidenceStore
-
-        unit_view = {
-            "memory_version": version,
-            "eid": int(unit["eid"]),
-            "start_offset": int(unit["start_offset"]),
-            "end_offset": int(unit["end_offset"]),
-            "content_hash": str(unit["content_hash"] or ""),
-        }
-        return EvidenceStore._unit_pair_identity(memory_id, unit_view, peer_id, hit)
-
-    def _pair_members(
-        self, memory_id: int, version: int, unit: dict[str, Any],
-        peer_id: int, hit: dict[str, Any],
-    ) -> list[dict[str, Any]]:
-        def member(mid: int, ver: int, quote: str, span: list[int], unit_eid: int, content_hash: str) -> dict[str, Any]:
-            return {
-                "memory_id": mid, "version": ver,
-                "attribute_raw": None, "value_raw": None,
-                "normalized_attribute": None, "normalized_value": None,
-                "evidence_quote": quote, "evidence_span": span,
-                "content_hash": content_hash, "evidence_unit": unit_eid,
-                "direction": "deterministic", "prompt_version": None,
-                "detector_version": CONFLICT_DETECTOR_VERSION,
-            }
-
-        peer_version = int(hit.get("memory_version") or hit.get("memory_row_version") or 1)
-        if peer_id < memory_id:
-            return [
-                member(peer_id, peer_version, str(hit.get("text") or ""),
-                       [int(hit.get("start_offset") or 0), int(hit.get("end_offset") or 0)],
-                       int(hit.get("id") or 0), str(hit.get("content_hash") or "")),
-                member(memory_id, version, str(unit["text"]),
-                       [int(unit["start_offset"]), int(unit["end_offset"])],
-                       int(unit["eid"]), str(unit["content_hash"] or "")),
+        with self.db.connection() as conn:
+            record = self.db.memories.get_memory(memory_id, conn=conn)
+            if not record or record.get("status") != "active":
+                if record is not None:
+                    outcome["version"] = int(record.get("version") or 1)
+                return outcome
+            version = int(record.get("version") or 1)
+            workspace = str(
+                record.get("workspace_canonical") or record.get("workspace") or ""
+            ).strip()
+            outcome["version"] = version
+            outcome["workspace"] = workspace
+            # C2/C5 (0.17.0 worker merge): the scan source is rows, full stop —
+            # the job no longer publishes unit vectors, so the old `if not units`
+            # gate and the `is not units` identity probe are gone. No rows yet
+            # (mid-backfill) means nothing scannable this round; the slow lane
+            # re-picks the memory later.
+            internal_source = [
+                row for row in self.db.evidence.scan_rows(memory_id, version)
+                # C3 A+ guard (adversarial review P2): subject rows are index
+                # participants, never scan originators — same discipline as the
+                # write-side loops and the diagnostic channel's anchor SQL.
+                if str(row.get("kind") or "") != "subject"
             ]
-        return [
-            member(memory_id, version, str(unit["text"]),
-                   [int(unit["start_offset"]), int(unit["end_offset"])],
-                   int(unit["eid"]), str(unit["content_hash"] or "")),
-            member(peer_id, peer_version, str(hit.get("text") or ""),
-                   [int(hit.get("start_offset") or 0), int(hit.get("end_offset") or 0)],
-                   int(hit.get("id") or 0), str(hit.get("content_hash") or "")),
-        ]
-
-    def _enqueue_pair(
-        self, workspace: str, memory_id: int, version: int, unit: dict[str, Any],
-        peer_id: int, hit: dict[str, Any], *, decision: Any,
-        candidate_key: dict[str, Any], candidate_hash: str,
-    ) -> bool:
-        members = self._pair_members(memory_id, version, unit, peer_id, hit)
-        evidence = [
-            {
-                "memory_id": int(member["memory_id"]),
-                "version": int(member["version"]),
-                "evidence_quote": member["evidence_quote"],
-                "evidence_span": member["evidence_span"],
-                "evidence_unit": member["evidence_unit"],
-            }
-            for member in members
-        ]
-        outcome = self.db.scan_queue.enqueue(
-            kind="conflict",
-            workspace_canonical=workspace,
-            candidate_key_hash=candidate_hash,
-            member_versions=members,
-            evidence=evidence,
-            reason="; ".join([decision.reason]) if decision.reason else decision.action,
-            # 0.16.4 §1: notify pairs no longer enqueue (evolution domain),
-            # so the severity split lost its high branch — one value.
-            severity="normal",
-            source="scan_pipeline",
-            detail={
-                "action": decision.action,
-                "distance": float(hit.get("distance") or 0),
-                "candidate_key": candidate_key,
-            },
-        )
-        return outcome.get("outcome") in {"queued"}
+            # A3（0.17.1 修复批）：B3 超长表格段豁免——扫描腿此前直读
+            # scan_rows 无过滤，存量巨表仍做 O(n²) 内部检查（实测 120 行表
+            # 一次 kick 落地 7021 条 internal_conflicts）。豁免计数必须在
+            # 早退（if not internal_source）之前累加，否则丢账。
+            internal_source, _exempted_rows = filter_exempted_scan_rows(internal_source)
+            if _exempted_rows:
+                outcome["table_rows_exempted"] = _exempted_rows
+            if not internal_source:
+                return outcome
+            internal = self._examine_internal(memory_id, version, workspace, internal_source)
+            outcome["internal"] = internal
+            # Gate-v2 G3: the metadata.entity clear leg is retired with the
+            # provenance gate — classify_pair runs on text evidence alone (the
+            # entity params stay on the classifier for external callers, but the
+            # detection chain no longer reads metadata.entity).
+            # 0.17.0 P2-6.1: cross-memory candidates run on ROW vectors — same
+            # identity discipline as the write side (eid is the memory_row.id).
+            cross_units = internal_source
+            def cross_knn(embedding: list[float], **kw: Any) -> list[dict[str, Any]]:
+                # Detection window: exclude the peers' subject rows (same
+                # discipline as the write side — they crowd out body rows).
+                return self.db.row_knn(
+                embedding, include_subject_rows=False, conn=conn, **kw
+            )
+            # 2) cross-memory same-bucket rank pairing.
+            # Gate-v2 G4: the scan orchestration SKIPS the sentence prefilter by
+            # owner decision (Agent judges prose oppositions) but runs the SAME
+            # cosine band gate — one shared implementation (pipeline.gates).
+            from .pipeline.gates import candidate_cos_gate, memory_pair_excluded
+            below_cos_floor = 0
+            repeatability_skipped = 0
+            own_subject = str(record.get("subject") or "")
+            own_tags = record.get("tags") or []
+            memory_pairs_excluded = 0
+            screened_peers: set[int] = set()
+            excluded_peers: set[int] = set()
+            a_enqueued_peers: set[int] = set()
+            for unit in cross_units:
+                if unit.get("embedding") is None:
+                    continue
+                hits = cross_knn(
+                    unit["embedding"], k=neighbor_k + 1,
+                    workspace=workspace or None,
+                    exclude_memory_id=memory_id,
+                )
+                hit_vectors = self.db.evidence.row_vectors_for_ids(
+                    [int(hit["id"]) for hit in hits], conn=conn,
+                )
+                _passed, below_pairs, at_ceil_pairs = candidate_cos_gate(unit["embedding"], hits, hit_vectors)
+                hits = [hit for hit, _cos in _passed]
+                cos_by_row_id = {int(h["id"]): float(c) for h, c in _passed}
+                below_cos_floor += len(below_pairs)
+                repeatability_skipped += len(at_ceil_pairs)
+                # Rank counts TEXT hits only — non-text units the KNN interleaves
+                # must not consume a top-3 slot (0.16.2 §1.5 ranks neighbours,
+                # not raw row positions).
+                text_rank = 0
+                for hit in hits:
+                    peer_id = int(hit["memory_id"])
+                    if peer_id == memory_id:
+                        continue
+                    # Gate-v2 G5 scan 同构: the SAME memory-level screen, called
+                    # once per peer (first hit wins the verdict; later hits of
+                    # the same peer reuse it).
+                    if peer_id not in screened_peers:
+                        screened_peers.add(peer_id)
+                        peer_tags = hit.get("tags")
+                        if isinstance(peer_tags, str) and peer_tags:
+                            try:
+                                peer_tags = json.loads(peer_tags)
+                            except (TypeError, ValueError):
+                                peer_tags = []
+                        if memory_pair_excluded(
+                            own_subject, own_tags,
+                            str(hit.get("subject") or ""), peer_tags or [],
+                        ):
+                            excluded_peers.add(peer_id)
+                            memory_pairs_excluded += 1
+                            continue
+                    if peer_id in excluded_peers:
+                        continue
+                    text_rank += 1
+                    peer_bucket = str(
+                        hit.get("workspace_canonical") or hit.get("workspace") or ""
+                    ).strip()
+                    if peer_bucket and workspace and peer_bucket != workspace:
+                        continue  # C3b: same-bucket pairing only
+                    decision = decide_evidence(str(unit["text"]), str(hit.get("text") or ""))
+                    if decision.action == "ignore":
+                        continue
+                    # 0.16.4 §1: cross-memory evolution domain (todo/polarity
+                    # snapshots) is excluded BEFORE any machine route — it never
+                    # reaches the rank gate, the classifier, or the queue. The
+                    # todo-closure reminder keeps its dedicated channel
+                    # (linked_open_items); the same predicate guards the
+                    # write-time KNN loop (§0.5 single implementation).
+                    if is_cross_evolution(decision):
+                        continue
+                    # 0.16.2 §1.5: machine-decidable check routes generate only
+                    # within the top-3 neighbour ranks (notify kept top-10 until
+                    # 0.16.4 excluded it here — only check shapes remain).
+                    if text_rank > SCAN_MACHINE_ROUTE_TOP_K:
+                        continue
+                    # 0.16.2 §1.4: difference-based clearance — check-route
+                    # pairs must carry an extractable value difference or they
+                    # are duplicates/evolution noise. Cleared pairs are
+                    # counted, never enqueued, never landed in conflicts.
+                    verdict = classify_pair(
+                        str(unit["text"]), str(hit.get("text") or ""),
+                        route=str(decision.reason or ""),
+                    )
+                    if verdict == "clear":
+                        outcome["machine_cleared"] += 1
+                        continue
+                    refs, candidate_key, candidate_hash = self._pair_identity(
+                        memory_id, version, unit, peer_id, hit,
+                    )
+                    if self._suppressed(refs, candidate_hash, suppression):
+                        continue
+                    # E11③ live retirement (0.16.2 plan §6④/§7): numeric pairs
+                    # that survive the difference classifier are same-sentence
+                    # two-value candidates — they enqueue for agent judgment;
+                    # the noise the old auto-reject consumed is cleared above
+                    # without conflicts rows. No new scan_numeric_autoreject
+                    # rows are created (existing ones stay as audit history,
+                    # excluded from suppression per §1.8).
+                    enqueued = self._enqueue_pair(
+                        workspace, memory_id, version, unit, peer_id, hit,
+                        decision=decision, candidate_key=candidate_key,
+                        candidate_hash=candidate_hash,
+                        pair_cos=cos_by_row_id.get(int(hit["id"])),
+                    )
+                    if enqueued:
+                        outcome["queued"] += 1
+                        a_enqueued_peers.add(peer_id)
+            # Gate-v2 G4/G5 observability (conditional, additive receipt keys).
+            if memory_pairs_excluded:
+                outcome["memory_pairs_excluded"] = memory_pairs_excluded
+            if below_cos_floor:
+                outcome["below_cos_floor"] = below_cos_floor
+            if repeatability_skipped:
+                outcome["repeatability_skipped"] = repeatability_skipped
+            return outcome
 
     def _load_suppression(self) -> dict[str, Any]:
         """Round-level suppression maps (same contract as scan_rule_candidates)."""
@@ -605,7 +717,10 @@ class ScanPipeline:
         vectors = self.db.memories.all_summary_vectors()
         if not vectors:
             return 0
-        ids = [mid for mid in sorted(vectors) if mid in set(processed_ids)]
+        # P2 #19: the membership set is built once — the per-id `in` check
+        # below runs over the whole sorted vector index.
+        processed = set(processed_ids)
+        ids = [mid for mid in sorted(vectors) if mid in processed]
         if not ids:
             return 0
         # The vote matrix still spans the WHOLE library: a mis-placed memory
@@ -622,6 +737,10 @@ class ScanPipeline:
         # the stable-sort tie discipline demands the formula never changes
         # for a given consumer (0.16.10 review finding).
         votes_by_id = compute_summary_votes(vectors, ids, path="single")
+        from .doctor import load_confirmed_workspaces
+
+        confirmed = load_confirmed_workspaces(self.db.settings)
+        dismissed = self.db.scan_queue.load_workspace_dismissals()
         landed = 0
         for mid in ids:
             vote = votes_by_id.get(mid)
@@ -642,6 +761,10 @@ class ScanPipeline:
             if not record or record.get("status") != "active":
                 continue
             version = int(record.get("version") or 1)
+            if own in confirmed and best_bucket in confirmed:
+                continue  # owner-confirmed pair: no proposal, no queue row
+            if (version, best_bucket) in dismissed.get(mid, ()):
+                continue  # durable dismissal (version-pinned): no proposal
             detail = {
                 "suspected_workspace": best_bucket,
                 "current_workspace": own,
@@ -728,315 +851,4 @@ class ScanPipeline:
 
         return utc_now_iso()
 
-
-
-
-    @staticmethod
-    def _scan_envelope(memory: dict[str, Any], quote: str) -> dict[str, Any]:
-        metadata_value = memory.get("metadata")
-        metadata = metadata_value if isinstance(metadata_value, dict) else {}
-        return {
-            "quote": str(quote)[:1000], "subject": str(memory.get("subject") or "")[:200],
-            "tags": list(memory.get("tags") or [])[:20],
-            "workspace_canonical": memory.get("workspace_canonical") or memory.get("workspace"),
-            "memory_id": int(memory.get("id") or 0), "version": int(memory.get("version") or 1),
-            "event_time": memory.get("event_time"),
-            "metadata": {key: metadata.get(key) for key in ("entity", "scope") if metadata.get(key)},
-        }
-
     QUOTE_LIGHT_CHARS = 60
-
-    def _lightweight_scan_candidate(self, item: dict[str, Any]) -> dict[str, Any]:
-        """C1 lightweight projection of one scan candidate for the default page.
-
-        The full candidate payload (full quotes/spans/members/slot payloads)
-        was calibrated for batch=2 reads and explodes the response at the
-        spec's batch sizes (12MB pages). The default page keeps only the
-        triage identity — pair ids, workspace, reasons, route/state and a
-        short quote per side — while include_quotes=true restores the full
-        envelope (whose members/slot_key/value_groups record_conflict needs).
-        The full payload is computed first and projected last so enhancement
-        order and suppression counting are unaffected.
-        """
-        members = item.get("members")
-        if not isinstance(members, list):
-            members = []
-
-        def member_quote(index: int) -> str:
-            if 0 <= index < len(members):
-                quote = str((members[index] or {}).get("evidence_quote") or "")
-                if quote:
-                    return quote[:self.QUOTE_LIGHT_CHARS]
-            return str(item.get("left_snippet") or item.get("right_snippet") or "")[:self.QUOTE_LIGHT_CHARS]
-
-        workspace = item.get("workspace")
-        if not workspace and members:
-            left_mem = self.db.get_memory(int((members[0] or {}).get("memory_id") or 0))
-            if left_mem:
-                workspace = (
-                    left_mem.get("workspace_canonical")
-                    or left_mem.get("workspace")
-                )
-        light: dict[str, Any] = {
-            "left_id": item.get("left_id"),
-            "right_id": item.get("right_id"),
-            "workspace": workspace,
-            "state": item.get("state"),
-            "route": item.get("route"),
-            "reasons": list(item.get("reasons") or []),
-            "distance": item.get("distance"),
-            "left_quote": member_quote(0),
-            "right_quote": member_quote(1),
-        }
-        qwen_signal = item.get("qwen_signal") if isinstance(item.get("qwen_signal"), dict) else None
-        if qwen_signal:
-            light["qwen_signal"] = {
-                key: qwen_signal.get(key) for key in ("state", "reason", "prompt_version")
-            }
-        return light
-
-    def _lightweight_scan_candidates(self, result: dict[str, Any]) -> dict[str, Any]:
-        """Apply the C1 lightweight projection to a finished scan page.
-
-        Candidates carry pair ids/workspace/state/reasons and a short quote
-        per side; the full quotes/spans/members/value_groups envelope comes
-        back only with include_quotes=true (record_conflict needs it).
-        similarity_pool/duplicates_pool pairs get the same treatment via the
-        shared per-item projection. slot_groups stay untouched: they are the
-        grouping evidence for triage, not per-pair payload bloat.
-        """
-        for key in ("candidates", "similarity_pool", "duplicates_pool"):
-            items = result.get(key)
-            if isinstance(items, list):
-                result[key] = [
-                    (self._lightweight_scan_candidate(item) if isinstance(item, dict) else item)
-                    for item in items
-                ]
-        return result
-
-    def memory_scan_workspace_anomalies(self, **_: Any) -> dict[str, Any]:
-        """C3a workspace anomaly check: single-pass matmul over all summary vectors.
-
-        One SELECT reads every active memory's summary vector; numpy computes
-        the N×N cosine in row-blocks (bounded memory); each row votes over its
-        top-10 neighbours through the shared proportional normalize_gate. A
-        memory whose neighbourhood passes the gate is a suspected misplacement:
-        one kind='workspace' scan_queue row per memory (same queue, same gate
-        as the pipeline's incremental suspects), capped at 10 new rows per run.
-        Zero Qwen, milliseconds. numpy absence degrades with a structured
-        outcome (it is not a declared dependency — llama-cpp-python normally
-        brings it).
-        """
-        try:
-            import numpy  # noqa: F401  # presence probe only: the structured error below must distinguish numpy-missing from an empty library
-        except ImportError:
-            return self.db.state.response({
-                "error": "numpy_unavailable", "detail": (
-                    "workspace anomaly check needs numpy (bundled with the "
-                    "semantic-local extra); install numpy to run it"
-                ),
-            }, ok=False)
-        # Fresh-boot coverage: the first run after an upgrade (before any
-        # write) has no summary vectors yet — the write-path publish and the
-        # startup backfill both ride the first embedder load. Ensure that load
-        # happens here so the weekly task never no-ops its first round.
-        if self.db.missing_summary_vec_rows():
-            embedder, _warnings = self._tools._ensure_embedder()
-            if embedder is not None:
-                try:
-                    self._tools._backfill_memory_summary_vectors(embedder)
-                except Exception:
-                    pass
-        vectors = self.db.all_summary_vectors()
-        if not vectors:
-            return self.db.state.response({
-                "status": "ok", "checked": 0, "suspected": 0, "queued": 0,
-                "note": "no summary vectors yet (backfill pending or empty library)",
-            })
-        ids = sorted(vectors)
-        n = len(ids)
-        # The STABLE-sorting discipline lives in compute_summary_votes: equal
-        # similarities (FakeEmbedder's binary vectors, duplicated content)
-        # must pick the same neighbours on every machine/numpy version —
-        # np.argpartition left ties arbitrary and CI once selected one beta
-        # neighbour where the local run selected nine.
-        votes_by_id = compute_summary_votes(vectors, ids)
-        suspected: list[dict[str, Any]] = []
-        for row_mid in ids:
-            vote = votes_by_id.get(row_mid)
-            if vote is None:
-                continue
-            votes = vote["votes"]
-            own = vote["own"]
-            own_best = vote["own_best"]
-            foreign_best = vote["foreign_best"]
-            # Shared proportional gate (0.16.2 §1.1): the weekly
-            # backstop judges by the SAME function as the pipeline's
-            # suspect generation and the decision-time re-vote.
-            passed, gate_evidence = normalize_gate(votes, own)
-            if passed:
-                suspected.append({
-                    "memory_id": row_mid,
-                    "workspace": own,
-                    "suspected_workspace": gate_evidence["top_bucket"],
-                    "foreign_votes": gate_evidence["top_votes"],
-                    "neighbours_checked": vote["k"],
-                    "foreign_neighbour_id": foreign_best[1],
-                    "own_neighbour_id": own_best[1],
-                    "votes": dict(votes),
-                })
-        suspected.sort(key=lambda item: (-item["foreign_votes"], item["memory_id"]))
-        # Lazy staleness (the notice channel's heir), BEFORE selecting the
-        # cap: a pending suspect row whose subject already left its pinned
-        # bucket is resolved — retire it even when the memory no longer shows
-        # up in this sweep's findings (that is precisely why it is stale).
-        self._tools._expire_relocated_workspace_rows()
-        capped = suspected[:10]
-        queued = 0
-        # 0.16.2 §1.3: findings land in the judgment queue (same queue, same
-        # gate as the pipeline's incremental suspects) — the workspace_review
-        # notice channel no longer produces new findings. Identity reuses
-        # _workspace_identity so a pipeline suspect and the weekly suspect
-        # for the same memory@version+suspicion share one row (INSERT OR
-        # IGNORE dedupes re-runs; dismissal keeps it dismissed).
-        from .constants import PROTECTED_WORKSPACES
-        from .scan_pipeline import _workspace_identity
-
-        for item in capped:
-            memory_id = int(item["memory_id"])
-            record = self.db.get_memory(memory_id)
-            if record is None or str(record.get("status") or "") != "active":
-                continue
-            version = int(record.get("version") or 1)
-            own = str(item["workspace"])
-            best_bucket = str(item["suspected_workspace"])
-            detail = {
-                "suspected_workspace": best_bucket,
-                "current_workspace": own,
-                "votes": item.get("votes") or {},
-                "neighbours_checked": item["neighbours_checked"],
-                "protected_involved": bool(
-                    own in PROTECTED_WORKSPACES or best_bucket in PROTECTED_WORKSPACES
-                ),
-                "channel": "weekly_backstop",
-            }
-            outcome = self.db.scan_queue.enqueue(
-                kind="workspace",
-                workspace_canonical=own,
-                candidate_key_hash=_workspace_identity(memory_id, version, best_bucket),
-                member_versions=[{"memory_id": memory_id, "version": version}],
-                evidence=[],
-                reason=(
-                    f"weekly vote {item['foreign_votes']}/{item['neighbours_checked']}"
-                    f" -> {best_bucket!r}"
-                ),
-                severity="normal",
-                source="workspace_anomaly_scan",
-                detail=detail,
-            )
-            if str(outcome.get("outcome") or "") == "queued":
-                queued += 1
-        return self.db.state.response({
-            "status": "ok",
-            "checked": n,
-            "suspected": len(suspected),
-            "returned": len(capped),
-            "queued": queued,
-            "cap": 10,
-            **({"capped": True} if len(suspected) > len(capped) else {}),
-            "findings": [
-                {
-                    "memory_id": item["memory_id"],
-                    "workspace": item["workspace"],
-                    "suspected_workspace": item["suspected_workspace"],
-                    "votes": f"{item['foreign_votes']}/{item['neighbours_checked']}",
-                }
-                for item in capped
-            ],
-        })
-
-def spans_overlap(a: "tuple[int, int]", b: "tuple[int, int]") -> bool:
-    """True when two evidence spans intersect at all. The long-text fallback
-    splitter emits OVERLAPPING windows of one memory, and a unit pair that
-    shares source text is a splitter artifact, not a contradiction."""
-    a1, a2 = a
-    b1, b2 = b
-    return a1 < b2 and b1 < a2
-
-
-def genuine_numeric_pair(quote_a: str, quote_b: str) -> bool:
-    """Same-sentence-different-value shape test for internal numeric pairs.
-
-    decide_evidence flags ANY two numeric tokens as numeric_value_candidate;
-    on real libraries that fires on enumerated list items ("1. 营销交付" vs
-    "7. 复核终审") whose numbers are ordinals, not conflicting values. A
-    GENUINE internal numeric contradiction ("超时 30 秒" vs "超时 60 秒")
-    repeats the same non-numeric tokens around the differing value — the
-    non-digit token Jaccard separates the two shapes (first-round evidence:
-    11k enumeration misfires vs the intended handful)."""
-    import re
-
-    def tokens(text: str) -> set[str]:
-        parts = re.findall(r"[\u4e00-\u9fff]+|[a-zA-Z]+", str(text).casefold())
-        return {p for p in parts if p}
-
-    ta, tb = tokens(quote_a), tokens(quote_b)
-    if not ta or not tb:
-        return False
-    inter = ta & tb
-    union = ta | tb
-    return len(inter) / len(union) >= 0.4
-
-
-def internal_pair_admission(
-    text_a: str, text_b: str,
-    span_a: "tuple[int, int]", span_b: "tuple[int, int]",
-    decision: Any,
-    exists_probe: "Any | None" = None,
-) -> bool:
-    """0.16.4 §0.5/§2: the SINGLE admission gate for same-memory internal
-    pairs, shared verbatim by the scan side (``_examine_internal``) and the
-    write-time side (``pipeline/evidence.py``).
-
-    The full filter sequence lives HERE and only here — splitter-artifact
-    overlap → ignore → structural noise (0.16.3) → difference clearance
-    (sim route) → genuine numeric shape → already-decided identity. The two
-    callers differ ONLY in what an admitted pair means downstream: scan
-    lands it pending directly (no Qwen, E11①); write-time collects it for
-    the Qwen final review — notify shapes INCLUDED since 0.16.4 §2 (an
-    in-memory real self-contradiction has a recognition duty, and Qwen's
-    verdict is the attribution/veto/fail-open triple). Editing the sequence
-    here edits both paths at once; that is the point.
-
-    ``exists_probe`` is a lazy callable (probed only after every semantic
-    filter passed) so ignore/noise pairs never pay the identity query.
-    """
-    if spans_overlap(span_a, span_b):
-        return False
-    if decision.action == "ignore":
-        return False
-    # 0.16.3 structural noise shapes (table slices, note-meta lines) never
-    # are contradictions — live-library calibrated, 27/280 rows, zero false
-    # kills in sampling.
-    if internal_noise_pair(text_a, text_b):
-        return False
-    if decision.action != "notify":
-        if decision.reason != "numeric_value_candidate":
-            # similarity route: same difference-based clearance as the
-            # cross-memory route — no extractable value difference means
-            # duplicates/evolution, not conflict
-            if classify_pair(text_a, text_b, route=str(decision.reason or "")) == "clear":
-                return False
-        elif not genuine_numeric_pair(text_a, text_b):
-            return False
-    if exists_probe is not None and exists_probe():
-        return False
-    return True
-
-
-def _workspace_identity(memory_id: int, version: int, suspected: str) -> str:
-    import hashlib
-
-    return hashlib.sha256(
-        f"workspace:{memory_id}@{version}:{suspected}".encode("utf-8")
-    ).hexdigest()

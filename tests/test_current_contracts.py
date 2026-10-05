@@ -24,14 +24,19 @@ def test_config_registry_only_describes_current_architecture() -> None:
     # include_size; 0.15.8 restored semantic_conflict.notice_sync_wait_ms;
     # 0.15.14 added semantic_conflict.n_gpu_layers, removed
     # semantic_conflict.max_notice_pairs and removed policy_path (B1).
+    # 0.17.1: model_path/n_gpu_layers retired with the Qwen judge; mdeberta
+    # keys (ckpt + notice_min_prob) replace them in the registry;
+    # 0.17.1 P2 #3: mdeberta_model_dir + mdeberta_batch (0 = auto) joined
+    # their sibling descriptors (19 -> 21 current keys).
     # Everything else froze into memory_arbiter.constants
     # and must NOT reappear here.
     assert paths == {
         "db_path", "backup_jsonl", "client", "agent_id",
         "mcp.transport", "mcp.http.host", "mcp.http.port", "workspace", "isolation",
         "embedding.model_path", "embedding.auto_query", "embedding.auto_write",
-        "semantic_conflict.enabled", "semantic_conflict.model_path",
-        "semantic_conflict.on_write", "semantic_conflict.n_gpu_layers",
+        "semantic_conflict.enabled", "semantic_conflict.mdeberta_ckpt",
+        "semantic_conflict.mdeberta_model_dir", "semantic_conflict.mdeberta_batch",
+        "semantic_conflict.on_write", "semantic_conflict.mdeberta_notice_min_prob",
         "semantic_conflict.notice_sync_wait_ms",
         "update_check.enabled", "include_size",
     }
@@ -40,7 +45,8 @@ def test_config_registry_only_describes_current_architecture() -> None:
         or path.startswith("vec.") or "provider" in path or "n_ctx" in path
         for path in paths
     )
-    assert not any("claim" in path or "split" in path or "pair_text_gate" in path for path in paths)
+    # old "claim*" tombstone guard is narrowed to the dead split/pair keys.
+    assert not any("split" in path or "pair_text_gate" in path for path in paths)
     assert sum(len(group["items"]) for group in grouped_descriptors()) == len(CONFIG_DESCRIPTORS)
     assert all(item["label_en"] and item["label_zh"] and item["editable"] is False for item in CONFIG_DESCRIPTORS)
 
@@ -236,6 +242,7 @@ def test_backup_replay_follows_current_workspace_redirect(tmp_path: Path) -> Non
         content="old", subject="old", workspace="Old", source_type="agent_generated",
     )
     moved = tool.memory_govern("rename_workspace_canonical", {
+        "workspace": "default",
         "old": "Old", "new": "New", "authorized": True,
     })
     assert moved["ok"] is True
@@ -309,7 +316,7 @@ def test_doctor_deep_probe_reports_dimension_mismatch(tmp_path: Path) -> None:
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
     conn.enable_load_extension(False)
-    store.ensure_evidence_vec_table(conn, 2)
+    store.ensure_memory_row_vec_table(conn, 2)
     conn.close()
 
     class ProbeEmbedder:
@@ -318,6 +325,9 @@ def test_doctor_deep_probe_reports_dimension_mismatch(tmp_path: Path) -> None:
         def embed_text(self, prefix="", body=""):
             from memory_arbiter.embedder import EmbedResult
             return EmbedResult([0.1, 0.2, 0.3], False, 1, 1)
+
+        def embed_texts(self, texts, prefix: str = ""):
+            return [self.embed_text(prefix="", body=t) for t in texts]
 
     report = run_all_checks(
         _sqlite3.connect(settings.db_path), settings, deep=True,
@@ -339,6 +349,9 @@ def test_doctor_cli_deep_probe_uses_settings_embedder(monkeypatch, tmp_path) -> 
         def embed_text(self, prefix="", body=""):
             from memory_arbiter.embedder import EmbedResult
             return EmbedResult([0.1, 0.2], False, 1, 1)
+
+        def embed_texts(self, texts, prefix: str = ""):
+            return [self.embed_text(prefix="", body=t) for t in texts]
 
     def fake_build_embedder(*_args, **_kwargs):
         return ProbeEmbedder(), []

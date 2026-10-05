@@ -7,53 +7,39 @@ on that same row; there is no judgment side table.
 from __future__ import annotations
 
 import hashlib
-import json
 import sqlite3
 from contextlib import contextmanager
 from typing import Any, Iterator, TYPE_CHECKING
 from ..degrade import DegradeState
 
-from ..acl import WorkspaceScope, scope_names, workspace_scope_sql
+from ..acl import WorkspaceScope, workspace_scope_sql
 from ..models import ConflictMember, ConflictValueGroup, utc_now_iso
 from ..semantic_conflict import normalize_value
-from ..text import canon_entity, canon_scope
 
 if TYPE_CHECKING:
     from .core import MemoryDB
 
 _MAX_MEMBERS = 256
-_MAX_FIELD_CHARS = 16_384
 _MAX_MEMBER_JSON = 262_144
 _MAX_VALUE_JSON = 131_072
 _MAX_APPLY_PLAN_JSON = 131_072
-_MAX_SLOT_JSON = 4_096
 _ALLOWED_ACTIONS = {
     "update_current_claim", "append_superseded_context",
     "preserve_historical_record", "use_as_resolution", "needs_authorization",
 }
 
 
-def _canonical_json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+from ._conflicts_helpers import _MAX_FIELD_CHARS as _MAX_FIELD_CHARS, _MAX_SLOT_JSON as _MAX_SLOT_JSON
+from ._conflicts_helpers import _canonical_json as _canonical_json, _decode_row as _decode_row, _member_ref as _member_ref
+from ._conflicts_norm import _ConflictsNormMixin
+from ._conflicts_read import _ConflictsReadMixin
 
 
 def _hash_json(value: Any) -> str:
     return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
 
 
-def _member_ref(member: dict[str, Any]) -> str:
-    return f"{int(member['memory_id'])}@{int(member['version'])}"
-
-
-def _decode_row(row: Any) -> dict[str, Any]:
-    data = dict(row)
-    for key in ("slot_key", "candidate_key", "member_versions", "value_groups", "apply_summary"):
-        if isinstance(data.get(key), str):
-            data[key] = json.loads(data[key])
-    return data
-
-
-class ConflictStore:
+class ConflictStore(_ConflictsNormMixin, _ConflictsReadMixin):
     def __init__(self, db: "MemoryDB") -> None:
         self._db = db
 
@@ -75,223 +61,12 @@ class ConflictStore:
         with self._db.write_transaction() as conn:
             yield conn
 
-    @staticmethod
-    def _normalize_slot(slot_key: dict[str, Any] | None) -> dict[str, str] | None:
-        if slot_key is None:
-            return None
-        if set(slot_key) != {"entity", "attribute", "scope"}:
-            raise ValueError("slot_key must contain exactly entity, attribute, and scope")
-        normalized = {key: str(slot_key[key]).strip() for key in ("entity", "attribute", "scope")}
-        # Storage-side canonicalisation (B-C4): entity/scope are stored in
-        # canon form so slot identity matches the comparison side's canonical
-        # matching; attribute keeps its raw-stripped form (detector-owned).
-        normalized["entity"] = canon_entity(normalized["entity"])
-        normalized["scope"] = canon_scope(normalized["scope"])
-        if not all(normalized.values()) or any(
-            value.casefold() in {"unknown", "__unknown__"} for value in normalized.values()
-        ):
-            raise ValueError("slot_key entity, attribute, and scope must be reliable and non-empty")
-        if any(len(value) > _MAX_FIELD_CHARS for value in normalized.values()):
-            raise ValueError("slot_key field exceeds size bound")
-        if len(_canonical_json(normalized)) > _MAX_SLOT_JSON:
-            raise ValueError("slot_key exceeds size bound")
-        return normalized
 
-    @staticmethod
-    def _normalize_members(members: list[dict[str, Any] | ConflictMember]) -> list[dict[str, Any]]:
-        normalized: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        for raw in members:
-            member = raw.to_dict() if isinstance(raw, ConflictMember) else dict(raw)
-            required = {
-                "memory_id", "version", "attribute_raw", "value_raw",
-                "normalized_attribute", "normalized_value", "evidence_quote",
-                "evidence_span", "content_hash", "direction", "prompt_version",
-                "detector_version",
-            }
-            missing = required - member.keys()
-            if missing:
-                raise ValueError(f"member missing required fields: {', '.join(sorted(missing))}")
-            member["memory_id"] = int(member["memory_id"])
-            member["version"] = int(member["version"])
-            span = member["evidence_span"]
-            if not isinstance(span, (list, tuple)) or len(span) != 2:
-                raise ValueError("evidence_span must be [start, end]")
-            member["evidence_span"] = [int(span[0]), int(span[1])]
-            unit = member.get("evidence_unit")
-            member["evidence_unit"] = None if unit is None else int(unit)
-            if member["memory_id"] <= 0 or member["version"] <= 0:
-                raise ValueError("member memory_id and version must be positive")
-            if member["evidence_span"][0] < 0 or member["evidence_span"][1] < member["evidence_span"][0]:
-                raise ValueError("evidence_span must be ordered and non-negative")
-            if member["evidence_unit"] is not None and member["evidence_unit"] < 0:
-                raise ValueError("evidence_unit must be non-negative")
-            if len(str(member["content_hash"])) != 64:
-                raise ValueError("member content_hash must be 64 characters")
-            # D1 (#970): the stored normalized_value is every later gate's
-            # anchor (judge canonicalization, D1 group validation). A
-            # paraphrased value_raw (an agent's retelling rather than the
-            # mechanically normalized extraction) would silently poison all
-            # of them, so reject it at intake. Unenhanced scan candidates
-            # legitimately carry no values (value_raw=None from the
-            # deterministic route); those are not D1's concern.
-            raw_value = member["value_raw"]
-            if raw_value is not None and str(raw_value) != "" and str(member["normalized_value"]) != normalize_value(str(raw_value)):
-                raise ValueError(
-                    "member normalized_value must equal normalize_value(value_raw)"
-                )
-            for key, value in member.items():
-                if isinstance(value, str) and len(value) > _MAX_FIELD_CHARS:
-                    raise ValueError(f"member field {key} exceeds size bound")
-            ref = _member_ref(member)
-            if ref in seen:
-                raise ValueError("members must contain each memory@version exactly once")
-            normalized.append(member)
-            seen.add(ref)
-        normalized.sort(key=lambda item: (item["memory_id"], item["version"]))
-        return normalized
 
-    @staticmethod
-    def _normalize_value_groups(
-        groups: list[dict[str, Any] | ConflictValueGroup], members: list[dict[str, Any]]
-    ) -> list[dict[str, Any]]:
-        member_values = {_member_ref(member): str(member["normalized_value"]) for member in members}
-        normalized: list[dict[str, Any]] = []
-        seen_values: set[str] = set()
-        covered: set[str] = set()
-        for raw in groups:
-            group = raw.to_dict() if isinstance(raw, ConflictValueGroup) else dict(raw)
-            if set(group) != {"normalized_value", "display_value", "members"}:
-                raise ValueError("value group must contain normalized_value, display_value, members")
-            value = str(group["normalized_value"])
-            display = str(group["display_value"])
-            raw_refs = group["members"]
-            if not isinstance(raw_refs, (list, tuple)):
-                raise ValueError("value group members must be an array")
-            refs = [str(ref) for ref in raw_refs]
-            if len(refs) != len(set(refs)):
-                raise ValueError("value groups must contain each member exactly once")
-            refs.sort()
-            if not value or value in seen_values or not refs or not set(refs) <= set(member_values):
-                raise ValueError("invalid value group membership or duplicate normalized value")
-            if covered.intersection(refs):
-                raise ValueError("value groups must contain each member exactly once")
-            if any(member_values[ref] != value for ref in refs):
-                raise ValueError("value group normalized_value must match every member")
-            if len(value) > _MAX_FIELD_CHARS or len(display) > _MAX_FIELD_CHARS:
-                raise ValueError("value group field exceeds size bound")
-            normalized.append({"normalized_value": value, "display_value": display, "members": refs})
-            seen_values.add(value)
-            covered.update(refs)
-        if covered != set(member_values):
-            raise ValueError("value groups must cover every member exactly once")
-        normalized.sort(key=lambda item: item["normalized_value"])
-        return normalized
 
-    @staticmethod
-    def _candidate_key(
-        detector_version: str, members: list[dict[str, Any]], candidate_key: dict[str, Any] | None
-    ) -> dict[str, Any]:
-        expected_evidence = [{
-            "member": _member_ref(member),
-            "unit": member.get("evidence_unit"),
-            "span": member["evidence_span"],
-            "hash": member["content_hash"],
-        } for member in members]
-        expected = {
-            "detector_version": detector_version,
-            "members": [_member_ref(member) for member in members],
-            "evidence": expected_evidence,
-        }
-        if candidate_key is None:
-            return expected
-        key = dict(candidate_key)
-        if set(key) != {"detector_version", "members", "evidence"}:
-            raise ValueError("candidate_key must contain exactly detector_version, members, and evidence")
-        try:
-            normalized = {
-                "detector_version": str(key["detector_version"]),
-                "members": [str(ref) for ref in key["members"]],
-                "evidence": [
-                    {
-                        "member": str(item["member"]),
-                        "unit": None if item["unit"] is None else int(item["unit"]),
-                        "span": [int(item["span"][0]), int(item["span"][1])],
-                        "hash": str(item["hash"]),
-                    }
-                    for item in key["evidence"]
-                ],
-            }
-        except (KeyError, TypeError, ValueError, IndexError) as exc:
-            raise ValueError("candidate_key has invalid member evidence") from exc
-        if normalized != expected:
-            raise ValueError("candidate_key does not match detector and sorted member evidence")
-        if len(_canonical_json(normalized)) > 65_536:
-            raise ValueError("candidate_key exceeds size bound")
-        return normalized
 
-    @staticmethod
-    def _active_members_match_workspace(
-        conn: sqlite3.Connection, conflict: dict[str, Any],
-        caller_workspace: "WorkspaceScope" = None,
-    ) -> bool:
-        """Revalidate every current member against the conflict and strict caller scope.
 
-        The group's own ``workspace_canonical`` is authoritative: every live
-        member must still sit in it. Strict admission widens the CALLER side only — a
-        strict caller may act on a group whose canonical is any of its admitted
-        canonicals (its own plus in-radius neighbours). With vector admission
-        off the scope is the single caller canonical, i.e. the single-name equality.
-        """
-        expected_workspace = str(conflict.get("workspace_canonical") or "").strip()
-        allowed = set(scope_names(caller_workspace))
-        if not expected_workspace or (allowed and expected_workspace not in allowed):
-            return False
-        members = conflict.get("member_versions") or []
-        if not members:
-            return False
-        for member in members:
-            current = conn.execute(
-                "SELECT status,COALESCE(NULLIF(workspace_canonical,''),workspace) AS workspace "
-                "FROM memories WHERE id=?", (int(member["memory_id"]),),
-            ).fetchone()
-            if (
-                current is None or current["status"] != "active"
-                or str(current["workspace"] or "").strip() != expected_workspace
-            ):
-                return False
-        return True
 
-    def get_conflict(self, conflict_id: int) -> dict[str, Any] | None:
-        if not self._db_available:
-            return None
-        with self.connection() as conn:
-            row = conn.execute("SELECT * FROM conflicts WHERE id=?", (int(conflict_id),)).fetchone()
-        return _decode_row(row) if row else None
-
-    def list_conflicts(
-        self,
-        status: str = "open",
-        limit: int = 50,
-        source: str | None = None,
-        workspace: "WorkspaceScope" = None,
-        offset: int = 0,
-    ) -> list[dict[str, Any]]:
-        if not self._db_available:
-            return []
-        sql = "SELECT * FROM conflicts WHERE status=?"
-        params: list[Any] = [status]
-        if source is not None:
-            sql += " AND source=?"
-            params.append(source)
-        scope_sql, scope_params = workspace_scope_sql("workspace_canonical", workspace)
-        if scope_sql:
-            sql += f" AND {scope_sql}"
-            params.extend(scope_params)
-        sql += " ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?"
-        params.extend([max(1, int(limit)), max(0, int(offset))])
-        with self.connection() as conn:
-            return [_decode_row(row) for row in conn.execute(sql, params).fetchall()]
 
     def record_conflict_group(
         self, *, workspace_canonical: str, slot_key: dict[str, Any] | None,
@@ -506,6 +281,13 @@ class ConflictStore:
             # A delivered notice may already own this exact frozen event
             # snapshot. Promote that row instead of creating a parallel formal
             # conflict or replacing its immutable member/value evidence.
+            #
+            # A2（0.17.1 修复批）：promote 必须**同时结清 notice 投递态**——
+            # 此前只置 status='open'，行仍带 notice_delivery_status='delivered'
+            # → 它继续出现在 notice list(open) 里，且 notice dismiss 会把它改
+            # 写回 not_a_conflict（正式冲突组被 notice 通道静默撤回，绕过
+            # judge/apply 治理链，产品面端到端复现）。与 escalate 三处同口径
+            # （'resolved' + escalated/promoted 前缀的 resolution reason）。
             if status == "open" and slot_hash is not None:
                 notice_row = conn.execute(
                     "SELECT * FROM conflicts WHERE workspace_canonical=? AND slot_key_hash=? "
@@ -523,10 +305,12 @@ class ConflictStore:
                     if frozen_members != normalized_members or frozen_groups != groups:
                         return {"outcome": "snapshot_mismatch", "conflict_id": frozen["id"]}
                     cur = conn.execute(
-                        "UPDATE conflicts SET status='open',revision=revision+1,conflict_point=?,"
+                        "UPDATE conflicts SET status='open',notice_delivery_status='resolved',"
+                        "notice_resolution_reason=?,revision=revision+1,conflict_point=?,"
                         "detection_reason=?,source=?,detector_version=?,prompt_version=?,refreshed_at=? "
                         "WHERE id=? AND status='candidate' AND revision=?",
-                        (conflict_point, detection_reason, source, detector_version, prompt_version,
+                        (f"promoted_to_conflict: {detection_reason}",
+                         conflict_point, detection_reason, source, detector_version, prompt_version,
                          now, frozen["id"], frozen["revision"]),
                     )
                     if cur.rowcount != 1:
@@ -961,135 +745,12 @@ class ConflictStore:
                 return {"outcome": "stale_conflict"}
             return {"outcome": "resolved", "conflict_id": int(conflict_id), "revision": int(expected_revision) + 1}
 
-    def list_open_conflicts_for_memory_ids(
-        self, memory_ids: list[int], *, include_applying: bool = False,
-    ) -> list[dict[str, Any]]:
-        wanted = sorted({int(value) for value in memory_ids})
-        if not wanted or not self._db_available:
-            return []
-        statuses = "('open','applying')" if include_applying else "('open')"
-        with self.connection() as conn:
-            rows = conn.execute(
-                "SELECT DISTINCT c.* FROM conflicts AS c "
-                "JOIN json_each(c.member_versions) AS member "
-                "JOIN json_each(?) AS wanted "
-                "ON CAST(json_extract(member.value,'$.memory_id') AS INTEGER)=CAST(wanted.value AS INTEGER) "
-                f"WHERE c.status IN {statuses} ORDER BY c.created_at DESC,c.id DESC",
-                (_canonical_json(wanted),),
-            ).fetchall()
-        return [_decode_row(row) for row in rows]
 
 
-    def resolve_conflicts_for_on_conn(self, conn: sqlite3.Connection, memory_id: int) -> int:
-        # Generic memory mutation cannot complete a revisioned application plan.
-        return 0
-
-    def void_conflicts_on_conn(
-        self, conn: sqlite3.Connection, memory_ids: list[int], *, reason: str,
-    ) -> int:
-        """Void every non-terminal conflict row involving any of ``memory_ids``.
-
-        0.16.0 §6⑯ (作废重立) — the move/auto-move companion: a moved memory's
-        old-bucket tickets must die, not linger as unfreshable rows (judge →
-        stale_member, dismiss → workspace_mismatch, resolve → not_applying).
-        Implementation constraints, each owner-verified:
-        - terminal status = ``resolved``: NOT in the suppression loader's
-          status set (open/applying/not_a_conflict), so nothing is suppressed
-          and the pair can re-establish in the new bucket (§6⑯②);
-        - ``candidate_key_hash`` is rewritten (UNIQUE index spans ALL
-          statuses) so the candidate identity is released for re-recording
-          (§6⑯③);
-        - ``member_fingerprint`` is rewritten so the event-snapshot index
-          (workspace, slot, fingerprint — all statuses) releases too;
-        - the active-slot index releases itself: its partial predicate only
-          covers open/applying (§6⑯④).
-        The caller owns the write transaction (move + void must be atomic).
-        """
-        if not memory_ids:
-            return 0
-        from .additive import voided_identity_hash
-
-        placeholders = ",".join("?" for _ in memory_ids)
-        rows = conn.execute(
-            f"""SELECT c.id, c.candidate_key_hash, c.member_fingerprint
-                FROM conflicts AS c
-                JOIN json_each(c.member_versions) AS member
-                WHERE CAST(json_extract(member.value,'$.memory_id') AS INTEGER)
-                      IN ({placeholders})
-                  AND c.status IN ('open','applying','candidate')""",
-            tuple(int(value) for value in memory_ids),
-        ).fetchall()
-        now = utc_now_iso()
-        voided = 0
-        for row in rows:
-            row_id = int(row["id"])
-            base_hash = str(row["candidate_key_hash"] or "")
-            base_fp = str(row["member_fingerprint"] or "")
-            conn.execute(
-                """UPDATE conflicts SET status='resolved',
-                     candidate_key_hash=?, member_fingerprint=?,
-                     decided_by='agent', decision_reason=?, decided_at=?, resolved_at=?,
-                     notice_delivery_status=CASE
-                       WHEN notice_delivery_status IN ('pending','delivered') THEN 'stale'
-                       ELSE notice_delivery_status END,
-                     revision=revision+1, refreshed_at=?
-                   WHERE id=? AND status IN ('open','applying','candidate')""",
-                (
-                    voided_identity_hash(base_hash, row_id),
-                    voided_identity_hash(base_fp or f"fp-missing:{row_id}", row_id),
-                    f"voided: {reason}", now, now, now, row_id,
-                ),
-            )
-            voided += 1
-        return voided
-
-    def void_conflicts(self, memory_ids: list[int], *, reason: str) -> int:
-        """Standalone (own-transaction) variant of ``void_conflicts_on_conn``."""
-        if not memory_ids or not self._db_available or not self.state.sqlite_writable:
-            return 0
-        with self.write_transaction() as conn:
-            return self.void_conflicts_on_conn(conn, memory_ids, reason=reason)
-
-    def resolve_conflicts_for(self, memory_id: int, *, conn: sqlite3.Connection | None = None) -> int:
-        return 0
-
-    def get_memory_version(self, memory_id: int) -> int | None:
-        memory = self._db.get_memory(int(memory_id))
-        return int(memory["version"]) if memory else None
 
 
-    def is_pair_dismissed(self, left_id: int, right_id: int) -> bool:
-        pair = sorted({int(left_id), int(right_id)})
-        if len(pair) != 2 or not self._db_available:
-            return False
-        with self.connection() as conn:
-            row = conn.execute(
-                "SELECT 1 FROM conflicts AS c WHERE c.status='not_a_conflict' "
-                "AND json_array_length(c.member_versions)=2 "
-                "AND EXISTS (SELECT 1 FROM json_each(c.member_versions) WHERE json_extract(value,'$.memory_id')=?) "
-                "AND EXISTS (SELECT 1 FROM json_each(c.member_versions) WHERE json_extract(value,'$.memory_id')=?) LIMIT 1",
-                (pair[0], pair[1]),
-            ).fetchone()
-        return row is not None
 
-    def dismissed_pairs_for(self, memory_ids: list[int]) -> set[tuple[int, int]]:
-        wanted = sorted({int(value) for value in memory_ids})
-        if not wanted or not self._db_available:
-            return set()
-        with self.connection() as conn:
-            rows = conn.execute(
-                "SELECT c.id,CAST(json_extract(member.value,'$.memory_id') AS INTEGER) AS memory_id "
-                "FROM conflicts AS c JOIN json_each(c.member_versions) AS member "
-                "WHERE c.status='not_a_conflict' AND json_array_length(c.member_versions)=2 "
-                "AND EXISTS (SELECT 1 FROM json_each(c.member_versions) AS linked "
-                "JOIN json_each(?) AS wanted ON json_extract(linked.value,'$.memory_id')=wanted.value) "
-                "ORDER BY c.id,memory_id",
-                (_canonical_json(wanted),),
-            ).fetchall()
-        by_conflict: dict[int, set[int]] = {}
-        for row in rows:
-            by_conflict.setdefault(int(row["id"]), set()).add(int(row["memory_id"]))
-        return {
-            tuple(sorted(ids))  # type: ignore[misc]
-            for ids in by_conflict.values() if len(ids) == 2
-        }
+
+
+
+

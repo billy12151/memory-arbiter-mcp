@@ -3,6 +3,326 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [0.17.1] — 2026-10-04
+
+（claim 对比通道退役 + 判定输入上下文化 + 判定引擎重标 v46_ep1@0.55 + workspace 必传 + 全量修复批 + 内部向量自查/表格豁免）
+
+### Fixed + Removed (全项目设计符合性审查批——6 域并行对照宣称口径 + 死代码专项，2026-10-05)
+
+六域只读审查（判定链路/扫描管线/写入召回/ workspace+DB /入口API面/死代码专项）对照 CHANGELOG 与方案文档逐条实证后的修复与清扫；2778 passed（+4 回归钉）/ mypy 13 基线 / ruff 1 基线。
+
+- **A9 守卫顺序两处（探针实证）**：`_apply_alias_decision_on_conn` 的保护桶守卫在 INSERT **之后**才判——本原语对 False 软返回（事务照常提交），「拒绝」的毒 alias 行照样落库，随后 confirmed-alias 短路把 twin 本体写入折进攻击者桶（回归钉只断言 ok=False 从不看表，绿灯掩盖）。守卫前置到一切写入之前（含 force 分支的 rejected 删除）；`set_memory_workspace_canonical_on_conn` 同型（守卫在 void_conflicts 之后——拒绝时旧桶票据已作废落库而 UPDATE 未执行），一并前置。测试补「毒行不得落库」断言。
+- **normalize 丢 committed 元素（探针实证）**：`normalize_workspace_canonicals` 执行分支把 A5 的 `committed` 第三元素丢给下划线、按 `if merge_warnings` 一律记 `merge_refused`——repoint 对齐守卫在已提交合并上也会带警告返回（丢弃机械同键 rejected 行），于是已发生的合并被报告成被拒：dry-run 报 merged、执行报 refused、库内已合并三方矛盾。改 `merge_warnings and not merged` 才记 refused；新增三方一致性回归钉（spaß/SPASS 构造）。
+- **B2 自查配对方向未归一（探针实证）**：KNN 配对「发现者在前」，非对称邻域下写侧以 (q,p) 落 internal_conflicts，而扫描腿恒 i<j 探测——exists 探针有序键必 miss，同一矛盾下一轮 kick 以 (p,q) 再落一行 pending（UNIQUE 不拦，计数虚高+重复判定）。配对按 unit_index 升序归一（quote/span 跟随交换）；新增非对称邻域回归钉（0°/-5°/45° 向量构造 + 全表 unit_a<unit_b + 扫描腿 exists 交叉命中；变异验证过）。
+- **index-only 全豁免守卫缺口**：`index_rows_in_job` 缺 A3 同款「全豁免不 publish」——`publish_rows([],[])` 谎报 indexed、记忆永久留在 missing_row_vector_rows 选集、每个后续 job 重复空 publish 事务。补 skipped/all_rows_exempted 分支 + 回归钉。
+- **扫描腿豁免计数断链**：`_process_memory` 写进 outcome 的 `table_rows_exempted` 全链无消费（kick 汇总/回执/轮状态都不读），B3「回执可见」宣称在扫描腿落空。接线进轮级账本与回执（`table_rows_exempted_total`，快/慢车道都计）；测试补断言。
+- **poison_skipped 恢复 kick 口径**：只按累计计数筛选，毒记忆修好后的恢复 kick（水位已推进、complete=True）仍报 poison_skipped 自相矛盾。改「本 kick 仍失败且达上界」才报；计数仍落轮状态；回归钉覆盖两个方向。
+- **vec0 upsert 脆弱点**：写路径 inline `INSERT OR REPLACE INTO memory_summary_vec` 依赖「行必不存在」这一未声明前提（vec0 无视 conflict 子句，PK 冲突即 raise 被 except 吞、留陈旧向量）。改 DELETE+INSERT（与 store 层 upsert 惯例一致）。
+- **entity 清除层退役**：`classify_pair` 的 owner-⑪ entity 分支自 metadata.entity 随 G3（0.17.0）退役后生产恒不可达（4 个调用点无一传参）而 docstring 宣称 "free to run"。随数据源一并删除参数与分支，测试改钉签名。
+- **失实文档/帮助面四处**：upgrade_cli conflict_only 文案仍宣称「0.17.0 does rotate it」（与终局拍板「钉 2 不轮换」相反）；`semantic_control_note` 描述已删除的 Qwen 协议字段（n_ctx/prompt_version/pair-v6）——改写为 mDeBERTa 实际字段；config 退役键 `claims` 段零警告（补 "removed in 0.17.1" 软着陆，与 model_path 同款）；examples 配置样例自称 21 键实含 20（补 `mdeberta_model_dir`，现与 config_registry 逐键对齐）。另：semantic_status 降级 note 删已消亡的 `evidence_units_capped` 句；`_wide_recall` docstring 通道⑤表名改 `memory_row_vec`；setup_cli/constants/判定链路过期注释（Qwen 残句、19 键计数、process_conflicts 悬空指向、E10① 措辞）修正。
+- **死代码清扫（vulture + AST + 全仓 grep 逐一实证零引用）**：孤儿方法/变量 20 项（`_publish_missing_workspace_canonical_vector` 一步式 ws 向量 API（生产零调用，4 处测试迁两步 API）、`build_unopenable_report`（已被内联替代）、`_scan_envelope`（双料陈旧：还读已退役的 metadata.entity）、`has_pending_jobs`、`PairGateResult`、`_semantic_control`、`_embedding_text`、`_conflict_visible`、`_memory_acl_response_fields`、`_strict_filter_records`、`_confidence_rank` 对（wrapper⇄实现互为唯一引用）、`_get_conflict_row`、`_labels_fallback`、`strict_ws`/`Isolation.ALL`/`QUEUE_STATUSES`/`_is_cjk_char`/`CallerWorkspace.strict`、`skipped_ids`/`result_version`/`result_hash`/`tags_text`/`metadata_update`/`fallback_notices`/`cleared_garbage` 死累加器、judge child 的 `unexpected` 死变量）；`DegradeState.notice_provider` 通道 + `degraded` property（生产唯一赋值点是主动置 None，通知交付归外层 wrapper，测试改钉 extra_notices 路）；`_TECHNICAL_REASONS` 幽灵键 `judge_invalid_output`（无产生点；集合保留为测试钉面并注明）；tests 4 处死 pop（claims_channel 键已随通道退役）；eval 一次性脚本死变量 6 处；孤儿 import（os/raw_workspace/utc_now_iso/Callable）与双 `import hashlib`（ruff 基线项之外的 F401 归零）。
+- **不动项（owner 域）**：config.py 两个 vestigial 字段（动契约测试计数）、`server.build_server`（team 仓可能引用）、`MemoryStatus` 三个枚举成员（协议文档价值）、`wait_boot_backfills`/`workers.reserve`（测试保活面）、`test_scan_capability_e2e` 的 Qwen 残留路径（挂真实 mDeBERTa ckpt 待定）、probe/一次性脚本与 pairs_claims.jsonl（存档口径）。
+
+### Refactor (大文件拆分批——纯移动零行为变化，2026-10-04)
+
+方案 v2 与两轮 review 记录：`ZCodeProject/docs/mema-file-split-plan-2026-10-04.md`（R1 对码 + R2 对抗回写，R3/R4 施工后 review 见方案回写区）。
+
+- 15 个 >1000 行文件全部拆到 ≤1045（仅 `_ops_content.py` 1045，其余 ≤909；方案帽 1000/硬帽 1500）。
+- 拆分形态三类：**模式 A** 纯函数搬家+`as` 别名 re-export（additive_ddl/search_text/scoring/extras/_read_hits/_evidence_helpers/judge/scan_admission/vnext_probe/final/ws_keys/_queue_consts/doctor_checks/types 等）；**模式 B** mixin 共享 `self`（db 四 store+core 委托墙+operations 五 mixin+read/scan/evidence/tools/surfaces/queue mixin）；**断环叶子**（共享 helper 下沉独立模块）。
+- **保活面零变化**：测试 import 面（含 `search._TAGS_SCORE_CAP`/`doctor.load_confirmed_workspaces`/`queue_protocol.GROUP_HASHES_CAP` 等）全部经 re-export；实例 patch 面（`_ensure_semantic_backend` 等 30+）经 mixin 方法名不变。
+- **patch 缝迁移两类**：随读取点迁走并改测试字符串（`WORKSPACE_RECALL_ADMISSION`→`_ops_status` 1 处；evidence 三常量+`_JobJudgeBudget` 10 处）；读取点留守零测试改动（`QUERY_RECALL_SCORE_FLOOR`/`WORKSPACE_MATCH_DISTANCE`/`ASSEMBLY_WINDOW`/`SCAN_DUPLICATES_*`/`CONFLICT_DETECTOR_VERSION` kick 侧/`compute_summary_votes`/`compare_memories`/vnext `build`/`_fingerprint_on_connection` 等）。
+- 每 commit 全量 2774 passed + mypy 13 基线 + ruff 1 基线；8 commit（314387a…a7b0967）。
+
+### Fixed + Changed (修复批与优化提升，2026-10-04)
+
+方案与两轮 review 记录：`ZCodeProject/docs/mema-0171-fix-batch-and-optimization-plan-2026-10-04.md`（v2，R1 对码 + R2 对抗回写）。
+
+- **A1** 深 offset 向量通道静默消失：recall 的 evidence 通道 `k=pool_cap×16`，`limit=100` 时 `offset≥156` 即超 sqlite-vec 的 4096 硬上限 → 查询报错被 `except sqlite3.Error` 吞成空结果（实测 155→100 条 / 156→0 条，无 warning）。新增常量 `VEC0_MAX_K=4096`，`row_knn` 与 `memory_summary_knn` 两处 clamp + stderr 留痕。
+- **A6** batch_find 响应字节预算此前是死代码：预算读 `entry["memory"]`，而 find 页条目是扁平形状 → 360KB 全放行；hits 页的 `hit_spans[].text` 也不计预算（实测未升级全文的 hits 页 509KB 放行）。改扁平取值 + 计入 hit_spans；降级保留 hit_spans 并加 `hit_spans_truncated_by_budget` 标记。
+- **A2** promote 未清 notice 投递态：`record_conflict(status=open)` 命中 notice 快照升组后，行仍带 `delivered` → 继续出现在 `notice list(open)`，且 `notice dismiss` 会把它改写回 `not_a_conflict`（正式冲突组被 notice 通道静默撤回，绕过 judge/apply 治理链）。升组 UPDATE 补 `notice_delivery_status='resolved'` + resolution reason。
+- **A4** 毒记忆破坏扫描完整性不变量：完成门"空页即 complete=True 且不复位"，非尾位毒记忆被跳过后轮次仍宣称完成并清掉 `conflict_scan_required`（实测门被清而该记忆从未被扫描）；尾位毒记忆单 kick 同 id 热重试 253 次。改为**本轮回卷**（空页且仍有 pending 时 `last_id=0` 补扫，取代"靠谎报完成触发下轮重开"的隐式自愈）+ 失败条本轮排除 + 跨 kick 计数落轮状态（`SCAN_POISON_MAX_FAILURES=5`，回执 `poison_skipped` 可见）。
+- **A10** kick 封套 `ok` 反转：被拒的 kick（如 `neighbor_k="abc"`）返回顶层 `ok=True` + `data.ok=False` + 多一层信封（agent 按通用 ok 契约误读为成功）。信封形状识别后原样透传；`time_budget_s="nan"` 不再静默压成 1.0s。
+- **A5** governance_audit 掉行 + 响应与事实相反：rename/migrate 在 repoint 警告形态下**已提交**，却因 `not warnings` 判定报 `ok=False/renamed=False` 且零审计（实测库内已改名、审计 0 行）。`rename_workspace_canonical`/`migrate_workspace`/`_merge_workspace_core_on_conn` 返回值增 `committed` 第三元素；审计改为已提交即落库（warnings 入 detail），`ok`/`renamed`/`migrated` 以 `committed` 为准（no-op 与空源桶保持既有审计行为）。
+- **A3** B3 超长表格段豁免三处后门：豁免只接了检测相与 index-only，漏 `index_memory`（升级路径，vnext 每记忆调用）、boot backfill、扫描腿（直读 `scan_rows`）——实测 120 行表经 `index_memory` 复活 119 行、一次 kick 落地 `internal_conflicts=7021`。三处接入同一 helper；**全豁免形态（空 subject + 全表）改为不 publish**（`publish_rows([],[])` 会清空行并把记忆留在 `missing_row_vector_rows` 选集里，造成每次启动重 embed 的死循环）。
+- **A7** read 邻句 `hit_spans.text` 与 span 回读不一致：命中行已用原文切片，邻句仍为折叠文本（表格行/跨行句差异最大，违反"read span returns exactly that text"）。邻句同用 `content[s:e]`。
+- **A8** workspaces 视图 LIMIT 先于 ACL：strict `limit=1` 时自有桶被更晚更新的外来桶挤出窗口（实测返回空列表），`count` 被重算谎报。`admitted` 进 SQL（复用 `workspace_scope_sql`）；`count` 即 SQL 行数。
+- **A9** twin 保护桶机械变体劫持：改道判定只做 casefold+strip，而解析器折叠还去 `_\-\s` —— 攻击者先注册 `mema_twin` 即可让 twin 本体写入落进攻击者桶（实测可读出 persona）；治理路径（rename→mematwin）同样可注册变体。判定键统一为机械键 + 注册 choke point 拒绝保护桶变体（写路径/rename/migrate/merge/别名确认/rollback/backup replay）。
+- **B2** additive 通道：unit vec 虚表 DROP 无 deferred 分支（影子被 sweep 后报 `SQL logic error` → 逃出 → core 吞掉整个 additive → 其后所有步骤每次启动永久跳过）；段级隔离改为 **SAVEPOINT** 回滚（段内 DML 与其 guard 键同段同事务，不留"半完成 + 已标 guard"状态）；deferred 状态持久化到单 JSON 字典键 `vec_drop_deferred`。
+- **B3** doctor 新 finding `additive.deferred_drops`（vec 表 deferred 可见；干净库不出现）。
+- **B4** doctor tags 预筛（`json_valid AND json_array_length > CAP`；语义与逐行 `json.loads` 等价，坏 JSON 本就被跳过）。
+- **B5** 新观测字段 `jsonl_backup_last_used_at`（`jsonl_backup_active` 的单向闩语义不变）。
+- **语义变化提示**：A4（轮次完成门更保守：毒记忆存在时 `complete=false`、门不清）、A5（`ok`/`renamed`/`migrated` 以"已提交"为准）、A6（hits 页新增 `hit_spans_truncated_by_budget` 标记与超预算降级）、A10（被拒 kick 顶层 `ok=false`）——消费方请按新口径适配。
+- **文档**：INTEGRATION 两文件配置键数 19→21 且样例对齐 `examples/*.json`；`memory_review` docstring 补 `workspaces` 视图；govern help 示例补必传 `workspace`。
+
+### Changed (全量修复批 + 向量自查 + workspace 必传，2026-10-04)
+
+方案 v4（两轮方案 review 回写）：`ZCodeProject/docs/mema-full-fix-batch-and-selfknn-plan-2026-10-03.md`；实施后两轮 review 记录见 mema。
+
+- **P1-1** claims vec 虚表 deferred-DROP 与影子表 sweep 顺序（additive 通道永久失效）修复——deferred 轮影子表保留至恢复轮。
+- **P1-2 + C1** workspace 语义动作必传（remember + confirm_pending/rename/migrate/separate/move）：validation 层强制=strip 非空，报错带 workspaces 列表指路；enforce_required 开关分线（管线复验与 backup_replay 历史行豁免）；strict 隔离下 confirm 两道校验复活（caller 恒构建），错误路径越权回显同修；twin 等价豁免保 0.16.2 §1.2 流程可达。
+- **P1-3** twin 毒化双修：strict_block hint 指回原名+警告句；confirm 防毒守卫（改道键只许 no-op，canonical 无论 -dev 还是任意第三桶一律拦）。
+- **P2×20**：入口域 4（scan_queue 松散类型/slow_lane _is_truthy/config_registry 补 mdeberta 两键+契约 21/docstring 1..8）、写入ws 域 7（rejected 兄弟聚合/governance_audit 新表+三动作审计/ tags_only 拒元参数/register_new 三死分支删除/move 批量化+哨兵过滤/addopts not slow）、召回扫描DB 域 9（span 缺省读到末尾/weak 注释/慢车道计数/_caller 局部化/expire CAS/scoped 翻页/backup_replay 结构化降级/set 提出/doctor model_dir warn）。
+- **B2** 内部向量自查：numpy 内存 top-k（k=5）替换 O(n²) 双循环；批路径原地/streaming 流 drain 后插点（E10① 保持）；漏斗门（floor/同值双通道 skip/at-ceiling 值不同放行）+ internal_pair_admission 照旧；ImportError 跳过记 receipt。
+- **B3** 超长表格段豁免：单表格段（kind=table_row 且 row_index 连续）>100 行整体不存行向量不做检测，各数各的；公共 helper 三路径共用（检测 streaming/batch + index-only）；table_rows_exempted 回执可见。
+- **C2** memory_review(view="workspaces") 选桶发现接口 + **C4** help/docstring 三层指路。首次演示话术待 owner 点头单独改。
+
+
+### Fixed (合一池半池守恒——internal 不再饿死跨记忆道，2026-10-03)
+
+harness 实测回归（v46_ep1@0.55 CPU 全量跑）：无上限 internal-first 在行密集语料（数值/表格记忆的 O(n²) keeper）上吃光 500 池——conflict 道 106 写跨记忆 notice=0、internal_conflicts 9390 行、backlog 顶帽驱逐，冲突召回塌零（R2 对抗轮攻击#2 的实测复现；探针测试当时未带跨对场景，漏网）。修复：单一池保留，internal 消费份额上限 ⌈total/2⌉（500→250），跨记忆道保底半池；internal 超份额对静默消失（池语义不变）；正常写入（internal 1~5 对）零影响。补饥饿回归测试（internal 风暴下 cross 保底席位必得）。
+
+### Fixed (v46 系 checkpoint 机制头形状自适应，2026-10-03)
+
+mini-clash 训练侧机制分类学扩展（10→12 类，v46起新增 subject_mismatch/attribute_mismatch），mema 判定子进程按常量建 10 类头 → load_state_dict 形状不匹配 → 判定后端 crash-restart 循环。修复：头维度从 checkpoint 实际形状读取——机制头（观测字段）静默自适应、超名表索引返 None；标签头（verdict 协议）仍硬校验必须一致。model_version 前缀去 v4m 专属。
+
+### Changed (eval 归因链收敛 judge_budget 单键，2026-10-03)
+
+方案 §2.4 收尾（commit ② 的回执退役在 eval 侧对齐）。
+
+- `eval/runner.py` receipt 白名单摘 `qwen_budget`（兼容 echo 已在 commit ② 摘除，白名单收旧键恒空）；`eval/score.py` 归因读键收敛 `judge_budget` 单键（旧 raw 无键按 0 计的兼容不变，归因输出键名不动）。
+- harness 基线锚：V4m 生产形态 recorded 数字（mema #1111：真冲突 21/33、误报 3/130 @T=0.80）；本 commit 后随 owner 指令换 v46_ep1 checkpoint 重测阈值并全量跑 harness（最终对照锚）。
+
+### Changed (判定执行合一总池 + 常量重标，2026-10-03)
+
+方案 §2/§3（两轮 review 记录：`ZCodeProject/docs/mema-judge-recalib-escalate-plan-2026-10-03.md` v3）。owner 2026-10-03 拍板：合一只留总池、池 500、期限 10s。
+
+- **相位合一**：internal 判定相与 A-cross 派发相合并为单一 `conflicts_judge_phase`——internal keepers 与跨记忆对一批发出，internal 对在提交列表前部（E10① land-first 改为批量内排序保证）。判定缺席/让路窗口的 internal 对 unannotated 立即落地；池耗尽 internal 尾对静默消失（现状帽 break 语义的池化等价，R2 对抗轮修正对照物）。跨对六道前置、确定性直出、R1-5 读快照事务、backlog sweep 全部原样。
+- **单一总池**：`_JobQwenBudget` → `_JobJudgeBudget`，internal 保护帽（3）撤销；`SEMANTIC_MAX_EXAMINED_PAIRS` 10→500（Qwen 一对 ~1.6s 的前提随 mDeBERTa 批前向 ~0.1s/16 对不成立；500≈32 次前向量级余量，为候选面扩容留位）；`SEMANTIC_JOB_TIMEOUT_MS` 5000→10000。病态语料（非表格同句型多行）的判定/落地由总池封顶（§5.11 探针测试钉住）。
+- **judge_fn 统一（R1/R2 对抗轮）**：internal/cross 共用一个判定注入——异常/形状不符逐片降级为 error verdict（单后端故障不再 worker_error 掀翻整相）；classify_pair-only 后端统一走 `_judge_pair_compat` candidate 布尔映射（旧 cross 侧 conflict-1.0 直通退役）。`_judge_pair` 单对包装随相位合并退役。
+- **drain 片间让路探针**：忙时 63 片不再一口气越墙（对齐 INTEGRATION 的 worker-yield 宣称）；越墙余片补 error verdict 按源分账。
+- **回执/退役**：`qwen_budget` 兼容 echo 摘除（单键 `judge_budget`）；`a_cross_dispatch_skipped` 键退役；`SEMANTIC_INTERNAL_QWEN_MAX_PAIRS` 常量删除；`internal_qwen_pairs` ctx 键更名 `internal_judge_pairs`（`internal_qwen_confirmed` 回执键保留，历史命名）。tools 降级说明文案与 INTEGRATION 两文件预算数字同步。
+- 测试：`test_qwen_budget_reorder.py` 重写为 `test_judge_budget_pool.py`（池算术/单批 internal-first/池耗尽消失/异常免疫/病态探针）。
+
+### Fixed (判定型 notice escalate/promote 修通——D1 双通道，2026-10-03)
+
+方案与两轮 review 记录：`ZCodeProject/docs/mema-judge-recalib-escalate-plan-2026-10-03.md`（v3）。全项目对抗审查（mema #1172）P1-4。
+
+- **判定型 notice 一键升组 100% 失败**：0.17.1 §3.4「quote 即值」把判定 notice 两侧值改为两侧行文本（判定引擎无抽取物），D1 intake 门（conflicts `_normalize_members`）仍要求 `normalized_value == normalize_value(value_raw)`——行文本必不过机械归一 → escalate 对主力 notice 类别必然 `structured_group_required`，promote-in-place 对判定 notice 两头死（照抄成员被 D1 拒、交 D1 合法成员被快照比对拒）。修复：D1 校验改**双通道**——`normalized_value == normalize_value(value_raw)`（机械规整形态）或 `== value_raw`（§3.4 快照原文形态）任一放行；转述（两不靠）仍拒。escalate/promote 分支代码零改动即修通。owner 拍板选项 1：双通道作用于全部 intake（含 agent 自由建组）——噪声锚在单通道下本就可构造，防御纵深增量损失接近零。
+- surfaces 判定页与 escalate 结果文案补三步处置流程（escalate 立案 → judge 拍板+apply_plan 改值结案 → review 对账）及直改后 `stale_member` 恢复路（append 新版本成员或 resolve）。
+- 新增 `tests/test_d1_dual_channel.py`：双通道单测 + 真判定 notice 播种 escalate 端到端 + promote 照抄/转述对照 + 自由 intake 防回归。
+
+### Fixed (did_you_mean 确定性化，2026-10-01)
+
+- `validate_product_payload` 的 `did_you_mean` 建议改用 `sorted(allowed)` 迭代（注册表值是 set，difflib 迭代顺序受哈希种子影响）。corpus 全部 7 个 did_you_mean 期望值在 sorted 序下零变化（golden 多种子 0/1/2/random 实证全绿）。随之摘除 `test_hash_randomization_disabled` 环境门与 CI 无关——本地裸跑 `uv run pytest` 不再因缺 `PYTHONHASHSEED=0` 被门拦下。
+
+### Fixed (workspace 归一：suggester 退役清扫收尾 + rejected 机械通道免疫，2026-10-01)
+
+方案与两轮 review 记录：`ZCodeProject/docs/mema-ws-normalization-cleanup-plan-2026-10-01.md`（v4）。
+
+- **`mechanical_variant` 漏出规则层 AUTO 集合**：0.17.1 suggester 退役后，机械变体写入（`agent-lane` 写入已注册 `AgentLane`）落入 ASK 兜底——数据已并桶但响应 `ASK`+`keep_separate` 选项与事实矛盾。AUTO 集合补 `mechanical_variant`（workspace_rules）；写时桶向量 backfill 集合同步补齐（缺失向量自愈通道与 exact 等价）。
+- **rejected 免疫在机械通道全失效（两层）**：`separate_workspace_alias` 的 keep-separate 决定对机械变体通道不生效——层1：1b 机械折叠不消费抑制名单，被拒原名再写照样进被拒桶（响应标 KEEP 实际落桶）；层2：幽灵变体（连字符/下划线互换）连 alias 查询都不命中，抑制名单为空。修复：1b 消费名单 + alias 精确 miss 后机械键第二跳（仅 rejected 行参与，confirmed 幽灵变体维持折叠）+ 名单查询精确键∪幽灵键并集聚合（真实库 `agent-chancellor` 双 rejected 行形状全量尊重）。修复后被拒同名写入落新桶（strict 下 PENDING 待确认）。
+- **新治理守卫：机械变体对禁止 separate（owner 2026-10-01 拍板）**：`separate_workspace_alias` 对机械同键对（`agent-lane` ↔ `AgentLane`）直接拒绝——同一身份永远一个桶，劈散会伤冲突检测与召回；真是两个项目先改名。confirmed 方向不受影响。
+- **migrate/rename repoint 对齐守卫（R2 对抗轮 P1）**：repoint 通道原样搬运 rejected 行，能把跨身份拒绝搬成"孪生对拒绝"（治理门会拒的状态）并借上述免疫修复静默劈桶。repoint 时对 `机械键(alias)==机械键(new)` 的 rejected 行丢弃+返回警告，非孪生拒绝照常跟随迁移。
+
+### Removed (workspace 归一死代码，2026-10-01)
+
+- `workspace_candidate` 响应死分支与 `candidate` 初始化键（suggester 退役后全仓无赋值点，`write.py` 展示分支恒不可达）。
+
+### Fixed (0.17.0+0.17.1 独立 review 批，2026-09-29)
+
+- **P1 `memory_summary_knn` 参数/占位符错位——写时重复提示的语义召回通道自 0.17.0 P2-7 起整体静默失效。** SQL 收敛为 COALESCE 单 workspace 占位符后，params 列表仍沿用退役 subject_tags_knn 形状的 3 元素（多一个 workspace 参数）→ 每次调用 sqlite3.Error 被 except 臂吞掉返回 []，所有写入静默降级到 `active_subject_tag_rows` 扫描兜底。修复参数列表；重指向的 scoped-recall 测试（原 fault-injection 钉在已退役的 subject_tags_knn 上，假绿）现钉住活路径。
+- 假绿测试修复：`test_knn_failure_falls_back_to_scan_hint` 的 fault injection 重指向 `memory_summary_knn`；`test_vec_knn_*` 两个直调测试改骑 summary 向量空间（query 用 `_summary_embed_text` 口径构造）。
+
+### Removed (独立 review 死代码清扫——零引用项逐一 grep 实证，约 30 项)
+
+- **换引擎残留**：`SEMANTIC_PAIR_MAX_ATTEMPTS`/`SEMANTIC_PAIR_RETRY_*` 三常量（pair-v6 截断重试协议）、`SEMANTIC_PAIR_LONG_DECODE_TOKENS` 与 A1 环的 token/retry 死字段（`PairVerdict` 无此属性，`semantic_pair_timing` 的 `retried_ratio`/`long_decode_ratio`/token 指标结构性恒零——按 §3.3 零值不出场惯例裁撤，环保留下 pair_ms 统计）、`ACTION_TYPES`/`NON_ACTION_TYPES`（Qwen action-type 词表）、`evidence_is_cjk`（pair-v8 语言路由）、`coexistence_veto` 的 forward/reverse 抽槽参数与 `coexist_version_value_evolution` 分支（唯一调用方两参形态）、`_judge_pair` 的 `retry_allowed` 形参、`internal_qwen_vetoed` 恒零计数器（含 eval/score 读取端）、`_enqueue_semantic_conflict_check` 死方法（C2 合并后唯一调用方被删，残留旧两队列契约，误调用会静默丢索引）。
+- **claims 退役残留**：`_VERSIONAL_ATTR_RE`（claims D1 版本豁免正则）、eval `gen_claims_corpus.py` 整文件、`score_conflict_claims()` 死函数、runner 的 claims 转发分支与恒 None `channel` 键、score 报告的恒零 "claims 语料 identified" 行与过期 "∪ conflict_claims" 标题、golden 生成器的不可达 claims 条目（重生成 golden 零漂移实证）、`tests/test_qwen_budget_reorder.py` 孤儿常量、`test_vnext_evidence.py` 重复 pop 退役键。
+- **单元向量/旧链路残留**：`EvidenceStore.scan_units`（audit 表面无受益人）、`subject_tags_knn` 读腿 + `db/core.py` 门面（0.17.0 P2-7 起 duplicate-hint 走 `memory_summary_knn`，vec 表写入保留服务 C4 排序）、`_enqueue_semantic_conflict_check`（见上）、`BACKLOG_STATUSES`、`EVIDENCE_QUEUE_MAX_SIZE`（C2 合并后 SEMANTIC_QUEUE_MAX_SIZE 接管）、`OperationsPipeline.wait_evidence_worker_drained` 零调用转发层。
+- **其他**：`_negation_opposition`/`_NEGATION_COMPILED`/`_values_differ_norm`/`_attr_cos_or_none`/`_conflict_envelope`（G6 收尾/判定上下文化后孤儿化）、`EvidencePipeline.process_conflicts`（相分裂后零调用编排）、`PAIR_SCORE_W_OVERLAP`、`SEMANTIC_RESIDENT`、`SCAN_PIPELINE_KICK_*` 三常量（scan_pipeline 本地 DEFAULT_* 同值接管）、`WRITE_SIMILAR_SUBJECT_RATIO`/`WRITE_SIMILAR_CONTENT_COSINE`（P2-7 双轴规则接管）与只调死旋钮的 `eval/sweep_similar_threshold.py`、import 即崩的 `eval/diagnose_pair_stages.py`/`diagnose_en_pair.py`（引用已删的 `IsolatedGGUFSemanticBackend`/`evidence_knn`）、`_ASCII_RUN_RE`（v0.3.0 时代最老孤儿）、semantic_status 回退字典的 `"model_state"` 幽灵键。
+
+## [0.17.1 追加] — 未发版（claim 对比通道退役 + 判定输入上下文化，owner 2026-09-28 拍板）
+
+### Removed
+- **claim 对比通道整体退役**：通道 B（claims×claims：exact/vector 车道）、通道 C（claims×sentences）、单边桥、scan 慢道 claims 腿。理由：claim 属性无实体绑定（"数据库=MySQL" 与另一系统的 "数据库=Oracle" 无法区分），真实场景误报面大；通道 C harness 实测真召回 1/10。claims **整体退役**（owner 2026-09-29 拍板连表删）：`memory_claims`/`memory_claim_vec` 两表 DDL 删除、存量库启动幂等 DROP；`claims.required` 写入门、`memory_repair(task='claims_backfill')`、写入/编辑/继承/回执全链退役，claims 参数出 schema（未知键软着陆警告）。
+- 覆盖句跳过（claim 覆盖的句子不再被排除出通道 A）随退役删除——否则 claim 覆盖行成检测死区。
+- `--qwen-model`（runner）/`semantic_conflict.model_path` 等 Qwen 判定入口全部移除。
+
+### Changed
+- **判定输入上下文化**：judge 输入从裸对立行对改为 subject + 对立行 + 前后各 1 句（`SEMANTIC_JUDGE_CONTEXT_BEFORE/AFTER` 参数化）。harness 实测：精确率 60%→64%（V4m@0.80）/70%（V21@0.90），召回 26→23（边界对被上下文压向保守，误报同步下降）。
+- `conflicts` 回执键 `claims_channel`/`claims_channel_c`/`rows_covered_by_claims` 移除（零键缺席惯例）。
+- embedder 新增 `MEMORY_ARBITER_EMBED_CPU=1` 环境开关：强制 embedding 走 CPU（同机 GPU 训练让路）。
+
+### Fixed (0.17.1 追加包：d00ffa6..HEAD 两轮 review 修复批——41 confirmed / 16 项代码修复 + 清扫，2026-09-29)
+
+完整报告：`docs/mema-v0.17.1-两轮review-2026-09-29.md`（BillyProject/docs）。
+
+- **P0 backlog drain 死循环**：判定池条目 pass2 前不 complete/不计数/不进 `take_next` 排除表 → worker 无限重取同一头部条目（入池即进排除表修复 + 终止回归钉）。
+- **P0 存量库 claims 向量影子表孤儿**：sqlite-vec 0.1.x DROP vec0 主表不连带清影子表 → 启动 DROP 后补 `memory_claim_vec_%` sweep（owner 拍板：删）；vec0 模块未装载的库上 DROP 报错改为跳过记账（装 vec 后首启再清）。
+- **P1 硬超时误触发崩溃熔断**：`TimeoutError ⊂ OSError` 被 child-death 子句吞 → 3 次超时永久禁用判定引擎（恢复 GGUF 时代 `except TimeoutError: raise` 防线 + 回归钉）。
+- **P1 测试网假绿**：4e8d987 删 `ModelSignal` 后 4 个测试文件残留旧协议 fake，NameError 被 `_judge_pair_compat` 吞掉静默走 fail-closed → prefilter 三处补 stub/语义修正（negative fake 改 candidate=False 走 no_conflict 通道）+ e2e `_FormatBackend` 迁 judge_pair(s) 协议（mutation probe 验证覆盖活性）。
+- **P2 七项**：audit.py `semantic_model` 溯源恒 null（漏改消费者，改读 mdeberta_ckpt）；`model_notices_capped` 计数随积压膨胀（只计真降级）；`CONFLICT_DETECTOR_VERSION` 未随 722eaee 判定输入定版换代（bump `mdeberta-v4m-v3` → 启动 re-arm 全量重扫，与本就要求的发版前置一致）；`SEMANTIC_JUDGE_CONTEXT_BEFORE/AFTER` 只接 A-cross（internal/backlog 补齐，三通道判定输入口径统一）；`notice_min_prob` 解析 NaN 吞成 1.0（改 parse_float+clamp_float 链）；降级 banner 指路无效命令（按缺失项分路指引）；eval runner 产物补记判定阈值。
+- **P2 doctor 不可达分支**：`_c_semantic_judge_model` 读不存在的 `ctx.tools`（首版即必 AttributeError 且被吞，breaker 状态从未可见）→ 删分支，接线留建议。
+- 继承修复：`_CJK_RE` NameError 炸弹（4e8d987 误删定义）+ 8 个死导入补回/清理。
+- 死代码/文档清扫 20+ 项（claims 死参数、skip_peers 死链、include_content 全链、GGUF slow 孤儿区、`_NoSurfacingRecorder`/`_ScriptedLLM` 等 F821 残留、README/example/INTEGRATION 双语失实段）。
+- lint/类型门归零：ruff 11 错误（多为上述 F821）与 mypy 3 错误全修。
+
+## [0.17.1] — 未发版（feat/mdeberta-judge-0171 分支，owner 拍板只 commit 不发版）
+
+### 概要
+写时冲突仲裁判定引擎 **Qwen3-0.6B 抽槽式 → mini-clash mDeBERTa V4m 三分类判别式**（只换引擎，写入漏斗门全保留——row_prefilter/G5/余弦带/decide_evidence/预算公平墙一个不动）。方案：docs/mema-mdeberta-v4m-judge-swap-0171-plan-2026-09-28.md（两轮 review 闭环，owner 九项拍板）。
+
+### 新增
+- `memory_arbiter/semantic_judge.py`：`IsolatedMDeBERTaBackend`（spawn 子进程 torch CPU fp32，标签契约钉死拒启、崩溃熔断 10min×3、硬超时/加载超时沿用、批推理 `judge_pairs` 长度排序+动态 padding、ckpt sha8 身份）。
+- 配置键：`semantic_conflict.mdeberta_ckpt`（配置即启用，镜像旧 model_path 语义）、`mdeberta_model_dir`（缺省=ckpt 同目录 `mdeberta-base/`）、`mdeberta_notice_min_prob`（0.80）、`mdeberta_batch`（0=auto 按设备分档：Apple Silicon/NVIDIA 16、其余 8）。
+- extra：`pip install memory-arbiter-mcp[mdeberta]`（torch+transformers；ckpt 1.1GB 另行下载，README 指引）。
+- doctor：mdeberta 体检项（ckpt 存在/依赖/熔断状态/最近错误）。
+
+### 判定语义（owner 九项拍板）
+- conflict 且 P≥0.80 → normal notice；conflict 低置信 → 计数不落；possible → **severity=info**（无 action_required，Agent 自裁）；no_conflict → clear。
+- **internal 相写时不判死**：一切结局 pending 附模型意见，终裁归扫描侧强模型（旧 dismissed veto 退役）。
+- **通知帽改 job 级 top5**：conflict 正式 + possible info 按嫌疑分合并排序取 5，其余降级 info（`model_notices_capped` 回执）。
+- 攒批：各相位先收后判一次批前向（A-cross 两遍法），deadline 检查粒度=每块；backlog drain 按批档批量取、技术失败留队重试。
+- notice 适配：slot attribute=句对 sha256 差异锚（claim 通道保留真属性）、`model_signal`/`model_version` 进 payload（`qwen_signal` 一版兼容读）、direct 路径保留真抽取属性。
+
+### 移除（Breaking）
+- **Qwen/GGUF 语义后端整体删除**：`LocalGGUFSemanticBackend`/`IsolatedGGUFSemanticBackend`/pair prompts/重试协议/`SEMANTIC_N_CTX`/`SEMANTIC_N_BATCH`/workspace suggester（`_suggest_workspace_candidate`）与 `QWEN_CANDIDATE_*`；`setup --install` 不再下载 Qwen。
+- 配置键 `semantic_conflict.model_path`/`n_gpu_layers` 退役（配置时给迁移警告）。
+- 回执键 `qwen_budget` → `judge_budget`（`qwen_budget` 一版兼容回显）；降级计数 `qwen_*` → `judge_*`（`qwen_unverified` 整键消亡）。
+- 纯 Qwen 协议测试文件删除（test_qwen3_routing/test_qwen_perf_gates/test_pair_timing_ring/test_worker_forwarding/backpressure/inflight_hygiene）+ Qwen 协议用例清理。
+
+### 保留（漏斗门不动）
+`_SENT_PREFILTER`、G5 记忆级筛选、余弦带 [0.60,0.98)、`decide_evidence`/`coexistence_veto`/`direct_value_verdict`、`is_cross_evolution`/`attr_is_versional`、KNN 窗口 16、对池 10/internal 帽 3/job 级 notice 帽 5、公平墙 5s、notice_sync_wait 3s 语义、scan 路（本就不跑模型）。llama-cpp-python 依赖保留（embedder 的 EmbeddingGemma 在用）。
+
+### 升级指引
+1. `pip install memory-arbiter-mcp[mdeberta]`（torch CPU wheel ~200MB）；
+2. 下载 `mdeberta-v4m_dual_v1.pt`（1.1GB）+ `mdeberta-base/`（config+tokenizer）；
+3. config：`semantic_conflict.mdeberta_ckpt` 指向 ckpt（自动启用+预加载）。未配置=写时仲裁停用（scan/Agent 兜底不受影响），doctor 报告。
+升级前请清空 conflict_backlog（旧引擎条目避免跨引擎重放歧义）；发版前置=全量重扫（detector 已 bump `mdeberta-v4m-v3`）。
+
+## [0.17.0] — 2026-09-22
+
+### Changed (0.17.0 追加包：前缀终局形态——存储侧裸文本+查询侧 query 前缀，owner 2026-09-26 拍板，未发版一次性收敛)
+
+**owner 拍板：写入不加前缀，查询加前缀（条件「打平或更好」已由双语料消融满足）**——`EMBED_PREFIX_STS` 值改回空串（存储/配对侧裸文本），`EMBED_PREFIX_SEARCH` 维持 query 前缀；**`EMBEDDING_PIPELINE_VERSION` 钉回已发版的 2，不轮换**（owner 指令：别让用户全量重新生成向量）。依据（2026-09-26 双语料消融）：中文中长文语料 recall-v3-len 三写入侧前缀打平（R@5 全 0.9737、self_recall 72/72，eval/results/recall-len3-{qxq,bare,official}）；LOCOMO 英文改述场景 bare-doc+query-prefix **0.605 vs query×query 0.387（+21.8pt）**、纯向量 0.614 vs 0.538（WorkBuddy mema-vs-mem0 消融报告 §六）。不轮换的技术前提（已逐一核实）：`_summary_embed_text`/`_subject_tags_embed_text` 与 v0.16.12 逐字节一致、`EMBED_PREFIX_STS=""` 即裸文本=已发版向量语义——升级用户全部存量向量保持有效，查询侧前缀是运行时行为无需重嵌；row 向量为新表覆盖回填（新数据，非空间轮换）。**版本纪律沉淀**：前缀常量值不进 space_id 组成（model_digest/dim/version/config），未来任何改变存储侧嵌入文本的变更必须手动 bump 版本号，否则陈旧向量被未变的空间 id 掩盖。开发期 qxq 空间库（v3 space id）与新算 v2 必然 mismatch，正好由重建链收口。冲突带 FLOOR 0.60 等阈值系 sts 空间标定（702ff59），裸空间下经 harness conflict 门复验后按标定协议处置。
+
+### Changed (0.17.0 追加包：未发版 commit 整体两轮 review 修复批 Round 1——正确性，2026-09-26)
+
+范围：`git diff v0.16.12..HEAD` 75 commit 全量 review（8 分片对抗验证：CONFIRMED 21 / REFUTED 4）。owner 拍板三项：扫描侧缺口三件全补；语料污染现在修+重跑基线；管线版本记档不 bump（bump 会让全部已部署库 mismatch 重建，而 gate 基线自校验不钉管线版本、不 bump 不失真）。
+
+- **fix(claims): 状态翻转重钉撞 UNIQUE P1（负空间两步平移）。** 0.17.0 对抗 review P1-3 引入的 `UPDATE memory_claims SET memory_version=memory_version+1`（snapshot 语义翻转时的版本重钉）在 UNIQUE(memory_id, memory_version, attr_norm, value_norm) 逐行立即查重下会自我碰撞——跨版本同值行共存是设计稳态（编辑保留旧行作审计），任何相邻版本共享值都在语句中途炸 IntegrityError、整事务回滚，supersede/激活/confirm（confidence/protection 变更）全部永久卡死。修=负空间两步平移（`=-memory_version` 再 `=1-memory_version`，中间态无碰撞）。回归钉：继承产生的 v1+v2 同值行共存 + confirm 翻转通过。
+- **feat(claims): 编辑不传 claims 自动继承（方案 C，owner 拍板）。** P2-5.2 只在显式传 claims 时重落，编辑（不传 claims）让通道静默打死——与「update 不强制 claims」拍板（2026-09-25）组合出的实际语义是「编辑一次=claims 清零」。现改为：内容编辑不传 claims 时，旧版本 claims 经 `claims_for_version`（新只读方法）读出、走同一 `_persist_claims_for_version` 重过 grounding 落新版本（逐条 source 沿用原行），值已不在新正文的剔除进 `claims_inherited_dropped` 回执；显式传 claims / `claims: []` / tags_only 语义不变。响应新增 `claims_inherited` / `claims_inherited_dropped`。
+- **fix(claims): backfill apply 溢出静默蒸发 + source 兜底。** apply 是唯一绕过 remember/update schema ≤20 硬门的入口，`prepared[:20]` 截断的 claims 从不进 rejected 回执——现逐条回报 `exceeds_max_per_memory`（带 index）；逐条 `source` 非法值兜底 `agent`（防 memory_claims CHECK 炸）。
+- **feat(scan): 扫描侧通道 B（claims×claims）+ 跨通道去重接线 + 判定页优先级（owner 拍板三件全补）。** ①设计 §扫描侧任务安排承诺「通道 B 同一套函数、零成本」但扫描轮从未接线——backfill 回填/存量 claims 的冲突只在写时检测，扫描轮永不看：kick 扫描现复用写侧 `check_claims_conflicts`（零 Qwen 确定性值对立→notice；on_write=off 不产；回执 additive 键 `channel_b_*`，异常记 `channel_b_error` 不静默）。②通道 C 对 A 已入队 peer 的去重承诺（G6b）落地：`a_enqueued_peers` 跳过 + `channel_c_deduped_channel_a` 计数回执（此前靠 candidate_key_hash UNIQUE 兜底不重复入队，去重不可观察）。③scan_queue 新增 `priority REAL` 列（CREATE DDL + has_column ALTER 迁移，additive 幂等）：入队时按 `compute_pair_score` 同式盖章（A 通道带 KNN cos、C 通道带 attr↔sentence cos；无 cos 缺省 0=按 id），判定页（`_fetch_conflict_rows` SELECT +priority）窗口内按组最高分降序展示、tie-break 保 id 游标稳定——数值对立/低 cos 高分对先到 agent 手里。只改展示顺序，不改变任何判定与幂等语义。
+- **fix(workers): on_write=off 不再 idle 消化冲突 backlog。** worker 空转轮无条件 `drain_conflict_backlog`（加载 Qwen 并产 notice），与 `start()` 的 off 不预加载及 runtime_state 的 on_write_off 报告自相矛盾；off 时跳过，积压留待恢复 on_write 后消化。回归钉：off 下 10.5s（≥2 idle tick）零 drain 调用、积压保留，恢复后手动 drain 照常。
+- **fix(doctor): rows.coverage 恒等死仪表修复 + golden 重生成。** covered 与 eligible 同表同谓词（`COUNT(DISTINCT memory_id) FROM memory_row`），恒报 100%、回填缺口永不可见——covered 改按 `memory_row_vec` 侧 EXISTS 对应向量（publish 单事务原子写两表，行在⇔向量在）。`tests/golden/doctor.json` 按新契约重新生成（脚本 scripts/gen_golden_doctor.py）。
+- **fix(queue_protocol): workspace 降级 except 收窄（瞬时段错误照抛）。** durable 豁免写失败的裸 `except Exception` 把写锁等瞬时 OperationalError 也吞进 legacy fallback——队列翻转假绿 dismissed、durable 豁免静默丢失。收窄为仅「`no such table: workspace_dismissals`」这一设计内形态走降级，其余照抛（counted, never silent）；legacy fallback 自身收窄 `sqlite3.Error`。回归钉：写锁错误传播且 fallback 零调用。
+- **fix(console): 关系图谱标签边用全量标签。** `[:8]` 输入截断静默丢共享第 9~32 个标签（存储上限 32）的邻居且不置 truncated——直接用全量。回归钉：10 标签邻居可见。
+- **fix(embedder): 批嵌入异常降级入锁。** `_encode_batch_with_retry` 的 except 分支在锁外调 `_maybe_degrade_to_cpu`（内部有锁）——CUDA OOM 竞态窗口下降级可重入；改 `with self._embed_lock:` 包住。
+- **fix(semantic_conflict): 半刻钟值归一崩溃 + 谱系版本尾零。** ①`normalize_value("半刻钟")` 走分钟数乘法分支产出 `7.5分钟` 前先 `int()` 抛 ValueError——刻钟分支改浮点乘法+整值收敛（`7.5分钟`）；②`_lineage_primary_version` 把 `v2` 解析为 `(2,)` 而规则侧 `v2.0` 是 `(2,0)`，同代判定恒 False 误 veto——解析后去尾零。
+- **fix(gate): 负样本桶 miss 方向 + sync 受门 + 死条目清理。** ①`.miss.` 全局子串把负样本桶（by_shape governed_negative/noisy、by_label noise）的 miss 扫进 lower-is-better，与同注释块「miss 保持 higher-is-better」声明自相矛盾——负样本 miss 上升是改善，真改善 >10% 会假 FAILED（E3 同类事故二次形态）；`_negative_bucket` 前置判定收口。②owner R8 非对称收益口径落地：负样本桶 SYNC firing 直接出现在写响应、侵入性高一档——保持受门（lower-is-better）；其余 sync/async 单项维持 cand2 豁免。③`_GATE_DOCTRINE_EXEMPT`（noise.async.rate）与 `_CONFLICT_FALSE_LABELS` 的 governed_negative.async 均为永不可达死条目（被 split 跳过在先），删除；方向断言测试 10 例 + gate 集成 2 例。
+- **fix(eval): 语料 cf-noise-11 shape 污染修正（corpus bump conflict-v4-noisy）。** cf-noise-11-917-918 于 2026-09-22 校准轮翻转为 true_conflict（owner 裁定），但 shape 仍是 governed_negative——负样本桶混入真对双向污染 gate 判分（真桶 firing 被当负样本误报判 lower-is-better、负样本 miss 方向被带偏）。shape 改 write_opposition、adjudication 留痕、label_overrides 同步、`conflict_corpus_version` bump `conflict-v4-noisy`（语料变更必须 bump 并重建基线），基线全量重跑落新档。**probe 量尺口径修正**：probe_conflict_vector_stage 的 right 最佳句对余弦原取 `sim.max()` 全池最大（无关记忆行抬高量尺，FLOOR 标定偏松）——限定 right 记忆行重算。**注释契约同步**：compute_pair_score docstring 与 constants.py 权重注释的 band 除数 `/0.20`（G6 时代口径）同步为 fc9bcbb 拍板的 `(CEIL-FLOOR)=0.38`。
+- **fix(upgrade_cli): conflict_only 升级文案与同页 mismatch 披露自相矛盾修正。** 「no model loading or embedding recomputation is required」是无条件过期承诺——管线版本一旦轮换，克隆库必然 mismatch、保留空间 disabled 待重建，同页 Vector compatibility 行却显示 mismatch（0.17.0 终局不轮换、版本钉 2，本路径由未来可能的轮换触发）。文案改为如实：迁移本身无需模型；管线版本轮换时保留空间报 mismatch、需本地模型 rebuild_evidence（0.17.0 轮换中）。
+- **fix(scan): 慢车道轮级记账漏 machine_cleared（Round 1 清单漏落，Round 2 复查发现补齐）。** kick 慢车道复制快车道记账只累计 queued/internal，`machine_cleared`（机判清除）从不入轮级计数——观测口径与快车道不一致；补齐后该计数只会上升（higher-is-better 门方向不受影响）。后续全量重跑落最终基线。
+- **拍板记录（2026-09-26）**：①claims_backfill 全链不做 workspace ACL——claims_backfill 是修数工具，workspace 语义是「查询返回结果范围限定」而非 agent 隔离边界；②update claims 门不强制（维持 2026-09-25 拍板），编辑断流由本批方案 C 继承兜住；③扫描侧三件（通道 B/去重/priority）全补；④语料现在修+基线重跑；⑤EMBEDDING_PIPELINE_VERSION 记档不 bump。
+
+### Changed (0.17.0 追加包：未发版 commit 整体两轮 review 修复批 Round 2——性能+结构，2026-09-26)
+
+范围：Round 2（性能优化空间+代码结构合理性）owner 拍板五项全落地；实施后 workflow 对抗复评（6 文件域分片+逐 finding 反驳验证：确认 11/反驳 1，去重后 7 项）全部回修。全量 2806 passed+ruff+mypy --strict 绿；eval 全套件与基线一致（两项固有抖动归因：noisy.sync 3 秒窗沿对、K13 keyword 并列分排序微抖），基线 baseline-0.17.0-r3.json 落盘、gate 自校验 PASSED。
+
+- **feat(claims): attr_norm 精确键通道接线（owner 拍板④改接线）。** `_claims_exact_lane`：attr_norm 精确相等的对立不依赖向量、不受 KNN k=10 窗口限制、不需要 sqlite-vec，在 KNN 之前运行——无 vec 环境是唯一还能产出 claims 冲突 notice 的通道（无 embedder 落行/embed 逐条失败/backfill replace 清向量的记忆不再检测静默）。与 KNN 通道共享后续闸（值对立+A4 共存否决+pair-closure 去重+通知帽）；fired_attrs 跨道共享实现 A3 去重（一 attr 一 notice/写）；D1 versional 豁免计数只在精确通道做一次（KNN own 级只跳不计数防双计）；peer A4 共存推导 `_coexistence_by_attr` 单遍本地化（替代每 hit 的 N+1 coexisting_values 查询）。
+- **fix(claims): 精确通道三处复评修复。** ①vectors_pending 早退分支（vec 可用但本记忆 claims 向量缺失）曾硬编码 `channel_b_notices: 0` 并丢弃 `_surfaced_peers`/capped/versional_vetoed/exact_checked——回执误报 0、通道 C 共享帽少报、A-cross 对同对二次通知（dedupe_key 按 notice_type 分键不互拦）；改为与 vec_free 分支同构携带 exact lane 真实结果+`reason: "vectors_pending"`。②D1 hit 级豁免补齐：own attr "releasenotes"（raw 非版本al）与 peer attr "release notes"（raw 版本al）attr_norm 归一相等（剥空格 defeating 词边界）时精确通道曾误报 claim_conflict，且 fired_attrs 封死 KNN 侧救济——候选循环补 peer RAW attr 的 `attr_is_versional` 判定（豁免计数可见、不记 fired）。③候选上限 10→100（CLAIMS_EXACT_CANDIDATE_LIMIT）并新增 `channel_b_exact_capped` 截断回执——此前 SQL LIMIT 10 静默截断与三处「不受 k=10 截断」docstring 直接矛盾（热 attr「状态/负责人」超 10 行即丢对立 peer）。④不再吞 `sqlite3.Error`：异常上抛走 wrapper 的 `claims_channel_error` loud 路径（与 KNN lane 一致，counted never silent）；scan_pipeline 透传补 `channel_b_reason`/`channel_b_exact_capped`。
+- **feat(notice): content 指纹补齐全 5 通道（owner 拍板①）+ 五站点 payload 收编 `_conflict_notice_payload`。** 精确/KNN/桥/通道 C/A-cross（含 backlog）全部 notice 的 payload 统一经 helper 产出：仅当站点手上有内容时写 `evidence_content_hash`（空串不算——纯 SQL 站点无内容不伪造指纹）；member evidence 与 left/right evidence 的偏移键名差异（start/end vs start_offset/end_offset）由 member_extra/evidence_extra 双参数吸收；attr_cos 仅非 None 时写、零值键不出现（§3.3 惯例）。
+- **refactor(receipt): 回执键三套统一（owner 拍板③）。** ①通道前缀统一 `channel_b_`/`channel_c_`（旧 `claims_*`/裸 `notices` 全改）；②内部跨通道键统一下划线前缀 `_surfaced_peers`（wrapper MUST pop）；③回执尾部（elapsed_ms/pairs_examined 仅非零/qwen_budget）收编 `conflicts_receipt_tail` 一处盖章——finalize/wrapper terminal/process_conflicts 三处漂移合一（terminal 分支曾漏 elapsed_ms）；零值键不出现（pairs_examined=0 不再无条件盖章）。**破坏性**：回执消费方需按新键名对齐（channel_b_checked/notices/capped/versional_vetoed/unresolved/exact_checked/exact_capped/reason；channel_c_checked/notices/capped/versional_vetoed/unresolved/_reasons/deadline_stopped）。
+- **refactor(evidence): `_conflicts_deterministic_collect` 557 行拆 4 私有方法（owner 拍板②本批一起修）。** `_collect_applying_slots`/`_collect_internal_pairs`（O(n²) keeper 采集，SEMANTIC_INTERNAL_MAX_ROWS 独立帽）/`_collect_neighbour_screen`（G5 邻屏→allowed_memory_ids）/`_collect_order_candidates`（C4 overlap+pair_score 排序）——ctx dict 纯结构移动，无行为变化。
+- **refactor(db): scan_rule_candidates 从 db/evidence_store 搬至 ScanPipeline（owner 拍板②）。** 规则候选组装是业务编排非存储原语（证据/行向量 KNN 才是）；纯移动（SQL/参数绑定/成员 dict 键集不变），db/core 委托删除，全库无残留调用方。连带：row_knn `include_content` opt-in（False 路径 SELECT 与旧版逐列一致）、通道 C 行向量 `row_vectors_for_ids` 循环外一次批取（逐 hit 单查退役）、通道 C `skip_peers` 死参删除（A 已入队去重由扫描侧 skip 集合承担）、`_process_memory` 单读连接（多次借出合一）、`_examine_internal` 上限对齐 SEMANTIC_MAX_ROWS。
+- **chore(units): 单元向量全局退役的残迹清理。** SEMANTIC_MAX_EVIDENCE_UNITS 常量/导入、max_units 计算、`segments_capped_reason` 恒 "rows_capped"、`_TECHNICAL_REASONS` 删 evidence_units_capped；eval/score perf 死指标 units_* → rows_capped_rows（render_markdown 残留引用 units_budget 曾致全量渲染 KeyError）；scan_pipeline outcome 的 `auto_rejected` 键保留（历史对账口径）。
+- **fix(eval): gate 负样本桶 noisy 收口（复评 P1）。** pairs_noisy 26 对=true_conflict 15+coexist 2+noise 9（58% 真对），整桶按负样本定方向两头都错：miss 上升（真对漏检变多）被当改善放行、sync firing 上升（多为真对正当检出）被当假阳性误杀（本轮 noisy.sync 3→2 的 3 秒窗沿抖动即假 FAILED 实证）——noisy 从 `_GATE_NEGATIVE_LABELS` 移除，回归普通桶口径（miss 受门、sync/async cand2 豁免）；governed_negative（纯负）与 noise 标签不变。
+- **fix(db): claims 层配套。** `claims.insert` 闭包 `nonlocal written`（F823 计数失效）+insert/attr_conflict_candidates 增 conn 可选参数（热循环复用读连接）。
+
+### Added (0.17.0 追加包：Console 记忆关系图谱，未发版)
+
+- **feat: Console Memory Detail 页新增"关系图谱"面板（ego graph）。** 新只读端点 `GET /api/memories/<id>/graph`（`console_server.py` 路由 + `ConsoleAPI.memory_graph`）：一跳边按优先级采集——open 冲突组（`conflicts.member_versions`，带 conflict_id 可跳冲突详情）、pending `conflict_backlog` 候选对（pair_score 作权重）、同 subject active 记忆、共享标签 active 记忆（overlap 计数）；每源设 cap + `truncated` 标记，总邻居 ≤24。entity 边刻意不做：`metadata.entity` 已随 G3 退役（新写入一律剥离），只对 0.16 遗留行生效会误导。附带 `memory_history` 版本时间线与 `internal_conflicts` pending 对计数。前端沿用内联 vanilla JS 架构：Canvas 径向分组布局（按边类型分扇区着色，superseded 节点虚线描边，点击节点跳详情），下方保留同数据列表作可访问性兜底；I18N 双语。workspace 隔离沿用 `_strict_workspace_required` + `workspace_scope_sql` 现有口径。**两轮自审修正**：①冲突/候选边与节点拉取补上与 conflict_detail 同形的读 ACL（strict=全体成员可见否则整组不画、none+explicit=单 canonical 匹配），节点按 scope 过滤并剔除指向已删除/越权节点的边——原实现会经冲突成员泄漏跨 workspace 主题；②版本历史条原要求 ≥2 条历史记录才显示，单次编辑的记忆（1 条快照+当前版本）被整个隐藏，改为 ≥1 条即显示并补当前版本 chip；③多类型邻居节点原会被重复计入多个扇区导致扇区重叠，改为按边优先级只归首个类型。
+- **feat: Overview 工作区分布可展开全量。** 原为硬编码 top-3（`slice(0,3)`），实际库有 20+ workspace 时其余不可见；改为卡片头显示总数 pill、超过 3 个时底部出"显示全部 N 个 / 收起"切换（`state.wsExpanded`，重渲染不重新请求）。**口径澄清**：`by_workspace` 是 audit 语义（全部未删除记忆，含 superseded/retired），单独展示易引起"264 条活跃？"的误读；`overview` 新增 `by_workspace_active`（按 status='active' 分组，沿用同一 workspace scope SQL），卡片每行改为 "active / 总数"，desc 双语注明总数含已废弃与退役。
+
+### Changed (0.17.0 追加包：检索线——关键词模式查询+召回余弦档位，owner 2026-09-24 拍板，未发版一次性收敛)
+
+方案：docs/mema-keyword-query-and-cos-bands-2026-09-24.md（mema #1065；两轮方案 review——对码轮+独立对抗轮——修正全部回写；实施后两轮 review 待追认三项见方案 §8）。不加新参数：Agent 现有的「向量 唯一键 冲突」式空格短词查询升为一等形态，三入口（find/batch_find/expired）共用 search_memories 底层一次改齐。
+
+- **feat(K1): 关键词模式判定+中间带救济。** is_keyword_query 纯函数（空格分隔 2~8 token、全部 1~4 字纯 CJK 逐字判定；4 字上限为实施中拍板放宽）；evidence-only 候选（无词法席位）best 行真余弦落 [0.52,0.75) 且 content/subject 含任一关键词 → 融合分 +KEYWORD_RESCUE_BOOST(0.01×300=+3.0 final)，先于 _soft_rerank 生效；区分度闸 KEYWORD_RESCUE_DF_MAX=5——关键词在池内合格行命中 >5 视为话题词不救济（七池探针实测分离带：桥接 5/纪律 2/做法 1 vs 脚本 8/计划 8/评估 10/预算 12/操作 17/数据 38）。整 token 子串匹配不切词（owner 拍板：查不到说明查询关键词不对，不强行匹配）。**修复先在缺陷**：evidence-only 行重建 preserved 白名单漏 _evidence_best_score，G2 余弦精确席对纯向量候选从未生效。
+- **feat(K2): 向量准入线 COS_RECALL_FLOOR=0.52。** evidence-only 候选 best 行真余弦 <0.52 整条不进结果（词法候选豁免，维持排名+8.25 双保险）；仅 active 查询路径生效，expired 审计豁免（宁滥勿缺沿 8.25 既有口径）；真余弦缺失 fail-open。0.58 档实测删 A04(0.567)/A12(0.543) 两条已在 top10 内的 relevant（R@10 0.889 击穿 ≥0.93 门），owner 拍板降 0.52 留余量。**换嵌入模型或语料扩版必须重标全套档位（COS_RECALL_FLOOR/COS_MIDBAND_CEIL/KEYWORD_RESCUE_BOOST/KEYWORD_RESCUE_DF_MAX 一并重标——DF 闸是绝对计数口径，分离带实测自 298 记忆语料，不保证迁移）。**
+- **feat(K3): 语料+基线+文档。** K 组 13 题关键词模式专属考题（expected_band 实测定档：midband 10 + above 3，探针 eval/probe_keyword_bands.py 与 G2 同口径），corpus bump recall-v2-kw；runner 补 batch_find 通道一致性硬断言（≤8 题/批、deduplicate=false、limit_per_query=10 逐位比对，不一致 raise）；score.py 补 keyword 分桶（题级命中率+target 级微平均双口径）与 recall 语料版本 gate 前置校验。AB 验收（recall-v2-kw）：无空格 13 题逐位零 diff、原 45 对 R@10=42/45 与 MRR=0.8772 和基线逐位持平、K 组题级 top10 命中 13/13、self-recall 98/98、batch_find 一致性 0 mismatch、误召回计数持平。误召回口径（owner 2026-09-24）：看是否排在相关结果之后，不设条数硬门。
+
+### Changed (0.17.0 追加包：Qwen 预算重排+冲突综合召回，owner 2026-09-24 拍板，未发版一次性收敛)
+
+方案：docs/mema-qwen-budget-reorder-plan-2026-09-24.md（mema #1066；施工前两轮 review——对码轮+对抗轮——修正全部回写方案 §9.1）。Q1=机制（本段），Q2=测试，H1/H2=综合召回归度量（见下段）。
+
+- **feat(Q1): Qwen 预算重排+相分裂（owner D1/D2/D7）。** 写 job 顺序 A→B→C 翻转为**确定性相→B→internal Qwen→C→A-cross 派发相**：`process_conflicts` 拆 `conflicts_deterministic_phase`（索引发布+G5 名单+候选池排序+internal keepers+截断早退，零 Qwen）/`conflicts_internal_qwen_phase`（保护帽 ≤3）/`conflicts_dispatch_phase`（A-cross 循环，dispatch 子方法独立读快照——review R1-5：B/C notice 落在两相之间，探测须见派发时刻的世界）/`conflicts_finalize_receipt`（回执合并形状兼容）。**`SEMANTIC_MAX_EXAMINED_PAIRS=10` 语义升级为 job 全局 Qwen 池**（`_JobQwenBudget`，wrapper 局部显式传参——review R2-3 禁挂实例属性）：internal 保护帽 ≤3 先于 C（D7）→ C 按实际派发扣池**可扣穿不可被拦**（D3，budget_sink 回调——review R1-4：claims_checked 含 inactive/backend-None 对会高估侵蚀 A-cross 余量）→ A-cross 余量 max(0,10−internal−C) 门控。**预算耗尽 break→continue**（D2 落地）：direct 判定照常落地、未派发对进 backlog、饱和不终止确定性检查。**跨通道去重方向翻转**：B∪C surfaced peers 并集进 A-cross skip 集合（review R1-3——方案原文只写 C），B/C 经内部键 surfaced_peers 回传、wrapper 收走。**通道 C 查公平墙**（review R1-1：无对数帽的 C 排在 A-cross 前，不查墙会繁忙队列事实饿死 A-cross 并级联公平墙）。**截断编排钉死**（review R1-2：确定性相截断 → internal/派发跳、B/C 照跑、池不动，等价旧行为）。回执 additive 键：`qwen_budget{internal,channel_c,a_cross,a_cross_dispatch_skipped}`（有预扣或跳过才出块）+`direct_verdicts`（A 确定性直出计数，阶段二归因依赖）；`pairs_examined` 口径=internal+C+A-cross（数值上=旧口径+C）；零值不出现、无新键形状测试钉死（§3.4-5）。**B 桥段 Qwen（≤2/写，自带帽）不入池**——方案 §3.1 称「B 零 Qwen」系 G6 桥前口径，实施偏离记此。B/C 各自独立异常守卫（B 失败不再拖死 C）。
+- **feat(Q2): 相分裂行为测试钉。** §3.4 全清单（7 组）：C 扣穿饱和（派发 0/direct 照落/backlog 落账/skipped 键）、C 先于 A-cross 的顺序断言、预算算术（internal 1+C 2→A-cross 7）、去重翻转、无 claims 无邻居零活动回执与旧代码逐位一致、句料库行为门、E10① 回归。全量测试+ruff+mypy 绿。
+- **feat(H1): 冲突综合召回 headline（owner D4）。** score.py 新增 `score_conflict_comprehensive`（conflict ∪ conflict_claims 两语料合并 any-channel：Σidentified(true)/Σtrue + 合并精确，sources 给出两语料分子分母明细；块形状只含 recall/precision/counts——_flatten 全块自动进相对门，细分桶不入块 R2-6）+ `score_conflict_attribution` 分通道归因表（诊断不进 gate：A 直读回执 qwen_budget 分量/direct_verdicts——pairs_examined 全局口径后不再用差额推算 R1-6；B/C 按语料 channel 标 identified；markdown 报告两节渲染）。runner 回执白名单 +qwen_budget/direct_verdicts（旧 raw 缺键按 0，纯函数对存档 r1-r5 可跑）。**旧基线可比值零模型**：对存档 r1-r5 重跑新 score.py，comprehensive 五轮逐位一致且= r1 scored 手工推算锚 recall 18/58=0.3103、precision 18/24=0.75（review R2-7 sanity 通过）；回填进 baseline-0.17.0-gate-v2.json（baseline_meta 注记：该文件 corpus_version=recall-v1 vs 当前 recall-v2-kw，gate() 顶层校验先拒——回填值供人工对比与 Q1/Q2 直接键对比，正式门基线由 H2 新基线承担，R1-7）。corpus_version 不 bump（语料零改动）。
+- **feat(H2): 新门基线落盘。** `baseline-0.17.0-qwen-reorder.json`（Q1 机制后重定基线）：r1 全套件跑（conflict/conflict_claims/comprehensive 与 gate-v2 基线逐位一致——Q2 行为门同款结论；comprehensive 0.3103/0.75；自召回 98/98），gate 自校验 PASSED。**五轮程序按 owner 2026-09-24 拍板裁剪为 1 轮**（90 分钟全量跑不可接受；确定性依据=G7 已实证 Qwen 五轮零波动+Q2 行为门逐位一致，baseline_meta 如实注记，需要时空闲补跑满五轮核对逐位一致）。此文件取代 gate-v2 基线承担 Q1 后正式门基线（R1-7）。
+- **fix(review): 实施后两轮 review（对码轮+独立对抗轮）修复批。** **P1 归因块进门**：H2 基线携带的 `conflict_attribution`（7 个诊断计数键，`_identified`/`_total` 下划线命名躲过 gate 的 `.count/.total/.n` 后缀排除）全部成为相对门键——归因计数下降（过滤变好→Qwen 派发变少）本就是 D1 的预期效果，判回归属门语义错误；修复=gate() flatten 前整块剔除 + comprehensive sources 分母明细键（`.true_total`/`.true_identified`）进 `_GATE_META_KEYS`（对抗轮同根发现：sources 四计数键同样漏进门）。**P2 派发相跨快照证据/版本错位守卫**：R1-5 双快照后 hit 证据来自确定性相快照、peer 版本来自派发相新快照，两相之间 peer 被编辑会落「旧版本行文本+新版本号」错位 notice——派发循环入口 `memory_row_version != peer.version` 视为 settled（不派发、不进 backlog、下次写重收集）。**P3 三项**：通道 C 撞公平墙停走出 `channel_c_deadline_stopped` 条件键（§3.3 loud 惯例，繁忙队列归因依赖它）；`incomplete_reason` 三处统一首因语义（break→continue 后 cap/deadline/notice_write_failed 相互覆盖漂移，旧 break 无此窗口，注释已如实）；截断 terminal 回执合并 qwen_budget/pairs_examined（C 在 terminal 路径照跑，实际派发不再不可见）。**已知取舍记此**：B/C 独立异常守卫下 B 中途异常的 partial notice 不回传——C 的共享通知帽与 A-cross skip 集合对该 partial 少记账（B 是纯 SQLite 确定性通道异常罕见；旧代码 B 异常连 C 都不跑，新行为检测覆盖更优）。测试 +4：版本错位守卫/C 墙停走键/C 浮出∧饱和组合/gate 诊断块排除。
+- **perf(harness): 全量一轮提速（owner 2026-09-24「20 多分钟太久了」当场拍板）。** 时间构成拆解：conflict 套件 1114s 里 ~420s 是 140 次写入 × 3s 写响应同步窗——该窗只养 sync/async 诊断拆分（gate 早已排除 `.sync.rate`/`.async.rate` 单项，cand2 拍板行为指标=identified/miss/recall/precision），且套件逐对 `wait_task(180s)` 等 job 完成、异步采集不依赖窗口；另 recall+similarity 与 conflict 是互不相干的独立临时库却串行跑。三改动：①runner 新旗标 `--conflict-sync-wait-ms`（默认缺省=库默认 3000，基线可比性不变；调小只改 sync/async 拆分，行为指标逐位不变，env 如实记录生效值）；②`--parallel`（suite=all 时 conflict 库道拆子进程与 recall+similarity 并行，子进程 stdout 直通、失败按退出码大声报错，子 raw 合并进父 raw 后删除）；③gate() 排除 `env.*` 环境元数据键（同步窗等运行配置正当可调，绝不进门）；④提速二（owner 追问「非验证冲突的写入能不能不付 3 秒窗」）：`--setup-sync-wait-ms` 默认 0——每对左成员是 setup 写、不是被测事件，sync 指标只从右（被测）写响应读，左写窗口默认关闭（左 job 落后台、与右写/右 job 自然重叠），右写保持 `--conflict-sync-wait-ms`（默认 3000），**默认旗标即得提速且 3 秒 sync 语义保留**；env 增记 `conflict_setup_sync_wait_ms`。预期全量 ~22min → ~10-11min（Qwen job p50 3.2s × ~120 job 是不可压下限；再快需跨对并行派发，牵动公平墙语义，挂观测不做）。
+
+- **fix(claims): update+claims 确定性崩溃修复（2026-09-25 外部 workbuddy 会话实测三形态复现）。** update 的 claims 落库钩子（P2-5.2 对抗 review P1-3）把 post-edit record 以 **dict** 形态传进 `_persist_claims_for_version`，而函数体内 `record.content` 是属性访问 → `'dict' object has no attribute 'content'`——claims+new_content 与 claims+patches 两形态自 P2-5.2 上线起 100% 崩溃（claims-only 被拒属既定契约「claims 必须与内容编辑同行」非 bug）。修=函数内鸭子取 content（`isinstance(record, dict)` 分支），MemoryRecord/_Rec shim 两形态不受影响。**该崩溃能存活至今的根因是 update+claims 钩子从无端到端测试**——补两形态回归钉（claims_written + 新版本 claims 行落库断言）。
+- **fix(claims): 修复后对抗 review 收尾批。** 修复本身无缺陷（三调用方 record 形态/version 语义/replace 语义/全仓调用方普查逐项核过）；相邻缺口两项当场修：①backfill 兜底补防渗规则（`attr_contains_value`——schema `_v_claims` 硬拒同款，原先 backfill apply 可落 remember/update 必拒的 claims）+空 attr/value 从静默蒸发改进回执（`empty_attr`/`empty_value`）；②负分支回归钉（值不在新 content 逐条回执、显式 `[]` 声明无 claims 落 0 且旧行孤儿化）。**遗留项 owner 已拍板（2026-09-25）**：update 路径**不强制** claims 灰度/强制门（owner：更新场景属性不明确，覆盖/追加语义两难——维持现状：claims 缺失不警告不拒，旧行孤儿化由 backfill 兜底）；tags_only+claims 静默吞、治理路径 claims 断流靠 backfill 兜底——记案。
+
+- **fix(gate): 负样本误报判分方向修正（owner 2026-09-25 拍板，E3 实证驱动）。** `conflict.by_shape.governed_negative` 的 firing 类指标（identified/sync/async）是负样本误报——lower-is-better 才对，原 higher-is-better 把本次 FP 改善 7→6 误判 FAILED（31 条少数样本语料 14.3% 跌幅超 10% 阈值）即活证。修=入 `_CONFLICT_FALSE_LABELS` 精确段匹配（`governed_negative.identified/sync/async`），miss（负样本上不报=正确）保持 higher-is-better 不受牵连；+方向双向测试。
+- **拍板记录（2026-09-25）**：①行上下文 envelope **保留**（E3 实测误报降、召回持平、C FP=0 守住，详见 envelope 方案 §9.4）；②update 不强制 claims；③**发版上线要求追加：0.17.0 上线时必须强制提示存量用户更新向量值（全量重扫+重嵌），doctor 同步提示，完成前提示不消失**——落 embedder 前缀方案与发版 checklist。
+
+### Changed (0.17.0 追加包：embedder 任务前缀 + 阈值全量重标，owner 2026-09-25 拍板，未发版一次性收敛)
+
+**终局采纳（owner 2026-09-25，publish 错位 P0 修复后重测定案）：全链 query 前缀（query×query）**——`EMBED_PREFIX_STS` 值改为 query 前缀（历史名保留，语义=存储/配对侧统一前缀）。依据（eval/results/all-qxq-fix-r1，publish 修复后）：检索 R@5 0.8621（优于无前缀 0.8448）、R@10 持平 0.9483、自召回 98/98（同 subject 家族口径，owner 拍板「11 条同 subject 有 10 条进前 10 即正确」——`run_self_recall` 增 family_hit 计数）；冲突 15/43=0.3488（优于无前缀 14/43）、综合 0.4483/0.8125（双双为历史最优，首次大幅突破 0.372 门）；FP 面不升。**基线 `baseline-0.17.0-qxq.json` 取代 prefix 基线，gate 自校验 PASSED**。同日否决：BGE-M3 换模型（写入 p50 +87% 吃掉 3 秒同步窗，mema #1075——其探针负 gap 未传导 E2E，横评以 E2E 为准）与 bge-reranker 重排（同步 +3.13s/查询、值对立对分数离散，mema #1076）。阈值维持不动（带门 0.50-0.65 覆盖率饱和）。
+
+方案：docs/mema-embedder-prefix-recalibration-plan-2026-09-25.md（mema #1073；两轮 review——对码轮+独立对抗轮——修正全部回写 §9.1/§9.2）。根因=mema #1071：`embed_text(prefix, body)` 的前缀形参从未被用（全仓 25 处 `prefix=""`），EmbeddingGemma 训练带任务 prompt，相似度判别不准的根因即此（句对二分 77.8%→100%，分离度 gap −0.0782→+0.0293）；#1072 选型保留 EmbeddingGemma-300M 只补前缀。
+
+- **feat(P1): 任务前缀分型落地。** 新常量 `EMBED_PREFIX_STS`（存量/配对：行、attr、summary、subject_tags、workspace——M0 实测 sts 配对分离度与探针 9/9 全优）与 `EMBED_PREFIX_SEARCH`（检索查询，self-recall 96/98 ≥ 现状 95）；25 处裸调用按（存储侧，查询侧）配对语义改型，`embed_texts` 增 prefix 形参且 batch 路由与单条路统一 `prefix+"\n"+body` 拼接（batch 资格判定扣 prefix 长度，防 n_batch 截尾分叉）；`EMBEDDING_PIPELINE_VERSION` 2→3（space_id 轮换触发重建链）。**对抗轮 P0 修正**：WRITE_SIMILAR_SUBJECT_FLOOR 0.72 回退 0.45——该阈值消费方是 difflib 词法 ratio 非 embedder 产物，M0 的 sts 余弦是错尺。
+- **feat(P3): 阈值重标（每组带 M0 分布数据锚，`eval/calibration/prefix-calibration-m0.json`+`eval/probe_prefix_matrix.py` 落档）。** 冲突带 FLOOR 0.60→**0.70**（sts true_min 0.7467/p5 0.7612，44 真对全保留）；CEIL/EXACT_BOOST 0.98 不变（近重复 0.9965 仍排除；true 9 条 ≥0.98 过顶落 duplicates=既有 doctrine，harness 复验）；CLAIM_ATTR_TAU 0.70 不变（异属性 max 0.584，余量 0.116）；**通道 C 独立下沿 `SEMANTIC_CHANNEL_C_COS_FLOOR=0.60`**（attr↔row 跨型几何与 row↔row 不同：min 0.5696/mean 0.7037，维持旧值待带标签 M1 数据）；检索 FLOOR 0.52→**0.48**（relevant best min 0.5085/p5 0.5238）、MIDBAND_CEIL 0.75→**0.67**（relevant p75 0.6718）；gates band 除数改 (CEIL−FLOOR)（原硬编码 0.20 与带宽不符）。E 组（workspace 三阈值 0.25）**回退不动**：sts 下真实 11 对 alias 距离 max 0.4264 超闸，但负例分布未测、0.45 有相似名折叠风险——挂观察待补负例语料。
+- **feat(P4): 升级强制提示。** doctor `vector.space` mismatch/failed 时 detail 带「升级待办：执行 memory_repair(task='rebuild_evidence')」指引（owner 指令：完成前不消失）；vec_disabled 警告五处统一 `vec_disabled_warning()` 带 rebuild 指引（boot 不自动重建——对抗轮 P0 实证 rebuild 唯一入口是显式任务，boot 只武装 mismatch）。
+- **test(P2): M0 标定脚本+数据落档；测试夹具全量重校。** FakeEmbedder 家族 13 处补 prefix 形参；recall floor 夹具 0.4805/0.4 夹逼（float64 教训同款）；冲突带夹具 cos≈0.75；keyword 救济带参数化 [0.47/0.66/0.67/0.90]（0.67 恰在 ceil 钉半开边界）；scan 家族 fake 夹角 cos≈0.72（新带内且名字距离 0.28>0.25 不折叠）；char-histogram fake 改 body-only（前缀字符不参与分箱）；doctor golden space id 掩码 `<SPACE_ID>`（版本绑定值）；space id/pipeline version 字面钉同步 v3。全量 2792 passed+ruff+mypy 绿。
+
+### Changed (0.17.0 追加包：检测行上下文 envelope——碎行召回修复，owner 2026-09-25 拍板，未发版一次性收敛)
+
+方案：docs/mema-row-context-envelope-plan-2026-09-25.md（mema #1070；D1 context=标题+前后邻行帽 300 字/D3 翻案 C 接入 peer 侧且 FP=0 硬线/D4 值须取自主行/D5 方向验收；对码修正：服务内扫描侧无 Qwen pair 路径，D2 无对象）。
+
+- **feat(E1): 行上下文 envelope。** `rowseg.row_context_text`（所属标题+前/后最近非空非标题非分隔行，分部截断 80/110、总帽 300，空返回不设键）接入 A-cross 派发两侧与通道 C peer 侧（row_knn 自带偏移+content，零新增查询）；prompt **pair-v9→pair-v10**：**系统提示词与 v9 逐位一致**（slow 校准对实证：仅加一行上下文指令即扰动 0.6B 长值对抽取两连挂），上下文契约下沉到仅 context 出现时才渲染的用户段（「仅供判断属性归属，属性与值必须取自下方证据原文」，中英双份；无 context 渲染与 v9 逐位兼容）；`CONFLICT_DETECTOR_VERSION` bump gate-v2-three-dispatch-v5→**row-context-envelope-v6**（发版全量重扫契约照旧）。grounding 契约零改动——校验只读 quote（主行），机制上挡住从上下文捞值。
+- **test(E2): 行上下文行为钉。** row_context_text 构造六组（装配/跳过空行分隔行标题/分部截断/空返回/跨行句）、A-cross 双侧 envelope context+quote 主行原文+internal 无 context 范围钉、C peer 侧 context+claim 侧不带、pair-v10 渲染（有/无 context/EN/示例标记唯一）、D4 契约（值取自上下文→qwen_unverified，值取自主行→notice_ready）。
+- **fix(E-review): 实施后对抗 review（独立 agent）修复批：1 P2 + 5 P3 全修。** P2 truncation retry 未同步缩 context——双长行+双侧满 context 的 retry 形态被 n_ctx 守卫确定性关死（est×1.3+64+512≥2048，长对一次 invalid 即终局），修=`_pair_text` 增 `context_cap`、retry 传 `SEMANTIC_PAIR_RETRY_CONTEXT_CHARS=120`+渲染钉；P3 prev 截断方向反（尾部贴主行应保尾切头）+P3 空行屏障（邻行不跨 section，修「表二行挂表一行」实测污染，分隔行透明跳过）——row_context_text 改双向独立扫描（向上/向下遇空行/标题即止）；P3 通道 C content 回退优先级取反（hit 自带 content 与偏移严格同版，改 `hit.content or peer.content`）；P3 系统提示词逐位钉升级为 sha256（子串缺席防不住其他措辞漂移）；P3 方案文档 backlog「无 Qwen」措辞修正（无 stored extraction 的排空派发是真实 Qwen 调用，行为取舍不变理由改准确）。
+
+### Changed (0.17.0 追加包：冲突检测门 v2 分层重设计+召回融合修正，owner 2026-09-23 拍板，未发版一次性收敛)
+
+方案：docs/mema-conflict-gate-v2-2026-09-23.md（mema #1059；两轮方案 review——对码轮+两个独立对抗轮——的修正已全部回写实施）。漏斗架构：②″记忆级一揽子筛选 → B claims×claims（确定性零 Qwen）→ C claims×句子（attr 向量 KNN）→ A 句子×句子（初筛[编排可选层：写入调用、扫描跳过] → 真余弦区间门 → 三情形 Qwen 分流）；写入与扫描=同一套层（pipeline/gates.py）的两种编排。
+
+- **feat(G1): capped recall 双口径。** R@k 分母 min(相关数,k)（微平均 Σmin(R_i,k)），classic 与 capped 并报；B03 形态（6 relevant、top5 装满）不再被 k+1 名罚分。
+- **feat(G2): 精确命中保底+证据分真余弦。** subject 归一相等或证据 best 真余弦 ≥0.98 → fusion +1.0（配额裁剪豁免——按原始名次收录会饿死晚进池的精确命中）；item 级新增 evidence_best_score/lexical_rank 透明键；#91（余弦 1.0、KNN 第一、find 排 15）修复。
+- **feat(G3)!: provenance 硬门退役+存储层单点剥离。** metadata.entity/scope 全链退役：序列化点三处（INSERT/UPDATE/update_metadata——第三处为对抗 review 发现）过 _strip_retired_metadata_keys；丢 notice 检查四处全改 slot 新口径 {entity=workspace 名, attribute, scope=subject 前 32 字}（claims 通道与 backlog 不改会整体消声）；keyed migration json_remove 存量清理（json_valid 保险）；vnext 迁移复制后补跑；写入响应废弃提示；scan 慢道 entity 层删除。
+- **feat(G4): 句子初筛（编排可选层）+claims 覆盖句跳过+候选真余弦区间门。** 词表=数字值|否定|时间锚|赋值形态（取值/配置为/上限/= 等——对抗 review：文本值对立是主形态）|表格行；claim value 位置定位覆盖句不从通道 A 发起（三通道零重叠）；cos∈[0.60,0.98) 区间门三处同构（写入/慢道/诊断通道），below-floor 丢、at-ceil 写入侧计 repeatability_skipped、诊断通道路由 duplicates_pool（治理合并池不被掏空）；初筛词表不含「使用/是」等超高频词（超宽进=初筛白做），「X 使用 A vs B」类留扫描侧 Agent。
+- **feat(G5): 记忆级一揽子筛选+KNN 邻居范围限定。** 标题粗筛一次（SEMANTIC_NEIGHBOR_SCREEN=50）→ memory_pair_excluded 三判（版本对立【双侧版本形态+主版本不同+去版本主干一致——cf-res-9 实证防误杀】/过程记录【从句子循环挪入】/发版方案形态）→ 排除名单 → 句子 KNN include_memory_ids rowid-IN 范围限定；2024 vs 2025 规划毙、0.16.12 vs 0.16.11 发版闭环毙、cf-res-9/27/28/29/30 真冲突不毙。
+- **feat(G6): claims 单边桥+三情形分流+排序重写。** qwen_dispatch（a 单边有值/b 双值待属性对齐/c 双属性待值对齐；direct 前置）+ pair-v9 prompt 指示语变体；PAIR_PROMPT_VERSION/CONFLICT_DETECTOR_VERSION 双 bump；_pair_score=0.40*冲突带+0.25*数值路由+0.20*值不等+0.15*否定（C4 overlap 降 tiebreak——同话题度在候选集内无区分度）；backlog 同公式；单边桥=无同名属性时 attr 向量定向捞 peer 句子 Qwen 抽值（帽 2/写，claim_bridge_unresolved 可观测）。
+- **feat(G6b): 通道 C claims×句子。** attr 向量在干净名单句子行 KNN → 区间门 → Qwen 情形 a；版本豁免 D1 分键计数；扫描侧同构入 scan_queue（claim 声明+句子双证据 check_hint）；skip_peers 跨通道去重。反向通道（邻居 claims×own 句子）不做，挂观测（方案 §5）。
+- **feat(G7/G7b): harness。** claims 套件 40 对（B 类四形态 5×4 + C 类两形态 10×2，grounding 自检），score_conflict_claims 分通道统计；baseline-0.17.0-gate-v2.json 于五轮基线跑后落盘（gate=新基线-10% provisional）。
+
+### Changed (0.17.0 追加包：单元向量全局退役，owner 2026-09-23 拍板，未发版一次性收敛)
+
+- **feat(C1): 嵌入器批量 API。** `ManagedEmbedder.embed_texts`——短条目（≤500 字符）一次 `embed(list)`（spike：跨 n_batch 零丢条、1.73x 墙钟）；超长条目单条走 embed_text 保预算截断一致；批量失败重试一次→逐条兜底（never-raises）；GPU→CPU 降级清批量闭包走逐条。backfill 接批嵌。
+- **feat(C2-C5): 工人合并+subject 行级化+单元向量全链退役（合批）。** 写入/编辑 post-commit 一个语义 job 一条龙（分段→批嵌→publish_rows 先于 Qwen→检测；四形态矩阵含 recheck_disabled/replay/off→index_only；队列帽 200；公平 deadline=max(墙,publish_done+timeout) 且墙已过截断优先）；**subject 行（A+ 拍板，R13 废止）**置首入索引（self-recall/placement 信号回归）但不作检测发起段；「很短。」类兜底行保证每条可索引记忆 ≥1 行；查询召回/outline/hits/过期通道/placement/扫描/诊断通道全部换行级（k=cap*16，聚合含 support 照用）；EvidenceStore.publish 退役、publish_rows 写事务四点收紧（单 SELECT 合并/content_sha 免重算/DELETE 子查询化/executemany）；memories.py 单元生命周期 SQL 退役+行级对等腿补齐（含 P2-2.3 遗漏的行删除腿）；space rebuild 全链换行表；subject 行级化存量迁移（keyed migration 重建表+清空重嵌，boot backfill 幂等补齐）。
+- **feat(C6): 守卫式单元表删除。** boot additive 迁移：一条 NOT EXISTS 守卫 SQL（非 deleted+可索引+有单元+无行=阻塞）满足才 DROP memory_evidence(+vec)，不满足下次 boot 再试；migration_state 键防重入；fresh 库不建单元表；backfill 选择器扩非 deleted（owner 拍板②：expired 族补行，过期检索向量通道保全）；vnext 迁移五处切行表（含两个 review 盲点修复：preserve 探针计数行表防异空间向量误判 ready、指纹行存储化）。
+- **feat(C7): 流式收集（独立可 revert）。** 首写路径嵌入与收集重叠：producer 线程批嵌（16/批、深度 1 队列）领先主线程一批，KNN+门在 GPU 工作时并行；值锚定排序前置保截尾；publish 收集后仍先于一切 Qwen。
+- 已知取舍记录：单线程串行吞吐（原两 worker 流水线合并，owner 接受单机低写入）；embed_texts 持锁期间 backfill 单条嵌入阻塞为常态；无单元回退路径（owner 拍板全局退役）。
+
+
+冲突/相似识别率提升（Part 2）。P2-0~P2-7 全量实施 + 两轮 review（第二轮对抗性）13 项修复；对 0.16.12 基线（conflict-v3-noisy 全量语料）的对比数字见发版前 harness 报告。**行为门：新表全部 additive（memory_row/memory_row_vec/memory_claims/memory_claim_vec/conflict_backlog）、memories.last_scanned_at 加列；claims 为 remember/update 新增必填字段（灰度 claims.required 默认 false 只警告）；发版须统一 bump CONFLICT_DETECTOR_VERSION 并触发一次全量重扫；上线时必须强制提示存量用户更新向量值（全量重扫+重嵌完成前提示不消失，doctor 同步提示——owner 2026-09-25 指令）。**
+
+### Changed
+
+- **feat(corpus): harness 真实噪音语料（P2-0）。** pairs_noisy.jsonl 26 对（每侧 291-332 字长段落；植入诱饵数值/中文时长/多值共句/否定句/样板话/表格行内冲突/A6 短句时长对）+ similarity cases_noisy.jsonl 16 例（三类负例在场使误报率可度量）；corpus bump **conflict-v3-noisy**、相似语料版本键 similarity_corpus_version 进 gate 前置校验；基线实测：0.16.12 在 noisy 桶 2/26（14 真冲突漏检 13、表格对真阳性、**「半秒 vs 500ms」同值对假阳性=归一化缺陷活体证据**）。
+- **fix(detect): 修复包四项（P2-1）。** 裸「复审」误 veto 收紧为评审记录语境（「每半年复审」政策对复活）；中文时长词折算（半秒/一刻钟/半小时/两秒/十点→数值单位，normalize_value 预折）；中文时长值抽取正则（单位前瞻扩 毫秒/秒/分钟/小时/刻钟/点 + 周期字负向后顾防「周四点评会」类误抽 + 半+时长预折 0.5）；few-shot 复读检测（值词 mysql/sqlite 在抽取不在两侧 quote → parrot_invalid → 去例句 system 重试、user turn 原样、计数进 usage）。
+- **feat(rows): 行级向量基础设施（P2-2）。** rowseg 分段器（散文按句/表格一行一条=表头列名:值拼接≤200 字/多行表头合并/≥8 字过滤/标题与 subject 不索引）；memory_row+memory_row_vec（parent_status 生命周期镜像 evidence_vec）；publish 同事务原子落行+单元（embed 事务外）；row_knn rowid-IN 同款；boot backfill + doctor rows.coverage。
+- **feat(detect): 冲突链路行级化（P2-3）。** process_conflicts 段源换行级（A1 时序桥=current_row_vectors 先读/job 内补/单元回退；帽 SEMANTIC_MAX_ROWS=256 值锚定行优先、rows_capped）；**属性向量门**（严格相等 OR attr_cos≥0.70，spike R8：A 组同义冲突属性名不对齐即死的复活；退化向量护栏）；pair_score 排序（值特征 0.60 + C4 overlap 0.40，只改顺序）；回执 rows_mode/rows_examined/dropped_unlocalizable/backlogged。
+- **feat(backlog): 写时冲突候选积压队列（P2-4）。** 截断/预算跳过对入 conflict_backlog（键=detector 版本+成员@version+行锚；500 帽按分淘汰计数可见）；语义 worker 空闲 5 秒 tick 消化（limit=2、新写入 notify 抢占、paused 不动）；stored extraction 直接过确定性门不重花 Qwen；doctor 队列口径并入。
+- **feat(claims): 结构化声明契约与零 Qwen 通道（P2-5）。** remember/update 新增 claims 必填（空数组=显式无；灰度 claims.required 默认 false；attr 1-64/value 1-64 且≤12 词/attr 不含 value）；逐条拒收回执 claims_rejected；memory_claims+memory_claim_vec（version 钉死、状态翻转迁移防孤儿、编辑重供）；**claims 冲突通道**（claim 向量 KNN rowid-IN 同 workspace+active+当前版本、attr_cos≥τ 或 attr_norm 相等、值不同、双侧自共存不报【A4】、provenance 软门、跨通道去重、5 条/写帽）；存量 backfill=memory_repair(task='claims_backfill') **agent 供给模式**（mode=pending 列缺当前版本 claims 的 active 记忆 50/批+id 游标 / mode=apply 交调用方大模型抽取结果，grounding+归一+attr 向量、replace 幂等）；doctor claims.coverage。**D1（owner 2026-09-23）：版本类 attr 时序豁免**——attr_is_versional 模式谓词（版本|version|commit|revision|release|tag|build|发版，谱系 veto 同风格单一实现），值差异=预期演进不报，own claim 级+hit 级（τ 近似面）两级拦截，versional_vetoed 计数可观测。**D2（owner 2026-09-23）：无人值守 Qwen 提取通道退役**（extract_claims/claims_from_text/「配置项」prompt 删除——常驻服务形态本就不可用，保留误导 agent；无 mode 返回 pending/apply 引导）。
+- **feat(scan): 扫描侧行级+慢车道+谱系 veto（P2-6）。** 跨记忆候选换行级 KNN（无行回退单元）；last_scanned_at 墙钟慢车道（20 条/kick 轮转全覆盖、slow_lane=false 可关）；谱系版本演进 veto（双侧自报 v 前缀/版本字样/第N版且主版本不同→演进不报；E2 产品版本差异保持候选）。
+- **feat(similarity): 写时相似检查 summary 向量化（P2-7）。** 候选生成换 memory_summary_vec（空 subject 不再取消资格）；细排门 content 3-gram 余弦为主门、subject 0.8 仅在内容重叠<0.60 时生效（改标题近重复过门）；subject_tags_vec 发布保留。
+- **fix(review): 两轮 review 13 项修复。** 谱系正则误杀（配置句式不当版本号）、慢车道 SQL 参数序、claims 编辑/激活孤儿、memory_claims 摘出 LEGACY_DERIVED_TABLES（防 upgrade/doctor 误判）、backlog 队头活锁、claims 帽计数+同 attr 单发+跨通道去重、性能三处（预取/并入/预 embed）、summary_vec 生命周期、replay 教学键、淘汰计数、doctor 覆盖率。已知取舍：epoch 不清 internal_conflicts（判过不重判契约优先）。
+- **feat(suppress): workspace 搬桶提示豁免（0.17.1 版本槽，2026-09-23 owner 拍板「一些闲聊的留在 default 的就行，用户确认过的桶就不要再提示了」；本追加包随 0.17.0 未发版收敛一并入库，发版切分由 release commit 处理；不与上面 embedder 批量线混 commit）。** 实施方案两轮 review（R1 对码 + R2 对抗）全部修正回写；三道机制都在**生成端**（提议根本不产生，不是产生后再压），对称口径：确认桶对之间双向不再提（折回与正向散件提醒一起停），default 作源的提议不受影响（真错桶捕捉能力保留）。
+  - **确认桶静默门（C1）。** `doctor.load_confirmed_workspaces` 共享解析 workspace_review sidecar（missing/corrupt→空集 fail-open；reserved default 永不入集→default 端点永不豁免）；scan_pipeline 两个搬桶提议生成器（写轮增量 `_enqueue_workspace_suspects` + 周扫 `memory_scan_workspace_anomalies`）入队前查门 A：own∈confirmed ∧ top_bucket∈confirmed 即跳过——weekly 侧在 suspected.append 之前（被静默条目不吃 cap=10 名额、不进 suspected/returned/queued 计数，suspected 新语义=过门且未被抑制）。
+  - **workspace dismiss 持久化（C2）。** 新表 `workspace_dismissals`（memory_id+version+suspected_workspace 主键，reason/decided_at 全量审计档）修「每轮 dismiss 只压一轮」结构洞：原唯一去重锚点 scan_queue 行会被启动 purge / 检测器换代整表 DELETE 释放，锚点一没下周三重新入队。`_expire_workspace_rows` 重写：仅 agent 显式 dismiss 同事务落持久行（`durable_record` 开关——protected/multi_family hint 分支只翻状态不落表，防 hint 意外永久化）；生成端门 B：(version,suspected) 命中持久表即跳过——版本钉死（编辑 bump version 后同桶可再提，与 conflict stale_snapshot 语义一致），启动 purge/换代清台后同身份不复发。
+- **feat(hits): hits 模式邻句窗口 hit_window（实施方案 docs/plan-2026-09-23-hits-window.zh-CN.md v3，owner 拍板 F1/F2 后随 0.17.0 未发版收敛包入库）。** find/batch_find/read/batch_read 四调用 hits 档新增 `hit_window=N`（默认 0=行为逐字节不变，上限 5 带 clamp warning、非法值回退 0；非 hits 档同传静默忽略）：按命中行 row_index ±N 带出相邻完整行（同 memory 同 version、subject 行恒排除、永不截断），邻句 span 带 `matched=false`、命中 span 补 `matched=true`；≥50% 覆盖升级按扩展后合并区间计算（D3）；窗口行取数=新增 `EvidenceStore.row_spans_for_ids` 范围受限批量预取（每页一次，按命中行 ±w 收缩不全量取，F4；batch_find 预取钉在 query 循环后 merge 循环前，A3）。
+  - **F1 行为修正（owner 2026-09-23 拍板「丢弃+必须显式提示重新查询」）。** row_knn 无行版本谓词，异步重建窗口期内旧 version 行的合法 offset 会静默切错新 content 区域——`_evidence_hits` 现携带 `row_index`+`row_version`（debug 面 additive 可见），`_hit_spans` 入口丢弃版本不匹配的命中（hit_window=0 也生效：漂移窗口内的错位命中变为丢弃+提示），条目落 `stale_hit_spans={evidence_version, memory_version}`、响应 warnings 逐条目提示 re-query；read/batch_read 侧两个原本完全静默的回落（hits 因当前版本无行回落全文、full+span 走 legacy 字符切片）各补一条「索引滞后请重新查询」warning。注：丢弃仅对可判定命中生效（hit 缺 row_version 视为无法判定，保直调合成数据的旧形状——真实管线命中必带 row_version）。
+  - **F3 预算推广：** batch_read hits 档被 ≥50% 覆盖升级出的 content 计入同一 `BATCH_READ_FULL_BUDGET_BYTES`（含 100KB 单条硬顶），超预算走同一结构化 over-long 响应（永不静默截断）——hit_window 打破「hits 结构性有界」前提后的对冲。
+  - **owner 拍板 P0-2 词法通道补命中不做**（2026-09-23）：向量通道未命中即「没有足够相似句」，FTS/LIKE 命中条目维持纯 preview 形状。校验白名单四处+golden 生成器三表同步；七处文案（server docstring/find display_hint/surfaces 两块/AGENT_ONBOARDING/README/INTEGRATION）统一口径（含 offset 随 version 失效与「hit_spans 只在 query 召回页」说明，F6/A7）。
+
+  - **confirm_workspaces 存量清场 + kick 前置自愈（C3）。** confirm 写快照成功后同事务清退双确认对的 pending workspace 行（UPDATE 带 `AND status='pending'` CAS；清场失败绝不回滚快照，降级 warning 且响应带 `suppressed_pending=-1`）；kick 在 §九 workspace 门禁**之前**幂等自愈同清场（覆盖 confirm 后崩溃/升级前存量行卡死 kick 的窗口，自愈失败不影响 kick 原有行为）。
+
 ## [0.16.12] — 2026-09-22
 
 Performance Part 1（写入/查询链路提速，行为不变）。21 项任务全落地，两轮 review（第二轮对抗性）累计 12 项修复；全量 harness 两轮对 0.16.11 三轮基线回归门 PASSED、召回/冲突/相似提示行为指标逐位一致。harness 口径：写入 p50 **463.8→318.0ms（-31%）**、查询 p50 **173.7→116.7ms（-33%）**；真实库 KNN 工作负载 **51.8s→6.8s（7.65x）**（scripts/knn_old_new_gate.py，476 组新旧对拍）。

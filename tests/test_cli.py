@@ -70,8 +70,9 @@ def test_config_template_has_required_fields():
         "auto_query": True,
         "auto_write": True,
     }
+    # 0.17.1: the Qwen model_path key is retired from the starter template;
+    # mdeberta_ckpt is user-configured (download-gated), so absent by default.
     assert cfg["semantic_conflict"] == {
-        "model_path": None,
         "on_write": "async",
     }
     # 0.15.14 A5: the notice-count key is gone from the starter template too.
@@ -494,7 +495,7 @@ def _legacy_db(path: Path, *, partial_evidence: bool = False) -> None:
 def _current_db(path: Path) -> None:
     conn = sqlite3.connect(path)
     conn.execute("CREATE TABLE memories(id INTEGER PRIMARY KEY, content TEXT)")
-    conn.execute("CREATE TABLE memory_evidence(id INTEGER PRIMARY KEY)")
+    conn.execute("CREATE TABLE memory_row(id INTEGER PRIMARY KEY)")
     conn.execute("CREATE TABLE migration_state(key TEXT PRIMARY KEY,value TEXT)")
     conn.execute(
         "INSERT INTO migration_state VALUES('schema_generation',?)",
@@ -541,7 +542,7 @@ def test_current_startup_skips_schema_ddl(tmp_path: Path, monkeypatch) -> None:
 
     monkeypatch.setattr(SchemaStore, "_init_schema", forbidden)
     monkeypatch.setattr(SchemaStore, "_rebuild_fts", forbidden)
-    monkeypatch.setattr(SchemaStore, "ensure_evidence_vec_table", forbidden)
+    monkeypatch.setattr(SchemaStore, "ensure_memory_row_vec_table", forbidden)
     monkeypatch.setattr(SchemaStore, "ensure_workspace_vec_table", forbidden)
     monkeypatch.setattr("memory_arbiter.embedder.build_embedder", forbidden)
     reopened = MemoryDB(settings)

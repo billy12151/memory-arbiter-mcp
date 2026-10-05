@@ -5,155 +5,10 @@ import threading
 import time
 from typing import Any, TYPE_CHECKING
 
-from .constants import EVIDENCE_QUEUE_MAX_SIZE, SEMANTIC_PRELOAD, SEMANTIC_QUEUE_MAX_SIZE
-from .models import TrustedApplyingContext
+from .constants import SEMANTIC_PRELOAD, SEMANTIC_QUEUE_MAX_SIZE
 
 if TYPE_CHECKING:
     from .tools import MemoryTools
-
-
-class LocalTextIndexWorker:
-    """Coalescing evidence-index worker keyed by memory id."""
-
-    def __init__(self, tools: "MemoryTools") -> None:
-        self._tools = tools
-        self._pending: dict[int, dict[str, Any]] = {}
-        self._inflight: set[int] = set()
-        self._cond = threading.Condition()
-        self._thread: threading.Thread | None = None
-        self._lock = threading.RLock()
-        self._shutdown = False
-        self._processed = 0
-        self._last_error: str | None = None
-
-    def start(self) -> None:
-        self._ensure_thread()
-
-    def enqueue(self, memory_id: int, snapshot: dict[str, Any]) -> dict[str, Any]:
-        displaced: dict[str, Any] | None = None
-        with self._cond:
-            if self._shutdown:
-                return {"status": "shutdown"}
-            if len(self._pending) + len(self._inflight) >= EVIDENCE_QUEUE_MAX_SIZE:
-                return {
-                    "status": "busy",
-                    "reason": "evidence_worker_queue_full",
-                    "queue_depth": len(self._pending),
-                }
-            displaced = self._pending.get(int(memory_id))
-            self._pending[int(memory_id)] = dict(snapshot)
-            self._cond.notify_all()
-        if displaced is not None:
-            self._tools._semantic_worker.complete(
-                str(displaced["task_id"]),
-                {"status": "incomplete", "reason": "coalesced_by_newer_snapshot", "notices_created": 0},
-            )
-        self._ensure_thread()
-        return {"status": "queued"}
-
-    def status(self) -> dict[str, Any]:
-        with self._cond:
-            return {
-                "queue_depth": len(self._pending), "inflight": sorted(self._inflight),
-                "processed": self._processed, "last_error": self._last_error,
-                "shutdown": self._shutdown,
-            }
-
-    def shutdown(self, discard_pending: bool = False) -> dict[str, Any]:
-        with self._cond:
-            self._shutdown = True
-            discarded = len(self._pending) if discard_pending else 0
-            if discard_pending:
-                self._pending.clear()
-            self._cond.notify_all()
-            return {"status": "shutdown", "discarded_pending": discarded}
-
-    def wait_drained(self, timeout: float = 30.0) -> bool:
-        deadline = time.monotonic() + max(0.0, float(timeout))
-        with self._cond:
-            while self._pending or self._inflight:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return False
-                self._cond.wait(remaining)
-            return True
-
-    def _ensure_thread(self) -> None:
-        with self._lock:
-            if self._thread is not None and self._thread.is_alive():
-                return
-            self._thread = threading.Thread(
-                target=self._run, name="memory-arbiter-local-text-index", daemon=True,
-            )
-            self._thread.start()
-
-    def _run(self) -> None:
-        while True:
-            with self._cond:
-                while not self._pending and not self._shutdown:
-                    self._cond.wait()
-                if self._shutdown and not self._pending:
-                    return
-                memory_id = next(iter(self._pending))
-                snapshot = self._pending.pop(memory_id)
-                # Registered under the same cond hold as the pop: wait_drained
-                # must never observe a popped-but-unregistered item. Every
-                # fallible step after the block (task_id construction included)
-                # sits inside the try, so the finally always discards.
-                self._inflight.add(memory_id)
-            try:
-                task_id = str(snapshot.get("task_id") or f"semantic:{memory_id}@{int(snapshot.get('version') or 1)}")
-                current = self._tools.db.get_memory(memory_id)
-                if current is None or int(current.get("version") or 1) != int(snapshot.get("version") or 1):
-                    result = {"status": "skipped", "reason": "stale_or_missing"}
-                else:
-                    result = self._tools._index_local_text_evidence(memory_id, current)
-                    if result.get("status") == "indexed":
-                        context = snapshot.get("trusted_applying_context")
-                        if context is not None and not isinstance(context, TrustedApplyingContext):
-                            # Snapshots cross a thread boundary as plain dicts
-                            # (to_dict on enqueue); the enqueue path expects the
-                            # frozen dataclass and calls .to_dict() itself.
-                            # from_dict returns None on malformed input, which
-                            # degrades to the context-free check (fail-open).
-                            context = TrustedApplyingContext.from_dict(context)
-                        if context is None:
-                            self._tools._enqueue_semantic_conflict_check(
-                                memory_id, current, after_evidence=True,
-                            )
-                        else:
-                            self._tools._enqueue_semantic_conflict_check(
-                                memory_id, current, after_evidence=True,
-                                trusted_applying_context=context,
-                            )
-                if result.get("status") != "indexed":
-                    self._tools._semantic_worker.complete(
-                        task_id,
-                        {
-                            "status": "incomplete",
-                            "reason": f"evidence_index_{result.get('reason') or result.get('status') or 'failed'}",
-                            "notices_created": 0,
-                        },
-                    )
-                with self._cond:
-                    # A stale publish race (edit landed between fetch and
-                    # publish) is routine coalescing, not an error.
-                    clean = result.get("status") in {"indexed", "skipped"} or result.get(
-                        "outcome"
-                    ) in {"stale_snapshot"}
-                    self._last_error = None if clean else str(result)
-                    self._processed += 1
-            except Exception as exc:
-                self._tools._semantic_worker.complete(
-                    task_id,
-                    {"status": "incomplete", "reason": "evidence_index_error", "error": str(exc), "notices_created": 0},
-                )
-                with self._cond:
-                    self._last_error = str(exc)
-            finally:
-                with self._cond:
-                    self._inflight.discard(memory_id)
-                    self._cond.notify_all()
 
 
 class SemanticConflictWorker:
@@ -178,10 +33,11 @@ class SemanticConflictWorker:
         self._completed: dict[str, dict[str, Any]] = {}
 
     def start(self) -> None:
-        if self._tools.settings.semantic_conflict_on_write == "off":
-            return
+        # C2: the thread must run even with semantic_conflict_on_write="off" —
+        # every job then degrades to index_only (segment+embed+publish, no
+        # detection) inside _process_semantic_conflict_job.
         self._ensure_thread()
-        if SEMANTIC_PRELOAD:
+        if SEMANTIC_PRELOAD and self._tools.settings.semantic_conflict_on_write != "off":
             threading.Thread(
                 target=self._preload_backend,
                 name="memory-arbiter-semantic-preload",
@@ -195,6 +51,27 @@ class SemanticConflictWorker:
                 backend.load()
         except Exception as exc:
             self.set_error(str(exc))
+
+    def snapshot(self) -> dict[str, Any]:
+        """可观测性（2026-09-25 重建排障）：worker 内部状态一次读全——线程是否
+        存活、队列深度、inflight、处理计数、暂停/禁用标志与最近错误。
+
+        R2-S2：字段读取必须全程持 _cond——本类所有其他访问器（status()、
+        set_error 的注释）都是同一纪律，锁内只读 thread_alive 再锁外拼 dict
+        会让计数器读出撕裂快照。"""
+        with self._cond:
+            return {
+                "thread_alive": bool(self._thread and self._thread.is_alive()),
+                "queue_depth": len(self._pending),
+                "inflight": len(self._inflight),
+                "processed": self._processed,
+                "skipped": self._skipped,
+                "dropped_queue_full": self._dropped_queue_full,
+                "paused": self._paused,
+                "runtime_disabled": self._runtime_disabled,
+                "shutdown": self._shutdown,
+                "last_error": self._last_error,
+            }
 
     def reserve(self, task_id: str) -> None:
         with self._cond:
@@ -301,12 +178,6 @@ class SemanticConflictWorker:
             )
             return oldest + max(0.0, float(timeout_seconds))
 
-    def has_pending_jobs(self) -> bool:
-        """A6 retry gate: True while another semantic job is queued — the
-        in-flight pair classification should then skip its feedback retry."""
-        with self._cond:
-            return bool(self._pending)
-
     def pause(self) -> None:
         with self._cond:
             self._paused = True
@@ -395,16 +266,39 @@ class SemanticConflictWorker:
 
     def _run(self) -> None:
         while True:
+            memory_id: int | None = None
+            snapshot: dict[str, Any] | None = None
+            idle_tick = False
             with self._cond:
                 while (not self._pending or self._paused) and not self._shutdown:
-                    self._cond.wait()
+                    # 0.17.0 P2-4.2: timed wait — an empty, unpaused queue
+                    # ticks into a bounded conflict-backlog drain; a queued
+                    # job's notify still wakes this immediately, so new
+                    # writes always preempt the backlog (owner rule).
+                    self._cond.wait(timeout=5.0)
+                    if not self._pending and not self._paused and not self._shutdown:
+                        idle_tick = True
+                        break
                 if self._shutdown and not self._pending:
                     return
                 if self._shutdown and self._paused:
                     return
-                memory_id = next(iter(self._pending))
-                snapshot = self._pending.pop(memory_id)
-                self._inflight.add(memory_id)
+                if not idle_tick:
+                    memory_id = next(iter(self._pending))
+                    snapshot = self._pending.pop(memory_id)
+                    self._inflight.add(memory_id)
+            if idle_tick:
+                # 0.17.0 review R2：on_write="off" 语义=无检测活动——drain 会
+                # 加载 Qwen 并产 notice，与 start() 的 off 不预加载及
+                # runtime_state 的 on_write_off 报告自相矛盾。off 时空转，
+                # 积压留待恢复 on_write 后消化。
+                if self._tools.settings.semantic_conflict_on_write != "off":
+                    try:
+                        self._tools._evidence.drain_conflict_backlog(limit=2)
+                    except Exception:
+                        pass  # idle-path best effort; entries stay pending
+                continue
+            assert memory_id is not None and snapshot is not None
             error_message: str | None = None
             job_result: dict[str, Any] = {"status": "incomplete", "reason": "worker_error"}
             task_id = str(snapshot.get("task_id") or f"semantic:{memory_id}@{int(snapshot.get('version') or 1)}")

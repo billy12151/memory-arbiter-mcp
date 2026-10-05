@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Any, Literal
 
-from .anchors import (
-    Anchor,
+# score_anchor_overlap：scripts/tune_tag_weights.py 保活面（老 search.py 隐式 re-export）
+from .anchors import (  # noqa: F401
     STOP_ANCHORS,
-    classify_match_level,
     extract_anchors,
     score_anchor_overlap,
 )
@@ -32,7 +30,65 @@ RetrievalMode = Literal[
     "unavailable",       # SQLite not available
 ]
 
-from .constants import CONTENT_LIKE_CAP, Isolation, QUERY_RECALL_SCORE_FLOOR, RECALL_POOL_CAP, SURFACE_ADMISSION_QUOTA, WORKSPACE_MIN_NAME_LEN, WORKSPACE_WEAK_VECTOR_WEIGHT, is_default_workspace_term
+from .constants import CONTENT_LIKE_CAP, COS_EXACT_BOOST, COS_RECALL_FLOOR, Isolation, QUERY_RECALL_SCORE_FLOOR, RECALL_POOL_CAP, SURFACE_ADMISSION_QUOTA, WORKSPACE_MIN_NAME_LEN, WORKSPACE_WEAK_VECTOR_WEIGHT, is_default_workspace_term
+from .text import CJK_RE_SEARCH as _CJK_RE  # noqa: F401
+from .search_text import (  # noqa: F401
+    _subject_key as _subject_key,
+    _is_cjk_token as _is_cjk_token,
+    _split_cjk_token as _split_cjk_token,
+    _quote_phrase as _quote_phrase,
+    _sanitize_fts_query as _sanitize_fts_query,
+    _normalize_token_for_tag_match as _normalize_token_for_tag_match,
+    _cjk_substring_match as _cjk_substring_match,
+    _is_pure_cjk_token as _is_pure_cjk_token,
+    _is_short_cjk_keyword as _is_short_cjk_keyword,
+    _sanitize_fts_query_or as _sanitize_fts_query_or,
+    _parse_time as _parse_time,
+    _sanitize_tags_filter as _sanitize_tags_filter,
+    _passes_filters as _passes_filters,
+    _query_non_cjk_dominant as _query_non_cjk_dominant,
+)
+from .search_scoring import (  # noqa: F401
+    _RECENCY_BONUS_7D as _RECENCY_BONUS_7D,
+    _RECENCY_BONUS_30D as _RECENCY_BONUS_30D,
+    _RECENCY_BONUS_90D as _RECENCY_BONUS_90D,
+    _trust_bonus as _trust_bonus,
+    _parse_ingest_time as _parse_ingest_time,
+    _ingest_sort_key as _ingest_sort_key,
+    _recency_bonus as _recency_bonus,
+    _workspace_bonus as _workspace_bonus,
+    _score_surface as _score_surface,
+    _score_tags_surface as _score_tags_surface,
+    _RRF_K as _RRF_K,
+    _RRF_SCORE_WEIGHT as _RRF_SCORE_WEIGHT,
+    _SUBJECT_SCORE_CAP as _SUBJECT_SCORE_CAP,
+    _TAGS_SCORE_CAP as _TAGS_SCORE_CAP,
+    _CONTENT_SCORE_CAP as _CONTENT_SCORE_CAP,
+    _TRUST_BONUS_USER_CONFIRMED as _TRUST_BONUS_USER_CONFIRMED,
+    _TRUST_BONUS_DOCUMENT_EXTRACTED as _TRUST_BONUS_DOCUMENT_EXTRACTED,
+    _TRUST_BONUS_DEFAULT as _TRUST_BONUS_DEFAULT,
+    _LONG_CONTENT_PENALTY as _LONG_CONTENT_PENALTY,
+    _CONTENT_ONLY_PENALTY as _CONTENT_ONLY_PENALTY,
+    _VEC_FLOOR_SCORE as _VEC_FLOOR_SCORE,
+    _SUBJECT_STRONG_WEIGHT as _SUBJECT_STRONG_WEIGHT,
+    _SUBJECT_MEDIUM_WEIGHT as _SUBJECT_MEDIUM_WEIGHT,
+    _SUBJECT_WEAK_WEIGHT as _SUBJECT_WEAK_WEIGHT,
+    _TAGS_STRONG_WEIGHT as _TAGS_STRONG_WEIGHT,
+    _TAGS_MEDIUM_WEIGHT as _TAGS_MEDIUM_WEIGHT,
+    _TAGS_WEAK_WEIGHT as _TAGS_WEAK_WEIGHT,
+    _RECENCY_BONUS_DEFAULT as _RECENCY_BONUS_DEFAULT,
+    _RECENCY_THRESHOLDS as _RECENCY_THRESHOLDS,
+    _WS_BONUS_SAME as _WS_BONUS_SAME,
+    _WS_PENALTY_CROSS as _WS_PENALTY_CROSS,
+    _soft_rerank as _soft_rerank,
+    is_keyword_query as is_keyword_query,
+    _apply_keyword_rescue as _apply_keyword_rescue,
+)
+from .search_extras import (  # noqa: F401
+    _coerce_tags as _coerce_tags,
+    _linked_open_items_for_search as _linked_open_items_for_search,
+    _recent_fallback as _recent_fallback,
+)
 
 
 @dataclass
@@ -50,510 +106,10 @@ class SearchOutcome:
 
 
 # Single source: text.CJK_RE_SEARCH (Phase 1). Re-exported here for back-compat.
-from .text import CJK_RE_SEARCH as _CJK_RE
+from .semantic_conflict import vector_cosine
 # shared vector-admission helpers + the weak weighting curve.
-from .workspace_rules import weak_workspace_vector_weight, workspace_vector_distance
 
 
-def _is_cjk_token(token: str) -> bool:
-    return bool(_CJK_RE.search(token))
-
-
-def _split_cjk_token(token: str) -> list[str]:
-    """Split a CJK run into overlapping 3-character trigrams (unquoted).
-
-    Implementation lives in text.split_cjk_token (Phase 1); thin re-export here.
-    The FTS5 table uses ``tokenize='trigram'``: OR-joined trigrams restore recall
-    for Chinese queries where a strict phrase would silently miss.
-    """
-    from .text import split_cjk_token
-    return split_cjk_token(token)
-
-
-def _quote_phrase(token: str) -> str:
-    return '"' + token.replace('"', '""') + '"'
-
-
-def _sanitize_fts_query(query: str) -> str:
-    """Turn an arbitrary user query into a safe FTS5 MATCH expression.
-
-    FTS5 has its own query grammar where ``. : * " ( ) - + AND OR NOT`` are
-    special. A bare query like ``v0.2.1`` raises ``fts5: syntax error near "."``.
-
-    - Non-CJK tokens are wrapped as double-quoted phrases and AND-joined, so
-      English/code identifiers keep their precision.
-    - CJK tokens are split into overlapping trigrams (unquoted) joined by OR.
-      The trigram tokenizer only matches queries that produce ≥3-char tokens,
-      and a strict phrase over CJK silently misses when the query is even
-      slightly overspecified — OR over shared trigrams restores recall.
-
-    A CJK token shorter than 3 characters cannot form a trigram and is
-    dropped from the FTS5 expression; the surrounding AND will then collapse
-    and the caller's LIKE fallback handles it.
-    """
-    tokens = [tok for tok in query.split() if tok]
-    if not tokens:
-        return ""
-    groups: list[str] = []
-    for tok in tokens:
-        if _is_cjk_token(tok):
-            trigrams = _split_cjk_token(tok)
-            if trigrams:
-                # v0.15.9 phrase channel: a quoted phrase under the trigram
-                # tokenizer is an exact-substring match, so records containing
-                # the token verbatim always enter the pool; the OR'd trigrams
-                # stay as the recall safety net for slightly-overspecified
-                # queries. Strength separation happens in soft-rerank anchors.
-                groups.append("(" + _quote_phrase(tok) + " OR " + " OR ".join(trigrams) + ")")
-        else:
-            groups.append(_quote_phrase(tok))
-    return " AND ".join(groups)
-
-
-# ---- Soft-rerank scoring constants (r4 §7, §8) --------------------------
-# These are deliberately conservative initial values. Per r4 risk-5, we only
-# tune 1-2 of these based on A/B; the rest stay fixed.
-_SUBJECT_SCORE_CAP = 10.0       # r4 §8.2.1: subject score cannot grow unbounded
-_TAGS_SCORE_CAP = 10.0          # v0.7.3: 从 7.0 提到 10.0（与 subject cap 持平，配套 tag 权重提升）
-_CONTENT_SCORE_CAP = 3.0        # content is weak signal, capped low
-_TRUST_BONUS_USER_CONFIRMED = 0.5   # r4 §7: trust is *small* bonus, not override
-_TRUST_BONUS_DOCUMENT_EXTRACTED = 0.3
-_TRUST_BONUS_DEFAULT = 0.0
-_LONG_CONTENT_PENALTY = 1.5     # r4 §8.4: applied only under 3 conditions
-_CONTENT_ONLY_PENALTY = 2.0     # r4 §8.3: subject/tags miss + content hits
-# v0.3.1: floor score for vec0-recalled candidates. These candidates often
-# have zero lexical overlap with the query (that's the whole point of
-# semantic recall), so without a floor they'd rank last despite being
-# semantically relevant. Set just below CONTENT_SCORE_CAP so a vec candidate
-# beats content-only noise but never beats a real subject/tags hit.
-_VEC_FLOOR_SCORE = 2.5
-# Reciprocal-rank fusion keeps lexical and evidence channels comparable even
-# though BM25 scores and vector distances live on unrelated scales. 60 is the
-# conventional RRF damping constant; the multiplier makes fusion meaningful
-# beside the existing 0..20 lexical relevance score without overriding a
-# strong subject+tag match from a single channel.
-_RRF_K = 60.0
-_RRF_SCORE_WEIGHT = 300.0
-
-# subject/tags match-level weights (after capping)
-_SUBJECT_STRONG_WEIGHT = 10.0
-_SUBJECT_MEDIUM_WEIGHT = 6.0
-_SUBJECT_WEAK_WEIGHT = 2.0
-# v0.7.3: tag 权重从 7.0/4.0/1.5 提到 10.0/6.0/2.0（与 subject 持平）。
-# 数据驱动决策（scripts/tune_tag_weights.py，n=2000×5 seed）：tag 是 LLM 主动
-# 打的精确分类标签，命中信号比 subject 偶然含字面更可靠（id=210 原始论证）。
-# 配合 classify_match_level 的 coverage 0.4→0.6 收紧 subject，让 tag 精确命中
-# 的记录（id=206）排到 subject 偶然命中的记录（id=105）之上。详见 id=211。
-_TAGS_STRONG_WEIGHT = 10.0
-_TAGS_MEDIUM_WEIGHT = 6.0
-_TAGS_WEAK_WEIGHT = 2.0
-
-# v0.4.1: recency bonus tiers. Capped low so recency only breaks ties between
-# equally-relevant records — it must never override a subject/tags hit. The
-# smallest subject-medium weight is 6.0, so a 0.30 max bonus is ~5% of that:
-# enough to lift "release v0.4.0" above "release v0.2.1" when both cap out at
-# the same surface score (the exact failure that buried id=108 under id=27),
-# but never enough to promote a content-only match over a subject match.
-_RECENCY_BONUS_7D = 0.30
-_RECENCY_BONUS_30D = 0.15
-_RECENCY_BONUS_90D = 0.05
-_RECENCY_BONUS_DEFAULT = 0.0
-_RECENCY_THRESHOLDS = (
-    (7 * 86400, _RECENCY_BONUS_7D),
-    (30 * 86400, _RECENCY_BONUS_30D),
-    (90 * 86400, _RECENCY_BONUS_90D),
-)
-
-
-def _trust_bonus(record: dict[str, Any]) -> float:
-    """Small, capped trust bonus — never enough to override relevance."""
-    source = record.get("source_type") or ""
-    protection = record.get("protection_level") or ""
-    if source == "user_confirmed" or protection == "locked":
-        return _TRUST_BONUS_USER_CONFIRMED
-    if source == "document_extracted":
-        return _TRUST_BONUS_DOCUMENT_EXTRACTED
-    return _TRUST_BONUS_DEFAULT
-
-
-def _parse_ingest_time(record: dict[str, Any]) -> datetime | None:
-    """Parse ingest_time as a timezone-aware UTC datetime, if possible.
-
-    Implementation lives in timeutil.parse_iso8601_utc (Phase 1); thin re-export.
-    """
-    from .timeutil import parse_iso8601_utc
-    return parse_iso8601_utc(record.get("ingest_time"))
-
-
-def _ingest_sort_key(record: dict[str, Any]) -> float:
-    """Chronological sort key for ingest_time; invalid timestamps sort last."""
-    ts = _parse_ingest_time(record)
-    if ts is None:
-        return float("-inf")
-    return ts.timestamp()
-
-
-def _recency_bonus(record: dict[str, Any], now: datetime | None = None) -> float:
-    """Tiered recency bonus based on ingest_time, never enough to override relevance.
-
-    Uses ingest_time (when the memory entered the store) rather than event_time
-    (when the underlying fact happened). "Find the latest release notes" cares
-    about when the record was logged, not when the release shipped.
-
-    Degrades gracefully: unparseable or future timestamps return 0 bonus
-    rather than raising — a bad timestamp must never break search.
-    """
-    ts = _parse_ingest_time(record)
-    if ts is None:
-        return _RECENCY_BONUS_DEFAULT
-    reference = now or datetime.now(timezone.utc)
-    age_seconds = (reference - ts).total_seconds()
-    if age_seconds < 0:
-        # Clock skew or future-dated record; don't penalize, don't reward.
-        return _RECENCY_BONUS_DEFAULT
-    for threshold, bonus in _RECENCY_THRESHOLDS:
-        if age_seconds <= threshold:
-            return bonus
-    return _RECENCY_BONUS_DEFAULT
-
-
-# v0.9.7: workspace soft-weighting (weak isolation). Same magnitude discipline
-# as trust/recency — a small nudge that breaks ties between equally-relevant
-# records, never enough to override a subject/tags hit. Same-workspace gets a
-# small lift; cross-workspace gets a small penalty. Only applies when the
-# caller passes a query workspace AND isolation == "weak".
-_WS_BONUS_SAME = 0.30      # ~5% of a subject-medium hit (6.0), like recency max
-_WS_PENALTY_CROSS = -0.15  # gentler penalty so cross-ws stays reachable
-
-
-def _workspace_bonus(
-    record: dict[str, Any],
-    ws_canonical: str | None,
-    isolation: str,
-    distance_map: dict[str, float] | None = None,
-    min_name_len: int = 3,
-) -> float:
-    """Soft workspace nudge for weak isolation. 0 outside weak mode.
-
-    With vector weighting enabled, when the caller precomputed a distance_map, the binary
-    step becomes a continuous vector weight — full +0.30 inside 0.15, linear
-    decay to 0 at 0.30, 0 beyond (a known-far workspace no longer eats the
-    -0.15 hard penalty). Every guarded pair (reserved default term, short
-    name, generic-only proximity, or a canonical missing from the map) falls
-    back to the original binary step, so degradation is exactly v0.9.7.
-    """
-    if isolation != "weak" or not ws_canonical:
-        return 0.0
-    rec_ws = record.get("workspace_canonical") or record.get("workspace") or ""
-    if not rec_ws:
-        return 0.0
-    if distance_map is not None:
-        distance = workspace_vector_distance(
-            ws_canonical, rec_ws, distance_map, min_name_len=min_name_len,
-        )
-        if distance is not None:
-            return weak_workspace_vector_weight(distance)
-    return _WS_BONUS_SAME if rec_ws == ws_canonical else _WS_PENALTY_CROSS
-
-
-def _score_surface(
-    query_anchors: list[Anchor],
-    surface_text: str,
-    strong_weight: float,
-    medium_weight: float,
-    weak_weight: float,
-    cap: float,
-    query_lower: str,
-) -> tuple[float, str]:
-    """Score a single surface (subject or tags) against the query.
-
-    Returns (score, match_level). Strong = direct contiguous substring hit
-    (checked before anchors); otherwise use anchor overlap classification.
-    Score is capped per r4 §8.2.1.
-    """
-    if not surface_text:
-        return 0.0, "none"
-    surface_lower = surface_text.lower()
-    # Strong: query's main phrase is a contiguous substring of the surface.
-    # We check the raw query (not anchors) because substring is a stronger
-    # signal than anchor overlap.
-    if query_lower and query_lower in surface_lower:
-        return min(strong_weight, cap), "strong"
-    # Fall back to anchor overlap.
-    surface_anchors = extract_anchors(surface_text)
-    matches = score_anchor_overlap(query_anchors, surface_anchors)
-    level = classify_match_level(query_anchors, matches)
-    if level == "medium":
-        return min(medium_weight, cap), level
-    if level == "weak":
-        return min(weak_weight, cap), level
-    return 0.0, level
-
-
-# ---- v0.7.3: tag-specific scoring (design §2) --------------------------
-# _score_surface treats subject and tags the same way — both go through the
-# "is the whole query a contiguous substring?" strong check. That's right for
-# subject (a natural-language sentence) but wrong for tags (a discrete label
-# set that almost never concatenates into the exact query string). The result
-# was that tags could only ever reach medium (4.0), never strong (7.0), even
-# when every query token was an exact tag — see id=206 / id=210.
-#
-# _score_tags_surface replaces _score_surface for the tags field only. It
-# scores by *semantic token overlap*: split the query on whitespace, normalize
-# both sides (strip v-prefix on version-like tokens), and match each query
-# token against the tag list. ASCII tokens match by equality (no substring —
-# "v0.7" must not match tag "v0.7.0"); pure-CJK tokens match by prefix/suffix
-# substring only (middle substrings would let bigram-artifact tags like "版历"
-# leak through). See design doc §2.3-§2.6.
-
-def _normalize_token_for_tag_match(token: str) -> str:
-    """Normalize a token for tag-level matching (query AND tags).
-
-    Implementation lives in text.normalize_token_for_tag_match (Phase 1); thin
-    re-export here. Strips a leading ``v`` only when it prefixes a version token.
-    """
-    from .text import normalize_token_for_tag_match
-    return normalize_token_for_tag_match(token)
-
-
-def _cjk_substring_match(tag_norm: str, query_token_norm: str) -> bool:
-    """CJK substring match — prefix/suffix only, never middle.
-
-    Implementation lives in text.cjk_substring_match (Phase 1); thin re-export here.
-    """
-    from .text import cjk_substring_match
-    return cjk_substring_match(tag_norm, query_token_norm)
-
-
-def _is_pure_cjk_token(token: str) -> bool:
-    """True if the token contains NO ASCII alphanumerics (OPPOSITE of _is_cjk_token).
-
-    Implementation lives in text.is_pure_cjk_token (Phase 1); thin re-export here.
-    Do NOT merge with _is_cjk_token (any-CJK) — they serve different match paths.
-    """
-    from .text import is_pure_cjk_token
-    return is_pure_cjk_token(token)
-
-
-def _score_tags_surface(
-    query: str,
-    tags_list: list[str],
-    strong_weight: float,
-    medium_weight: float,
-    weak_weight: float,
-    cap: float,
-) -> tuple[float, str, dict[str, Any]]:
-    """Score tags by semantic token overlap with the query (v0.7.3).
-
-    Algorithm (design §2.3):
-      1. Split query on whitespace into semantic tokens.
-      2. Normalize each token (_normalize_token_for_tag_match), applied to
-         BOTH query tokens and tags.
-      3. For each normalized query token, match against the normalized tag set:
-         - pure-CJK token → _cjk_substring_match (prefix/suffix only)
-         - otherwise      → equality only (ASCII/mixed tokens)
-      4. ratio = matched_query_tokens / total_query_tokens.
-         - 1.0           → strong (min(strong_weight, cap))
-         - 0.5 <= r < 1  → medium
-         - 0   < r < 0.5 → weak
-         - 0             → none
-
-    Returns (score, level, debug) where debug has keys
-    total / matched / ratio for the debug_ranking fields.
-    """
-    if not tags_list:
-        return 0.0, "none", {"total": 0, "matched": 0, "ratio": 0.0}
-
-    query_tokens = [t for t in (query or "").split() if t]
-    if not query_tokens:
-        return 0.0, "none", {"total": 0, "matched": 0, "ratio": 0.0}
-
-    tags_norm = [_normalize_token_for_tag_match(str(t)) for t in tags_list]
-    tags_norm_set = set(tags_norm)
-
-    matched = 0
-    total = 0
-    for raw_token in query_tokens:
-        token_norm = _normalize_token_for_tag_match(raw_token)
-        if not token_norm:
-            # Skip tokens that normalize to empty (e.g. stray punctuation) so
-            # they don't drag down the ratio without a chance to match.
-            continue
-        total += 1
-        if _is_pure_cjk_token(token_norm):
-            hit = any(_cjk_substring_match(tn, token_norm) for tn in tags_norm_set)
-        else:
-            hit = token_norm in tags_norm_set
-        if hit:
-            matched += 1
-
-    ratio = matched / total if total else 0.0
-    if ratio >= 1.0:
-        level = "strong"
-        score = min(strong_weight, cap)
-    elif ratio >= 0.5:
-        level = "medium"
-        score = min(medium_weight, cap)
-    elif ratio > 0:
-        level = "weak"
-        score = min(weak_weight, cap)
-    else:
-        level = "none"
-        score = 0.0
-    return score, level, {"total": total, "matched": matched, "ratio": ratio}
-
-
-def _soft_rerank(
-    query: str,
-    candidates: list[dict[str, Any]],
-    ws_canonical: str | None = None,
-    isolation: str = "none",
-    distance_map: dict[str, float] | None = None,
-    ws_min_name_len: int = 3,
-) -> list[dict[str, Any]]:
-    """Apply soft-rerank to a wide-recall candidate pool.
-
-    Adds debug fields (_subject_level, _tag_level, _match_reason, _ranking_notes)
-    to each row but does NOT mutate original fields. Returns new list sorted
-    by final_score descending.
-
-    ``distance_map`` is the precomputed {record canonical → cosine
-    distance to the query canonical} dict; when present and isolation is weak,
-    _workspace_bonus weights on the continuous curve instead of the binary
-    step. ``None`` keeps the v0.9.7 binary behaviour.
-    """
-    if not candidates:
-        return []
-    query = (query or "").strip()
-    query_lower = query.lower()
-    query_anchors = extract_anchors(query) if query else []
-
-    scored: list[tuple[float, dict[str, Any]]] = []
-    for rec in candidates:
-        subject = rec.get("subject") or ""
-        tags_raw = rec.get("tags") or "[]"
-        # tags field is JSON-encoded list in DB; parse for surface scoring
-        try:
-            import json as _json
-            tags_list = _json.loads(tags_raw) if isinstance(tags_raw, str) else tags_raw
-        except Exception:
-            tags_list = []
-        tags_text = " ".join(str(t) for t in tags_list) if tags_list else ""
-        content = rec.get("content") or ""
-
-        # Score each surface (subject > tags > content), all capped.
-        subject_score, subject_level = _score_surface(
-            query_anchors, subject,
-            _SUBJECT_STRONG_WEIGHT, _SUBJECT_MEDIUM_WEIGHT, _SUBJECT_WEAK_WEIGHT,
-            _SUBJECT_SCORE_CAP, query_lower,
-        )
-        tag_score, tag_level, tag_debug = _score_tags_surface(
-            query, tags_list,
-            _TAGS_STRONG_WEIGHT, _TAGS_MEDIUM_WEIGHT, _TAGS_WEAK_WEIGHT,
-            _TAGS_SCORE_CAP,
-        ) if tags_list else (0.0, "none", {"total": 0, "matched": 0, "ratio": 0.0})
-        # Content: cheap signal — substring check on lowercased text.
-        content_hit = bool(query_lower) and query_lower in content.lower()
-        # Also count anchor hits in content for a weak content_score signal.
-        content_score = 0.0
-        if content_hit:
-            content_score = _CONTENT_SCORE_CAP
-        elif query_anchors and content:
-            content_anchors = extract_anchors(content)
-            content_matches = score_anchor_overlap(query_anchors, content_anchors)
-            cm = content_matches.get("_summary")
-            if cm and cm.total_hits >= 2:
-                content_score = min(_CONTENT_SCORE_CAP * 0.5, _CONTENT_SCORE_CAP)
-
-        relevance = subject_score + tag_score + content_score
-
-        # content-only penalty (r4 §8.3): if subject/tags didn't even reach
-        # weak, and content hit, treat as "incidental mention" — drop score.
-        subject_tags_miss = subject_level in ("none",) and tag_level in ("none",)
-        if subject_tags_miss and content_score > 0:
-            relevance -= _CONTENT_ONLY_PENALTY
-
-        # long-content penalty (r4 §8.4): three conditions must ALL hold:
-        # 1. subject/tags no strong or medium hit
-        # 2. hits mainly from content
-        # 3. content is long
-        subject_tags_weak = subject_level in ("none", "weak") and tag_level in ("none", "weak")
-        content_long = len(content) > 2000
-        if subject_tags_weak and content_long and content_score > 0:
-            relevance -= _LONG_CONTENT_PENALTY
-
-        # v0.3.1: vec0-recalled candidates. If this candidate came from the
-        # semantic channel and lexical relevance is below the floor, raise it
-        # to the floor. The floor sits just below content-score cap, so a vec
-        # candidate beats content-only noise but loses to any subject/tags hit.
-        if rec.get("_vec_candidate") and relevance < _VEC_FLOOR_SCORE:
-            relevance = _VEC_FLOOR_SCORE
-
-        trust = _trust_bonus(rec)
-        recency = _recency_bonus(rec)
-        ws_adjust = _workspace_bonus(
-            rec, ws_canonical, isolation,
-            distance_map=distance_map, min_name_len=ws_min_name_len,
-        )
-        # Superseded always sinks below active regardless of score (r4 carries
-        # this forward from v0.2.6).
-        superseded_sink = 1 if rec.get("status") == "superseded" else 0
-        fusion_score = float(rec.get("_fusion_score") or 0.0)
-        final_score = (
-            relevance
-            + fusion_score * _RRF_SCORE_WEIGHT
-            + trust
-            + recency
-            + ws_adjust
-            - (superseded_sink * 1000.0)
-        )
-
-        # Build debug info (only returned when debug_ranking=True).
-        notes: list[str] = []
-        match_reason = "subject_or_tag_match"
-        if subject_tags_miss and content_score > 0:
-            match_reason = "content_only_match"
-            notes.append("query terms matched content but not subject/tags")
-        if subject_tags_weak and content_long and content_score > 0:
-            notes.append("long content penalty applied")
-        if superseded_sink:
-            notes.append("superseded: sunk below active")
-        if rec.get("_vec_candidate"):
-            if match_reason == "subject_or_tag_match":
-                match_reason = "vec_recall"
-            notes.append("v0.3.1: semantic recall candidate, floor score applied")
-        if rec.get("_evidence_vec_candidate"):
-            if match_reason == "subject_or_tag_match":
-                match_reason = "evidence_vec_recall"
-            notes.append("local-text evidence recall candidate (vNext)")
-
-        rec_copy = dict(rec)
-        rec_copy["_final_score"] = final_score
-        rec_copy["_subject_level"] = subject_level
-        rec_copy["_tag_level"] = tag_level
-        rec_copy["_match_reason"] = match_reason
-        rec_copy["_ranking_notes"] = notes
-        rec_copy["_subject_score"] = subject_score
-        rec_copy["_tag_score"] = tag_score
-        rec_copy["_tag_query_tokens"] = tag_debug.get("total", 0)
-        rec_copy["_tag_matched_tokens"] = tag_debug.get("matched", 0)
-        rec_copy["_tag_match_ratio"] = tag_debug.get("ratio", 0.0)
-        rec_copy["_content_score"] = content_score
-        rec_copy["_recency_bonus"] = recency
-        rec_copy["_trust_bonus"] = trust
-        rec_copy["_workspace_bonus"] = ws_adjust
-        rec_copy["_fusion_score"] = fusion_score
-        scored.append((final_score, rec_copy))
-
-    # Sort by final_score desc; tiebreak by ingest_time desc (newest first).
-    # The previous implementation ran two sorts — first ascending on
-    # ingest_time then stable descending on score — which left ties ordered
-    # oldest-first (SQLite rowid order). For "find the latest X" queries
-    # this buried the newest record, e.g. querying release notes returned
-    # v0.2.x ahead of v0.4.0 because every release-summary record hit the
-    # same subject/tags cap. One sort, score-desc then time-desc, fixes it.
-    scored.sort(key=lambda x: (x[0], _ingest_sort_key(x[1])), reverse=True)
-    return [r for _, r in scored]
 
 
 def _wide_recall(
@@ -581,7 +137,8 @@ def _wide_recall(
          unavailable (no query_embedding or no sqlite-vec), pool not yet full,
          with ≥2 anchor hits, capped. Ablated 2026-09-19 (recall-ch1235): zero
          relevant-target contribution on corpus recall-v1 while vectors work.
-      5. evidence-vector KNN over `memory_evidence_vec` — optional, only when
+      5. row-vector KNN over `memory_row_vec` (via db.row_knn, C4 since
+         0.17.0) — optional, only when
          query_embedding provided and sqlite-vec available. Catches semantically similar but lexically
          dissimilar memories. Candidates are flagged so soft-rerank can give
          them a floor score (the query text didn't literally match anything).
@@ -755,9 +312,13 @@ def _wide_recall(
     # bool alias carries no narrowing).
     if vector_available and query_embedding is not None:
         evidence_memory_cap = max(pool_cap, 10)
-        evidence_rows = db.evidence_knn(
+        # C4: the evidence channel rides ROW vectors (unit tables retired).
+        # k widened cap*8→cap*16: rows are ~3.4x the units for the same
+        # memory, so the same memory-level recall needs a deeper row window
+        # (calibrated by R@10 + noise-recall gates, plan §3).
+        evidence_rows = db.row_knn(
             query_embedding,
-            k=evidence_memory_cap * 8,
+            k=evidence_memory_cap * 16,
             parent_status_filter=status_filter,
             workspace=ws_canonical,
             exclude_workspaces=exclude_workspaces,
@@ -780,13 +341,25 @@ def _wide_recall(
                 "text": row.get("text"),
                 "start_offset": row.get("start_offset"),
                 "end_offset": row.get("end_offset"),
+                # 0.17.0 hit_window + F1: the hit's row_index drives the ±N
+                # window expansion, and the row's memory_version lets the
+                # preview layer drop stale-version hits instead of slicing
+                # the new content with old offsets (owner 2026-09-23). Both
+                # ride the row_knn row (r.*); debug pages expose them
+                # additively (established _evidence_hits contract).
+                "row_index": row.get("row_index"),
+                "row_version": row.get("memory_version"),
                 "distance": distance,
                 "score": score,
             })
         ranked: list[tuple[float, int, dict[str, Any]]] = []
+        best_hit_ids: dict[int, int] = {}
         for mid, entry in by_memory.items():
             hits = sorted(entry["hits"], key=lambda h: float(h.get("score") or 0.0), reverse=True)
             best = float(hits[0].get("score") or 0.0) if hits else 0.0
+            best_evidence_id = hits[0].get("evidence_id") if hits else None
+            if best_evidence_id is not None:
+                best_hit_ids[mid] = int(best_evidence_id)
             support = 0.0
             seen_kinds: set[str] = set()
             for hit in hits[1:4]:
@@ -797,6 +370,20 @@ def _wide_recall(
                 support += max(0.0, float(hit.get("score") or 0.0) - 0.45)
             ranked.append((best + 0.08 * support, mid, entry["row"]))
         ranked.sort(reverse=True, key=lambda item: item[0])
+        # Gate-v2 G2: true cosine for each memory's best row (the legacy
+        # `1.0 - L2 distance` score goes negative on non-unit vectors and
+        # #91's display read -67.5). One batched IN fetch for the per-memory
+        # best rows only — the full window (cap*16 rows) would pull ~800
+        # blobs per query for a value only the best row feeds.
+        best_cosines: dict[int, float] = {}
+        if best_hit_ids and query_embedding:
+            best_vectors = db.evidence.row_vectors_for_ids(
+                list(best_hit_ids.values()),
+            )
+            for mid, row_id in best_hit_ids.items():
+                vector = best_vectors.get(row_id)
+                if vector:
+                    best_cosines[mid] = vector_cosine(list(query_embedding), vector)
         evidence_only: list[int] = []
         for evidence_rank, (_score, mid, row) in enumerate(
             ranked[:evidence_memory_cap], 1,
@@ -812,6 +399,9 @@ def _wide_recall(
                 key=lambda h: float(h.get("score") or 0.0),
                 reverse=True,
             )
+            best_cosine = best_cosines.get(mid)
+            if best_cosine is not None:
+                d["_evidence_best_score"] = best_cosine
             if lexical_row is None:
                 evidence_only.append(mid)
             pool[mid] = d
@@ -845,6 +435,11 @@ def _wide_recall(
                     for key in (
                         "_vec_candidate", "_evidence_vec_candidate",
                         "_evidence_rank", "_evidence_hits", "id",
+                        # K1: 真余弦必须活过重建——G2 的余弦精确席与检索线
+                        # 的中间带救济都消费它，而 evidence-only 行（两者
+                        # 的目标人群）此前在这里被整体洗掉（先在缺陷：
+                        # 既有 G2 余弦用例碰巧是双通道行才一直绿着）。
+                        "_evidence_best_score",
                     )
                     if key in pool[mid]
                 }
@@ -853,6 +448,7 @@ def _wide_recall(
     # Fuse channel ranks, then restore the original bounded pool size. A memory
     # present in both channels naturally receives more support than one present
     # in only one channel. Trust/recency remain later, lightweight adjustments.
+    query_key = _subject_key(query)
     for memory_id, row in pool.items():
         lexical = lexical_rank.get(int(memory_id))
         evidence = row.get("_evidence_rank")
@@ -860,9 +456,46 @@ def _wide_recall(
         if lexical is not None:
             fusion += 1.0 / (_RRF_K + lexical)
             row["_lexical_rank"] = lexical
+            # Gate-v2 G2 transparency: the FTS channel's raw rank on the item
+            # (the fusion arithmetic flattens rank differences into ~1/60
+            # steps — #91 read evidence cosine 1.0 through lexical rank 15).
+            row["lexical_rank"] = lexical
         if evidence is not None:
             fusion += 1.0 / (_RRF_K + int(evidence))
+        # Gate-v2 G2 exact-hit guarantee (owner 拍板 6): a memory whose
+        # subject IS the query (normalized: casefold + strip whitespace), or
+        # whose best evidence row's TRUE cosine clears COS_EXACT_BOOST, is
+        # what the user asked for — +1.0 fusion dwarfs every rank
+        # computation (~300 final points) instead of competing with them.
+        best_cosine = row.get("_evidence_best_score")
+        if (
+            (query_key and query_key == _subject_key(row.get("subject")))
+            or (best_cosine is not None and best_cosine >= COS_EXACT_BOOST)
+        ):
+            fusion += 1.0
+            row["_exact_match"] = True
+            if best_cosine is not None:
+                # Transparency: the evidence channel's real cosine on the item.
+                row["evidence_best_score"] = round(float(best_cosine), 4)
         row["_fusion_score"] = fusion
+
+    # 检索线 K2：向量准入线（方案 §3c，owner 2026-09-24 拍板 9）——
+    # evidence-only 候选（无词法席位的纯向量行）的 best 行真余弦低于
+    # COS_RECALL_FLOOR 的整条不进结果，词法候选豁免（维持 §1c 的
+    # 排名+8.25 双保险）。仅 active 查询路径生效：expired 审计是
+    # 宁滥勿缺的遍历语义，沿 8.25 门的既有豁免口径（R2-P1-10）。
+    # 真余弦缺失（向量未发布/拉取失败）fail-open——与 G2 对 None 的
+    # 处理一致，不误杀（R2-P1-4）。池内字典操作，零新增 SQL。
+    if status_filter == "active":
+        dropped = [
+            memory_id
+            for memory_id, row in pool.items()
+            if memory_id not in lexical_rank
+            and row.get("_evidence_best_score") is not None
+            and float(row["_evidence_best_score"]) < COS_RECALL_FLOOR
+        ]
+        for memory_id in dropped:
+            del pool[memory_id]
 
     fused = sorted(
         pool.values(),
@@ -895,6 +528,15 @@ def _wide_recall(
         selected[int(row["id"])] = row
     for row in evidence_candidates[:evidence_quota]:
         selected[int(row["id"])] = row
+    # Gate-v2 G2: exact hits are exempt from the quota arithmetic — both
+    # quotas admit by ORIGINAL channel rank, and an exact match entering the
+    # pool through a late channel (surface/LIKE) carries the worst ranks, so
+    # without this seat it would be trimmed before its +1.0 fusion ever gets
+    # to rerank (adversarial review P1: the fixture pool was too small to
+    # catch this; the real library would have starved it).
+    for row in fused:
+        if row.get("_exact_match") and int(row["id"]) not in selected:
+            selected[int(row["id"])] = row
     # v0.15.9: bounded reserved seats for channel-3 surface hits — without
     # this, exact subject/tags matches starve in the fusion-order trim because
     # they always carry the worst lexical ranks (they enter the pool last).
@@ -912,81 +554,31 @@ def _wide_recall(
                 break
     return list(selected.values())
 
+def _passes_query_recall_floor(row: dict[str, Any], alloglottic: bool = False) -> bool:
+    """0.17.0 分层门槛（owner 2026-09-26 拍板）：复合分线只管词法锚定候选，
+    evidence-only 纯向量行改由余弦线把守。
 
-def _sanitize_fts_query_or(query: str) -> str:
-    """Build a loosened FTS5 query that OR's all token groups together.
-
-    Used for the wide-recall OR channel — catches documents that share any
-    one trigram/token with the query, even if they don't satisfy the AND.
+    背景：8.25 复合线系中文个人库标定，而跨语言命中（en 查询→中文记忆）与
+    改述查询天然 evidence-only——跨语种字面零重叠使词法通道零贡献、复合分
+    系统性偏低（recall-v3-len en→zh 15 个 gold 复合 7.51-8.22 贴线被误杀，
+    余弦 0.509-0.681 全在 COS_RECALL_FLOOR 之上）。evidence-only 行的向量
+    质量已由 K2 向量准入线（同值 COS_RECALL_FLOOR）把守：进池与放行共用
+    一把余弦尺，不再被复合线二道惩罚；词法锚定候选（FTS/surface，
+    ``_lexical_rank`` 非 None）维持复合线——legal-form 噪音防线不变。
+    豁免仅在查询非 CJK 主导（alloglottic，由 _query_non_cjk_dominant 判定）
+    时启用——主考卷实测 zh 查询豁免 0 gold/51 噪音（legal 防线必须保留），
+    en 查询豁免 15 gold；双语料数据锚：eval/results/xlang-floor-policies.json
+    与 eval/results/recall-lf-fields.json 席位扫描；LOCOMO 同类反事实见
+    WorkBuddy mema-vs-mem0 消融报告。
     """
-    tokens = [tok for tok in query.split() if tok]
-    if not tokens:
-        return ""
-    parts: list[str] = []
-    for tok in tokens:
-        if _is_cjk_token(tok):
-            trigrams = _split_cjk_token(tok)
-            parts.extend(trigrams)
-        else:
-            parts.append(_quote_phrase(tok))
-    if not parts:
-        return ""
-    return " OR ".join(parts)
-
-
-def _parse_time(s: Any) -> datetime | None:
-    """v0.7.3: parse an ISO 8601 time string for after_time/before_time filtering.
-
-    Implementation lives in timeutil.parse_iso8601 (Phase 1); thin re-export here.
-    Naive datetimes are treated as UTC; returns None on falsy/unparseable input.
-    """
-    from .timeutil import parse_iso8601
-    return parse_iso8601(s)
-
-
-def _sanitize_tags_filter(tags_filter: list[str] | None) -> list[str] | None:
-    """v0.7.3: normalize the tags_filter argument (design §3.2).
-
-    Drops non-strings, empty strings, and duplicates (preserving first-seen
-    order). An empty result is returned as None so callers treat it as
-    "no filter" (same as not passing the argument).
-    """
-    if tags_filter is None:
-        return None
-    seen: set[str] = set()
-    out: list[str] = []
-    for t in tags_filter:
-        if not isinstance(t, str):
-            continue
-        t = t.strip()
-        if not t or t in seen:
-            continue
-        seen.add(t)
-        out.append(t)
-    return out if out else None
-
-
-def _passes_filters(
-    rec: dict[str, Any],
-    tags_filter: list[str] | None,
-    after_dt: datetime | None,
-    before_dt: datetime | None,
-    source_type: str | None,
-) -> bool:
-    """v0.7.3: post-filter a candidate row against user-provided filters.
-
-    0.15.14 (B2): delegates to the single shared predicate
-    (db.memories.row_passes_filters) so this post-filter, the COUNT and the
-    filter-driven recall all run identical logic — the former SQL mirror
-    drifted on sub-second time bounds and numeric tags (#962 P1#6).
-    """
-    from .db.memories import row_passes_filters
-
-    return row_passes_filters(
-        rec.get("tags"), rec.get("ingest_time"), rec.get("source_type"),
-        tags_filter=tags_filter, after_dt=after_dt, before_dt=before_dt,
-        source_type=source_type,
-    )
+    if float(row.get("_final_score") or 0.0) >= QUERY_RECALL_SCORE_FLOOR:
+        return True
+    if not alloglottic:
+        return False
+    if row.get("_lexical_rank") is not None:
+        return False
+    ev = row.get("_evidence_best_score")
+    return ev is not None and float(ev) >= COS_RECALL_FLOOR
 
 
 def search_memories(
@@ -1224,6 +816,9 @@ def search_memories(
                 ws_canonical, pool_canonicals,
             )
 
+    # 检索线 K1：关键词模式查询的中间带救济（方案 §3b）——池内内存
+    # 操作，先于 _soft_rerank 生效；非关键词查询零成本直返。
+    _apply_keyword_rescue(query, pool)
     reranked = _soft_rerank(
         query, pool,
         ws_canonical=ws_canonical, isolation=isolation,
@@ -1233,12 +828,13 @@ def search_memories(
     # v0.15.9 page floor: on the ACTIVE query-recall path, below-floor
     # candidates never reach the page (宁缺毋滥). Expired audit recall keeps
     # everything — its purpose is exhaustive review, not relevance.
+    # 0.17.0 分层门槛：词法锚定候选走复合分线，evidence-only 纯向量行走
+    # COS_RECALL_FLOOR 余弦线（与 K2 准入线同值——见
+    # _passes_query_recall_floor docstring）。
     if status_filter == "active":
         pre_floor_count = len(reranked)
-        reranked = [
-            r for r in reranked
-            if float(r.get("_final_score") or 0.0) >= QUERY_RECALL_SCORE_FLOOR
-        ]
+        alloglottic = _query_non_cjk_dominant(query) if query else False
+        reranked = [r for r in reranked if _passes_query_recall_floor(r, alloglottic)]
         if pre_floor_count and not reranked:
             warnings.append(
                 f"no candidates reached the relevance floor ({QUERY_RECALL_SCORE_FLOOR:g}); "
@@ -1281,281 +877,3 @@ def search_memories(
                 if k.startswith("_") and not (keep_evidence_hits and k == "_evidence_hits"):
                     r.pop(k, None)
     return SearchOutcome(page, warnings, has_more, total, "direct")
-
-
-def _coerce_tags(raw: Any) -> list[str]:
-    """v0.7.4: normalise a memory's ``tags`` field into a deduped ``list[str]``.
-
-    Implementation lives in text.coerce_tags (Phase 1 single source); thin re-export
-    here so existing imports keep working. Never raises — bad shapes yield [].
-    """
-    from .text import coerce_tags
-    return coerce_tags(raw)
-
-
-def _linked_open_items_for_search(
-    db: MemoryDB,
-    results: list[dict[str, Any]],
-    warnings: list[str],
-    max_items: int = 5,
-    ws_canonical: "WorkspaceScope" = None,
-    exclude_workspaces: "list[str] | set[str] | frozenset[str] | None" = None,
-) -> list[dict[str, Any]]:
-    """v0.7.4: attach up to ``max_items`` active todo memories that share
-    meaningful tags with the current result set (linked_open_items).
-
-    Pure read-only enhancement — never writes. Never raises: on any DB error
-    returns [] and appends a degradation warning to ``warnings``.
-
-    Three-layer short-circuit (design 性能设计):
-      L0 (memory): bail without touching DB if results carry no meaningful tag
-           (after stripping ``todo`` and single-char tags).
-      L1 (DB): EXISTS check for any active memory tagged ``todo``; bail if none.
-      L2 (DB): multiple SELECTs on one connection compute ``active_count``,
-           per-tag ``df``, todo candidates, apply the M1 stoplist, score, sort,
-           truncate. Note: this is a best-effort read, NOT a transactional
-           snapshot — the bare SELECTs don't share a read snapshot under WAL,
-           so concurrent writes can in principle make the count/df/candidates
-           slightly inconsistent. Acceptable for an advisory side-hint; if
-           consistency ever matters here, wrap the SELECTs in a read txn.
-
-    Stoplist (M1 — uniform, independent of todo count):
-      tag == 'todo' | len(tag) <= 1 | df >= 3 AND df/active_count >= 0.20
-
-    ``json_valid(tags)`` is applied in SQL so malformed-tag rows are silently
-    filtered (M4-A) — this does NOT produce a warning. Only a real DB failure
-    produces a warning (M4-B).
-    """
-    if not results:
-        return []
-
-    # --- L0: collect meaningful tags from results (strip todo / single-char) ---
-    result_id_to_tags: dict[int, set[str]] = {}
-    all_meaningful: set[str] = set()
-    for rec in results:
-        rid = rec.get("id")
-        tags = _coerce_tags(rec.get("tags"))
-        meaningful = {t for t in tags if t != "todo" and len(t) > 1}
-        if rid is not None and meaningful:
-            result_id_to_tags[int(rid)] = meaningful
-            all_meaningful |= meaningful
-    if not all_meaningful or not db.db_available:
-        return []
-
-    result_ids = list(result_id_to_tags.keys())
-
-    def _is_stoplisted(tag: str, df: int, active_count: int) -> bool:
-        # M1: uniform stoplist — no todo-count branching.
-        if tag == "todo":
-            return True
-        if len(tag) <= 1:
-            return True
-        if df >= 3 and active_count > 0 and df / active_count >= 0.20:
-            return True
-        return False
-
-    try:
-        conn = db._new_connection()
-        scope_sql, scope_params = workspace_scope_sql(
-            "COALESCE(NULLIF(m.workspace_canonical, ''), m.workspace)", ws_canonical,
-        )
-        # v0.15.5: the blacklist applies to this whole-DB todo-attachment
-        # channel too — otherwise blacklisted-bucket todos leak back into the
-        # same unscoped find payload the recall pool just excluded them from.
-        excl_m_sql, _, excl_params = workspace_exclusion_sql(exclude_workspaces)
-        workspace_clause = (
-            (f"AND {scope_sql} " if scope_sql else "") + (f"AND {excl_m_sql} " if excl_m_sql else "")
-        )
-        workspace_params: list[Any] = list(scope_params) + list(excl_params)
-        try:
-            # --- L1: EXISTS check for active+todo memories ---
-            todo_exists = conn.execute(
-                "SELECT EXISTS ("
-                " SELECT 1 FROM memories m"
-                " WHERE m.status='active' " + workspace_clause +
-                "   AND EXISTS ("
-                "     SELECT 1 FROM json_each("
-                "       CASE WHEN json_valid(m.tags) THEN m.tags ELSE '[]' END"
-                "     ) WHERE json_each.value='todo' AND json_each.type='text'"
-                "   )"
-                ") AS e",
-                workspace_params,
-            ).fetchone()["e"]
-            if not todo_exists:
-                return []
-
-            # --- L2: active_count ---
-            active_count = int(conn.execute(
-                "SELECT COUNT(*) AS c FROM memories m WHERE m.status='active' " + workspace_clause,
-                workspace_params,
-            ).fetchone()["c"])
-            if active_count <= 0:
-                return []
-
-            # todo candidates: active + tagged 'todo', excluding result IDs.
-            ph = ",".join("?" * len(result_ids)) if result_ids else ""
-            exclude_clause = f"AND m.id NOT IN ({ph})" if result_ids else ""
-            cand_rows = conn.execute(
-                f"""
-                SELECT m.id, m.subject, m.tags, m.ingest_time
-                FROM memories m
-                WHERE m.status='active' {exclude_clause} {workspace_clause}
-                  AND EXISTS (
-                    SELECT 1 FROM json_each(
-                      CASE WHEN json_valid(m.tags) THEN m.tags ELSE '[]' END
-                    ) WHERE json_each.value='todo' AND json_each.type='text'
-                  )
-                """,
-                list(result_ids) + workspace_params,
-            ).fetchall()
-            if not cand_rows:
-                return []
-
-            # per-tag df across the active set (json_valid guard ⇒ M4-A silence).
-            # 0.16.12 P1-T6: cached per scope behind the global fingerprint
-            # (COUNT(active), SUM(version)) — the L1/L2 queries above stay
-            # live (they gate whether df is needed at all), only the GROUP BY
-            # json_each full scan is memoised.
-            tag_df: dict[str, int] = {}
-            scope_key = tuple(str(p) for p in workspace_params)
-            fp_row = conn.execute(
-                "SELECT COUNT(*), COALESCE(SUM(version),0) FROM memories WHERE status='active'"
-            ).fetchone()
-            fingerprint = (int(fp_row[0]), int(fp_row[1]))
-            with db._linked_df_cache_lock:
-                cached = db._linked_df_cache.get(scope_key)
-            if cached is not None and cached[0] == fingerprint:
-                tag_df = dict(cached[1])
-            else:
-                df_rows = conn.execute(
-                    f"""
-                    SELECT tag.value AS t, COUNT(DISTINCT m.id) AS df
-                    FROM memories m, json_each(
-                      CASE WHEN json_valid(m.tags) THEN m.tags ELSE '[]' END
-                    ) AS tag
-                    WHERE m.status='active' {workspace_clause} AND tag.type='text'
-                    GROUP BY tag.value
-                    """,
-                    workspace_params,
-                ).fetchall()
-                for r in df_rows:
-                    tag_df[r["t"]] = int(r["df"])
-                with db._linked_df_cache_lock:
-                    db._linked_df_cache[scope_key] = (fingerprint, dict(tag_df))
-
-            scored: list[dict[str, Any]] = []
-            for row in cand_rows:
-                cand_id = int(row["id"])
-                cand_tags = _coerce_tags(row["tags"])
-                cand_subject = row["subject"] or f"memory #{cand_id}"
-                cand_ingest = row["ingest_time"] or ""
-                matched_meaningful: set[str] = set()
-                matched_result_ids: set[int] = set()
-                for tag in cand_tags:
-                    if tag not in all_meaningful:
-                        continue
-                    if _is_stoplisted(tag, tag_df.get(tag, 0), active_count):
-                        continue
-                    matched_meaningful.add(tag)
-                    for rid, rtags in result_id_to_tags.items():
-                        if tag in rtags:
-                            matched_result_ids.add(rid)
-                # score: 2 per matched meaningful tag (≥ 2 ⇒ ≥ 1 overlap).
-                score = 2 * len(matched_meaningful)
-                if score < 2:
-                    continue
-                scored.append({
-                    "id": cand_id,
-                    "subject": cand_subject,
-                    "tags": cand_tags,
-                    "ingest_time": cand_ingest,
-                    "reason": "tag_overlap: " + ", ".join(sorted(matched_meaningful)),
-                    "matched_result_ids": sorted(matched_result_ids),
-                    "_score": score,
-                })
-            if not scored:
-                return []
-            # score DESC → ingest_time DESC → id DESC.
-            scored.sort(
-                key=lambda x: (x["_score"], x["ingest_time"], x["id"]),
-                reverse=True,
-            )
-            out: list[dict[str, Any]] = []
-            for item in scored[:max_items]:
-                item.pop("_score", None)
-                out.append(item)
-            return out
-        finally:
-            conn.close()
-    except sqlite3.Error as exc:
-        warnings.append(f"linked_open_items lookup failed: {exc}; returned [].")
-        return []
-
-
-def _recent_fallback(
-    db: MemoryDB,
-    workspace: str | None,
-    tags: list[str] | None,
-    limit: int,
-    like_status_clause: str,
-    warnings: list[str],
-    offset: int = 0,
-    ws_canonical: "WorkspaceScope" = None,
-    exclude_workspaces: "list[str] | set[str] | frozenset[str] | None" = None,
-) -> tuple[list[dict[str, Any]], list[str], bool, int]:
-    """Recent-memory fallback when no direct match found (r4 §4.2 safety net)."""
-    clauses = [like_status_clause]
-    params: list[Any] = []
-    for tag in tags or []:
-        clauses.append("tags LIKE ?")
-        params.append(f"%{tag}%")
-    # strict isolation: filter to the caller's admitted workspace set INSIDE the
-    # SQL so COUNT and the paginated window agree — a Python post-filter on an
-    # already-paginated page reports a wrong total and can under-fill the page.
-    # Match canonical with a raw fallback for rows written before the column
-    # existed (workspace_canonical NULL → compare against raw workspace).
-    scope_sql, scope_params = workspace_scope_sql(
-        "COALESCE(NULLIF(workspace_canonical, ''), workspace)", ws_canonical,
-    )
-    if scope_sql:
-        clauses.append(scope_sql)
-        params.extend(scope_params)
-    _, excl_sql, excl_params = workspace_exclusion_sql(exclude_workspaces)
-    if excl_sql:
-        clauses.append(excl_sql)
-        params.extend(excl_params)
-    conn = db._new_connection()
-    try:
-        count_row = conn.execute(
-            f"SELECT COUNT(*) AS c FROM memories WHERE {' AND '.join(clauses)}",
-            params,
-        ).fetchone()
-        total_estimate = int(count_row["c"] or 0) if count_row else 0
-        rows = conn.execute(
-            f"""SELECT *, 0 AS score FROM memories
-                WHERE {' AND '.join(clauses)}
-                ORDER BY
-                  CASE status WHEN 'superseded' THEN 1 ELSE 0 END,
-                  CASE protection_level
-                    WHEN 'locked' THEN 0
-                    WHEN 'protected' THEN 1
-                    ELSE 2
-                  END,
-                  CASE source_type
-                    WHEN 'user_confirmed' THEN 0
-                    WHEN 'document_extracted' THEN 1
-                    ELSE 2
-                  END,
-                  confidence DESC,
-                  ingest_time DESC,
-                  event_time DESC
-                LIMIT ? OFFSET ?""",
-            params + [limit, offset],
-        ).fetchall()
-    finally:
-        conn.close()
-    # v0.15.9: the no-direct-match warning is gone with the query fallback —
-    # the only remaining caller is explicit empty-query browsing, where
-    # "no match" wording would be noise.
-    has_more = total_estimate > offset + len(rows)
-    return [row_to_dict(row) for row in rows], warnings, has_more, total_estimate

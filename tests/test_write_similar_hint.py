@@ -169,6 +169,7 @@ def _confirm_pending(tools: MemoryTools, memory_id: int) -> None:
     if record["status"] != "pending":
         return
     confirmed = tools.memory_govern("confirm_pending_workspace", {
+        "workspace": record.get("workspace_canonical") or record.get("workspace") or "default",
         "memory_id": memory_id,
         "canonical": record["workspace_canonical"] or record["workspace"],
         "authorized": True,
@@ -194,6 +195,7 @@ def test_strict_confirm_pending_workspace_adds_similar_active_notice(tmp_path: P
     assert second["data"]["record"]["status"] == "pending"
 
     first_confirmed = tools.memory_govern("confirm_pending_workspace", {
+        "workspace": "projA",
         "memory_id": first["data"]["id"],
         "canonical": "projA",
         "authorized": True,
@@ -202,6 +204,7 @@ def test_strict_confirm_pending_workspace_adds_similar_active_notice(tmp_path: P
     assert _similar_notices(first_confirmed) == [], "first active memory has no peers"
 
     second_confirmed = tools.memory_govern("confirm_pending_workspace", {
+        "workspace": "projA",
         "memory_id": second["data"]["id"],
         "canonical": "projA",
         "authorized": True,

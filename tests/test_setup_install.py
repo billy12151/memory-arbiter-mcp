@@ -231,151 +231,16 @@ def test_download_416_drops_part_and_retries_fresh(monkeypatch, tmp_path):
     assert attempts["n"] == 2
 
 
-def test_guidance_setup_preserves_installed_qwen_path(isolated_env, monkeypatch):
-    """Bare `mema setup` after a successful --install must not wipe the qwen
-    config (agents re-run setup to verify — the review's P1)."""
-    monkeypatch.setattr(setup_cli, "_check_sqlite_vec", lambda: True)
-    monkeypatch.setattr(setup_cli, "_check_llama_cpp", lambda: True)
-    config_path = isolated_env / ".config" / "memory-arbiter" / "config.json"
-    config_path.parent.mkdir(parents=True)
-    qwen = isolated_env / "models" / "my-qwen.gguf"
-    qwen.parent.mkdir()
-    qwen.write_bytes(b"q")
-    config_path.write_text(json.dumps({
-        "embedding": {"model_path": None},
-        "semantic_conflict": {"model_path": str(qwen)},
-    }), encoding="utf-8")
-    setup_cli.run_cli([])
-    config = json.loads(config_path.read_text(encoding="utf-8"))
-    assert config["semantic_conflict"]["model_path"] == str(qwen)
+def test_setup_guidance_covers_mdeberta_migration(tmp_path, monkeypatch, capsys):
+    """0.17.1: setup 不再下载/写 Qwen 路径；指引改为 mdeberta 三步安装。
+    旧 model_path 保留在用户 config 中不受影响（迁移警告由 config 层出）。"""
+    import memory_arbiter.setup_cli as sc
+
+    src = open(sc.__file__).read()
+    assert "QWEN_MODEL_FILENAME" not in src, "Qwen download constants must be gone"
+    assert "mdeberta" in src, "setup must point at the mdeberta install path"
 
 
-def test_install_skips_download_for_preserved_models(isolated_env, monkeypatch, capsys):
-    """A user-supplied embedding model must never be overwritten by the
-    bundled embeddinggemma download (P1)."""
-    monkeypatch.setattr(setup_cli, "_check_sqlite_vec", lambda: True)
-    monkeypatch.setattr(setup_cli, "_check_llama_cpp", lambda: True)
-    config_path = isolated_env / ".config" / "memory-arbiter" / "config.json"
-    config_path.parent.mkdir(parents=True)
-    own = isolated_env / "models" / "my-embed.gguf"
-    own.parent.mkdir()
-    own.write_bytes(b"e")
-    qwen = isolated_env / "models" / "my-qwen.gguf"
-    qwen.write_bytes(b"q")
-    config_path.write_text(json.dumps({
-        "embedding": {"model_path": str(own)},
-        "semantic_conflict": {"model_path": str(qwen)},
-    }), encoding="utf-8")
-    monkeypatch.setattr(
-        setup_cli, "_install_model",
-        lambda label, dest, urls, *, expected_bytes, log=print: (_ for _ in ()).throw(
-            AssertionError(f"must not download over preserved model: {label}"),
-        ),
-    )
-    rc = setup_cli.run_cli(["--install"])
-    out = capsys.readouterr().out
-    assert "沿用已配置模型" in out
-    config = json.loads(config_path.read_text(encoding="utf-8"))
-    assert config["embedding"]["model_path"] == str(own)
-    assert config["semantic_conflict"]["model_path"] == str(qwen)
-    assert rc == 0
-
-
-def test_install_respects_memory_arbiter_config_env(isolated_env, monkeypatch, tmp_path):
-    """--install must write the config the runtime actually reads (the env
-    pointer), not just the XDG default (P2)."""
-    monkeypatch.setattr(setup_cli, "_check_sqlite_vec", lambda: True)
-    monkeypatch.setattr(setup_cli, "_check_llama_cpp", lambda: True)
-    env_config = tmp_path / "custom-config.json"
-    monkeypatch.setenv("MEMORY_ARBITER_CONFIG", str(env_config))
-
-    def fake_install(label, dest, urls, *, expected_bytes, log=print):
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(b"fake-model")
-        return True
-
-    monkeypatch.setattr(setup_cli, "_install_model", fake_install)
-    setup_cli.run_cli(["--install"])
-    config = json.loads(env_config.read_text(encoding="utf-8"))
-    assert config["semantic_conflict"]["model_path"].endswith(setup_cli.QWEN_MODEL_FILENAME)
-
-
-def test_install_rejects_dry_run_combination(isolated_env):
-    with pytest.raises(SystemExit) as excinfo:
-        setup_cli.run_cli(["--install", "--no-config"])
-    assert excinfo.value.code == 2
-
-
-def test_pip_extra_index_scoped_to_llama_cpp(monkeypatch):
-    seen: list[dict[str, object]] = []
-    monkeypatch.setattr(
-        setup_cli.subprocess, "run",
-        lambda cmd, **kw: seen.append({"cmd": cmd, "kw": kw}) or
-        type("R", (), {"returncode": 0, "stderr": "", "stdout": ""})(),
-    )
-    assert setup_cli._pip_install(["sqlite-vec"], log=lambda _m: None)
-    assert "--extra-index-url" not in seen[0]["cmd"]
-    assert setup_cli._pip_install(["llama-cpp-python"], extra_index=setup_cli.LLAMA_CPP_CPU_EXTRA_INDEX, log=lambda _m: None)
-    assert "--extra-index-url" in seen[1]["cmd"]
-
-
-# ── --install end-to-end (pip + downloads mocked) ───────────────────────────
-
-def test_install_mode_writes_qwen_path_into_config(isolated_env, monkeypatch):
-    installed: list[str] = []
-    monkeypatch.setattr(setup_cli, "_check_sqlite_vec", lambda: True)
-    monkeypatch.setattr(setup_cli, "_check_llama_cpp", lambda: True)
-    def fake_install(label, dest, urls, *, expected_bytes, log=print):
-        installed.append(label)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(b"fake-model")
-        return True
-
-    monkeypatch.setattr(setup_cli, "_install_model", fake_install)
-    rc = setup_cli.run_cli(["--install"])
-    config_path = isolated_env / ".config" / "memory-arbiter" / "config.json"
-    config = json.loads(config_path.read_text(encoding="utf-8"))
-    assert config["semantic_conflict"]["model_path"].endswith(setup_cli.QWEN_MODEL_FILENAME)
-    assert installed == ["embedding 模型", "Qwen 语义模型"]
-    assert rc == 0  # mocked checks all pass → ready
-
-
-def test_guidance_mode_keeps_qwen_informational(isolated_env, monkeypatch, capsys):
-    monkeypatch.setattr(setup_cli, "_check_sqlite_vec", lambda: True)
-    monkeypatch.setattr(setup_cli, "_check_llama_cpp", lambda: True)
-    # No embedding model on disk → exit 1, but a missing qwen alone must not
-    # change readiness in guidance mode.
-    rc = setup_cli.run_cli([])
-    out = capsys.readouterr().out
-    assert "Qwen 语义模型: 未找到" in out
-    assert "属可选能力" in out
-    config = json.loads(
-        (isolated_env / ".config" / "memory-arbiter" / "config.json").read_text(encoding="utf-8"),
-    )
-    assert config["semantic_conflict"]["model_path"] is None
-    assert rc == 1  # embedding model missing; qwen did not add to the failure
-
-
-def test_pyenv_guidance_for_unsupported_python(monkeypatch, capsys):
-    class _FakeVersion:
-        major, minor, micro = 3, 13, 1
-
-    monkeypatch.setattr(setup_cli.sys, "version_info", _FakeVersion())
-    lines, _all_ok = setup_cli._render_check_step(
-        {
-            "sqlite_vec": True, "llama_cpp": False,
-            "model_exists": True, "model_size_ok": True, "model_size_bytes": 1,
-            "qwen_exists": True, "qwen_size_bytes": 1,
-            "config_load_ok": True, "config_load_error": "", "config_warnings": [],
-        },
-        Path("m.gguf"), Path("q.gguf"), use_color=False,
-    )
-    text = "\n".join(lines)
-    assert "pyenv install 3.12" in text
-    assert "pyenv local 3.12" in text
-
-
-# ── degraded-capability banner + health card ────────────────────────────────
 
 def _make_tools(tmp_path: Path, **settings_kwargs) -> MemoryTools:
     pytest.importorskip("sqlite_vec")
@@ -389,7 +254,9 @@ def _make_tools(tmp_path: Path, **settings_kwargs) -> MemoryTools:
 
 
 def test_banner_fires_for_real_config_with_missing_models(tmp_path):
-    tools = _make_tools(tmp_path, config_file_loaded=True)
+    tools = _make_tools(
+        tmp_path, config_file_loaded=True, semantic_conflict_enabled=True,
+    )  # 0.17.1：enabled 且 ckpt 缺失 → 语义降级行出现；deliberate opt-out 静音
     text = "\n".join(tools.db.state.warnings)
     assert "降级模式" in text
     assert "向量召回未启用" in text
@@ -412,7 +279,7 @@ def test_banner_honours_deliberate_semantic_opt_out(tmp_path):
         config_file_loaded=True,
         embedding_model_path=tmp_path / "m.gguf",  # missing file → embedding line stays
         semantic_conflict_enabled=False,
-        semantic_conflict_model_path=tmp_path / "q.gguf",  # configured → deliberate opt-out
+        semantic_conflict_mdeberta_ckpt=tmp_path / "q.gguf",  # configured → deliberate opt-out
     )
     text = "\n".join(tools.db.state.warnings)
     assert "向量召回未启用" in text
@@ -429,7 +296,7 @@ def test_banner_quiet_when_install_is_full(tmp_path):
         config_file_loaded=True,
         embedding_model_path=embedding,
         semantic_conflict_enabled=True,
-        semantic_conflict_model_path=qwen,
+        semantic_conflict_mdeberta_ckpt=qwen,
     )
     assert not any("降级模式" in warning for warning in tools.db.state.warnings)
 
@@ -444,7 +311,7 @@ def test_setup_health_states(tmp_path):
     qwen = tmp_path / "q.gguf"
     qwen.write_bytes(b"fake")
     opted_out = _make_tools(
-        tmp_path, semantic_conflict_enabled=False, semantic_conflict_model_path=qwen,
+        tmp_path, semantic_conflict_enabled=False, semantic_conflict_mdeberta_ckpt=qwen,
     )
     assert opted_out._setup_health()["semantic_model"] == "disabled"
 

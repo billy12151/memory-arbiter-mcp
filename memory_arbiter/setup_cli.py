@@ -9,9 +9,11 @@ download models, does **not** touch the network — failing installs of
 ``llama-cpp-python`` or a blocked model download are environment problems the
 user must handle, and setup only tells them precisely what to do. Passing
 ``--install`` flips the command into execution mode: it pip-installs the
-optional dependencies, downloads both GGUF models (embedding + semantic,
-HuggingFace with ModelScope fallback, resumable), and writes the finished
-config itself — one command an agent can run end-to-end. Dispatch is
+optional dependencies, downloads the embedding GGUF model (HuggingFace with
+ModelScope fallback, resumable), and writes the finished config itself — one
+command an agent can run end-to-end. The mDeBERTa judge checkpoint is NOT
+downloaded here: the user fetches it separately and configures
+``semantic_conflict.mdeberta_ckpt``. Dispatch is
 wired in ``server.main`` by intercepting ``argv[1]=="setup"``; no new console
 script is added (pyproject unchanged).
 """
@@ -31,7 +33,7 @@ from typing import Any, Callable
 
 # Model + download sources — kept as module constants so they are easy to update.
 DEFAULT_MODEL_FILENAME = "embeddinggemma-300m-qat-Q8_0.gguf"
-# Exact upstream byte counts (HF Content-Length verified 2026-09-09; qwen
+# Exact upstream byte counts (HF Content-Length verified 2026-09-09; embedder
 # matches the production model on disk). --install downloads these known files
 # and validates EXACTLY — a ±20% tolerance would let a silent truncation land
 # as a corrupt model that every later run then "skips as already present".
@@ -50,24 +52,11 @@ MODELSCOPE_DOWNLOAD_URL = (
 )
 LLAMA_CPP_CPU_EXTRA_INDEX = "https://abetlen.github.io/llama-cpp-python/whl/cpu"
 
-# Semantic-conflict (Qwen) model — the second half of a "full" install. URLs
-# verified 2026-09-09: HF honours Range (206), ModelScope answers 200 to a
-# ranged probe (the downloader treats an ignored Range as restart-from-zero).
-# 0.16.8: default judge model is the official Qwen3-0.6B Q8_0 (the official
-# repo ships small sizes only as Q8_0). Existing installs keep whatever their
-# config points at — the decode-family routing accepts both generations.
-QWEN_MODEL_FILENAME = "Qwen3-0.6B-Q8_0.gguf"
-QWEN_MODEL_DIRNAME = "Qwen3-0.6B"
-EXPECTED_QWEN_BYTES = 639_446_688  # Q8_0; exact (production model on disk)
-QWEN_HF_URL = (
-    "https://huggingface.co/Qwen/Qwen3-0.6B-GGUF"
-    "/resolve/main/Qwen3-0.6B-Q8_0.gguf"
-)
-QWEN_MODELSCOPE_URL = (
-    "https://modelscope.cn/models/Qwen/Qwen3-0.6B-GGUF"
-    "/resolve/master/Qwen3-0.6B-Q8_0.gguf"
-)
-
+# Semantic-conflict judge — historical (0.17.1): the Qwen/GGUF semantic judge
+# retired. The judge is mDeBERTa (V4m checkpoint, 1.1GB, ships separately) —
+# configured via semantic_conflict.mdeberta_ckpt; setup no longer downloads
+# any judge model. See the README "conflict judge model" section for the
+# manual three-step install (extra → checkpoint → config key).
 _DOWNLOAD_CHUNK_BYTES = 1 << 20  # 1 MiB
 _DOWNLOAD_TIMEOUT_S = 60
 _DOWNLOAD_USER_AGENT = "memory-arbiter-setup"
@@ -94,16 +83,13 @@ def _default_config_dict(
     model_path: Path,
     db_path: Path,
     backup_jsonl: Path,
-    *,
-    qwen_model_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Return the slim starter config (19 user keys, file-only; 0.15.14 count).
+    """Return the slim starter config (file-only; the complete user surface
+    is the 21-key reference example, this template intentionally slimmer).
 
     Everything else the 0.14.x config carried is a frozen constant now.
     Identity (client/agent_id) is intentionally left empty: the MCP server
-    refuses to start until it is filled in. ``qwen_model_path`` is only
-    supplied by ``--install`` (execution mode points semantic_conflict at the
-    downloaded model); guidance mode leaves it None.
+    refuses to start until it is filled in.
     """
     return {
         "db_path": str(db_path),
@@ -119,7 +105,8 @@ def _default_config_dict(
             "auto_write": True,
         },
         "semantic_conflict": {
-            "model_path": str(qwen_model_path) if qwen_model_path is not None else None,
+            # 0.17.1: judge = mDeBERTa; set semantic_conflict.mdeberta_ckpt
+            # after downloading the checkpoint (README: conflict judge model).
             "on_write": "async",
         },
         "mcp": {
@@ -145,43 +132,6 @@ def _default_paths() -> tuple[Path, Path, Path, Path]:
     backup_jsonl = data_dir / "memory.backup.jsonl"
     return config_path, model_path, db_path, backup_jsonl
 
-
-def _default_qwen_path() -> Path:
-    """The runtime's default semantic-conflict model location."""
-    return (
-        Path.home() / ".local" / "share" / "memory-arbiter" / "models"
-        / "semantic-conflict" / QWEN_MODEL_DIRNAME / QWEN_MODEL_FILENAME
-    )
-
-
-def _detect_existing_qwen_path(config_path: Path) -> tuple[Path | None, str]:
-    """Semantic-side counterpart of _detect_existing_model_path: an existing
-    config whose semantic_conflict.model_path points at a real file is kept
-    (guidance mode must not wipe what --install wrote). Only real files count,
-    and only non-default locations are "preserved" — the default path is what
-    --install writes anyway.
-    """
-    if not config_path.exists():
-        return None, ""
-    try:
-        parsed = json.loads(config_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None, ""
-    if not isinstance(parsed, dict):
-        return None, ""
-    semantic = parsed.get("semantic_conflict")
-    raw = semantic.get("model_path") if isinstance(semantic, dict) else None
-    if not raw:
-        return None, ""
-    resolved = Path(str(raw)).expanduser()
-    if not resolved.is_file():
-        return None, ""
-    if resolved.name == QWEN_MODEL_FILENAME:
-        return None, ""
-    return resolved, f"检测到你已配置的语义模型: {resolved.name}（沿用，未覆盖）"
-
-
-# ── Execution mode (--install) ─────────────────────────────────────────────
 
 def _download_with_resume(
     url: str,
@@ -510,17 +460,9 @@ def _render_config_step(
 def _render_check_step(
     checks: dict[str, Any],
     model_path: Path,
-    qwen_path: Path,
     use_color: bool,
-    *,
-    require_qwen: bool = False,
 ) -> tuple[list[str], bool]:
-    """Render environment checks + remediation hints. Returns (lines, all_ok).
-
-    The semantic (qwen) model is informational in guidance mode — a minimal
-    install is legitimate — but counts toward readiness under ``--install``,
-    which promises a full install.
-    """
+    """Render environment checks + remediation hints. Returns (lines, all_ok)."""
     lines: list[str] = []
     lines.append(_render_step_header("Step 2 — 环境自检", use_color))
     all_ok = True
@@ -577,23 +519,10 @@ def _render_check_step(
         lines.append(_color("  → 下完放到上述路径，或改 config.json 的 embedding.model_path 指向实际位置", _DIM, use_color))
         lines.append(_color("  → 或运行 `mema setup --install` 自动下载（含断点续传/镜像切换）", _DIM, use_color))
 
-    # semantic-conflict (qwen) model — informational unless --install asked for
-    # a full install.
-    qwen_exists = checks["qwen_exists"]
-    if qwen_exists:
-        qwen_mb = checks["qwen_size_bytes"] / (1024 * 1024)
-        lines.append(f"{_color('✓', _GREEN, use_color)} Qwen 语义模型: 存在 ({qwen_mb:.0f} MB)")
-        lines.append(_color(f"     路径: {qwen_path}", _DIM, use_color))
-    else:
-        if require_qwen:
-            all_ok = False
-            lines.append(f"{mark(False)} Qwen 语义模型: 未找到（冲突检测不可用）")
-        else:
-            lines.append(f"{_color('⚠', _YELLOW, use_color)} Qwen 语义模型: 未找到（冲突检测不可用，属可选能力）")
-        lines.append(_color(f"     预期路径: {qwen_path}", _DIM, use_color))
-        lines.append(_color("  → 运行 `mema setup --install` 自动下载并写 config（推荐）", _DIM, use_color))
-        lines.append(_color(f"  → 手动（HuggingFace）: {QWEN_HF_URL}", _CYAN, use_color))
-        lines.append(_color(f"  → 国内镜像（ModelScope）: {QWEN_MODELSCOPE_URL}", _CYAN, use_color))
+    # semantic-conflict judge (0.17.1: mDeBERTa) — informational pointer; the
+    # 1.1GB checkpoint ships separately and is configured manually.
+    lines.append(f"{_color('ℹ', _YELLOW, use_color)} 冲突判定引擎: mDeBERTa（可选能力）")
+    lines.append(_color("  → 安装: pip install memory-arbiter-mcp[mdeberta]，下载 V4m checkpoint 后配 semantic_conflict.mdeberta_ckpt（见 README）", _DIM, use_color))
 
     # config load
     cl = checks["config_load_ok"]
@@ -634,8 +563,10 @@ def run_cli(argv: list[str]) -> int:
     """CLI entry: generate config, run checks, print remediation. Return exit code.
 
     ``--install`` switches from guidance to execution: pip-install the optional
-    dependencies, download both GGUF models (resumable, mirror fallback), and
-    write the finished config (including semantic_conflict.model_path) itself.
+    dependencies, download the embedding GGUF model (resumable, mirror fallback),
+    and write the finished config itself. The mDeBERTa judge checkpoint is not
+    downloaded here — the user fetches it and sets semantic_conflict.mdeberta_ckpt
+    in the config.
     """
     parser = argparse.ArgumentParser(
         prog="memory-arbiter setup",
@@ -645,7 +576,7 @@ def run_cli(argv: list[str]) -> int:
     parser.add_argument("--config-path", type=str, default=None, help="自定义 config.json 写入路径")
     parser.add_argument("--print-config", action="store_true", help="只打印将生成的 config 内容，不写盘")
     parser.add_argument("--no-config", action="store_true", help="跳过 config 生成，只跑环境自检")
-    parser.add_argument("--install", action="store_true", help="执行模式：装依赖 + 下载两个模型 + 回写 config（默认只指导不执行）")
+    parser.add_argument("--install", action="store_true", help="执行模式：装依赖 + 下载 embedding 模型 + 回写 config（mDeBERTa 判定 ckpt 由用户另行下载并配 semantic_conflict.mdeberta_ckpt；默认只指导不执行）")
     args = parser.parse_args(argv)
     if args.install and (args.print_config or args.no_config):
         parser.error("--install 与 --print-config/--no-config 不能同用（执行模式必须写 config）")
@@ -664,39 +595,28 @@ def run_cli(argv: list[str]) -> int:
         config_path = Path(env_config).expanduser()
     else:
         config_path = default_config_path
-    qwen_path = _default_qwen_path()
-
     # Honour a user-supplied model already present in an existing config:
     # if embedding.model_path points at a real file (and isn't our default
     # embeddinggemma), keep it instead of overwriting with the bundled path.
     # --force bypasses this: it means "reset to defaults, including model".
     if args.force:
         preserved_model, preserve_note = None, ""
-        preserved_qwen, preserve_qwen_note = None, ""
     else:
         preserved_model, preserve_note = _detect_existing_model_path(config_path)
-        preserved_qwen, preserve_qwen_note = _detect_existing_qwen_path(config_path)
     model_path = preserved_model or default_model_path
-    # The semantic side mirrors embedding: a preserved qwen is used as the
-    # config's model_path in BOTH modes and is never downloaded over; guidance
-    # mode writes it back (instead of null), --install skips its download.
-    effective_qwen_path = preserved_qwen or qwen_path
 
     out_lines: list[str] = []
     out_lines.append(_color("memory-arbiter setup — 配置助手（半自动）", _BOLD, use_color))
     if args.install:
-        out_lines.append(_color("--install 执行模式：装依赖 + 下载 embedding/qwen 模型 + 回写 config。", _DIM, use_color))
+        out_lines.append(_color("--install 执行模式：装依赖 + 下载 embedding 模型 + 回写 config。", _DIM, use_color))
     else:
         out_lines.append(_color("生成 config + 检测环境 + 给出可复制的命令。--install 可直接执行全部安装。", _DIM, use_color))
     if preserved_model is not None:
         out_lines.append(_color(f"  ℹ {preserve_note}", _CYAN, use_color))
-    if preserved_qwen is not None:
-        out_lines.append(_color(f"  ℹ {preserve_qwen_note}", _CYAN, use_color))
 
     # ── Step 1: config.json ──
     config_dict = _default_config_dict(
         model_path, default_db_path, default_backup_jsonl,
-        qwen_model_path=effective_qwen_path if (args.install or preserved_qwen is not None) else None,
     )
     backup_path: Path | None = None
     written = False
@@ -770,14 +690,6 @@ def run_cli(argv: list[str]) -> int:
             )
         else:
             out_lines.append(_color("✓ embedding 模型: 沿用已配置模型，跳过下载", _GREEN, use_color))
-        if preserved_qwen is None:
-            _install_model(
-                "Qwen 语义模型", qwen_path,
-                [QWEN_HF_URL, QWEN_MODELSCOPE_URL],
-                expected_bytes=EXPECTED_QWEN_BYTES,
-            )
-        else:
-            out_lines.append(_color("✓ Qwen 语义模型: 沿用已配置模型，跳过下载", _GREEN, use_color))
 
     # ── Step 2: environment checks ──
     # Config-load check: try to load via Settings.from_env() AFTER we may have
@@ -826,15 +738,11 @@ def run_cli(argv: list[str]) -> int:
         "model_exists": model_path.exists(),
         "model_size_ok": size_ok,
         "model_size_bytes": size_bytes,
-        "qwen_exists": effective_qwen_path.is_file(),
-        "qwen_size_bytes": effective_qwen_path.stat().st_size if effective_qwen_path.is_file() else 0,
         "config_load_ok": config_load_ok,
         "config_load_error": config_load_error_str,
         "config_warnings": config_warnings,
     }
-    check_lines, all_ok = _render_check_step(
-        checks, model_path, effective_qwen_path, use_color, require_qwen=args.install,
-    )
+    check_lines, all_ok = _render_check_step(checks, model_path, use_color)
     out_lines.extend(check_lines)
 
     # ── Step 3: summary ──

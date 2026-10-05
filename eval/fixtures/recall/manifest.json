@@ -1,10 +1,66 @@
 {
-  "corpus_version": "recall-v1",
+  "corpus_version": "recall-v2-kw-trim",
   "exported_at": "2026-09-16T03:16:54+00:00",
   "source_db": "/Users/zhangzhiwei17/.local/share/memory-arbiter/memory.sqlite3",
   "labels_source": "/Users/zhangzhiwei17/BillyProject/memory-arbiter-mcp/docs/eval/labels.jsonl",
-  "targets": 98,
+  "targets": 65,
   "distractors": 200,
-  "labeled_qids": 22,
-  "unlabeled_qids_default_irrelevant": "C01-C08,D01-D04"
+  "labeled_qids": 30,
+  "unlabeled_qids_default_irrelevant": "C01-C08,D01-D04",
+  "k_group_note": "0.17.0 检索线：K01-K13 关键词模式专属考题（expected_band 实测定档，探针 eval/probe_keyword_bands.py）",
+  "trimmed": {
+    "date": "2026-09-26",
+    "rules": "R1 短(<500)移除(K组3条保护); R2 跨语言保留2条探针(A11 zh→en + B02 en→mixed); R3 死题(relevant=0)移除; R4 失引用 target 移除",
+    "removed_queries": [
+      "A01",
+      "A03",
+      "A05",
+      "A07",
+      "B09"
+    ],
+    "removed_label_pairs": 32,
+    "removed_targets": [
+      "t-7cf59db03148",
+      "t-b74f264f0a6b",
+      "t-afd1b6ddb6e1",
+      "t-db2b240ff351",
+      "t-d80a23d08027",
+      "t-a6f20e256907",
+      "t-ad4a367d754d",
+      "t-f2fad1561675",
+      "t-8f3aa1faf717",
+      "t-bb418786ce0d",
+      "t-bbba71508893",
+      "t-b128ff9fb943",
+      "t-2242591dd56c",
+      "t-8038ebb8594e",
+      "t-d2177f3e02e0",
+      "t-43861808d218",
+      "t-6b0ab2a62efa",
+      "t-b051a1692055",
+      "t-37528edeec50",
+      "t-933cc3ad298d",
+      "t-8181ce843ee3",
+      "t-ef36903dbc84",
+      "t-80939d044dc9",
+      "t-0d30c5f9a3d2",
+      "t-5d8b81a3a991",
+      "t-57b43448164a",
+      "t-a4bcde103303",
+      "t-5cb94f8e2fcf",
+      "t-33c06321fb61",
+      "t-a87135313610",
+      "t-5be70d266139",
+      "t-91cc1fae80bb",
+      "t-1d6ca5ff2c81"
+    ],
+    "targets_before_after": [
+      98,
+      65
+    ],
+    "queries_before_after": [
+      47,
+      42
+    ]
+  }
 }

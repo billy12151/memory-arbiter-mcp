@@ -46,17 +46,29 @@ class Settings:
     # returned_count, tokens_estimate}; off = none of them do. One knob for
     # the whole report-a-token-cost-per-recall contract, not per-call.
     include_size: bool = True
-    # semantic_conflict: model_path → auto-enabled (explicit enabled=false
-    # wins); preload/resident are frozen true — a configured model loads at
-    # startup and stays resident.
+    # semantic_conflict: mdeberta_ckpt → auto-enabled (explicit enabled=false
+    # wins); preload/resident are frozen true — a configured checkpoint loads
+    # at startup and stays resident.
     semantic_conflict_enabled: bool = False
-    semantic_conflict_model_path: Path | None = None
+    # 0.17.1: the mDeBERTa judge checkpoint (V4m). Configured → arbitration
+    # enabled; unset → arbitration disabled (fail-open, doctor reports).
+    semantic_conflict_model_path: Path | None = None  # 0.17.1 vestigial: never populated from config (fixtures may set)
+    semantic_conflict_mdeberta_ckpt: Path | None = None
+    # config.json + tokenizer dir; default = <ckpt dir>/mdeberta-base (§3.6).
+    semantic_conflict_mdeberta_model_dir: Path | None = None
+    # 0.17.1 owner 拍板: P(conflict) ≥ this → normal notice; below → counted
+    # only. possible_conflict → info notice (no threshold — ~1% rate).
+    # owner 2026-10-05 终拍 T=0.5（召回优先，阈值不抬高，后续靠模型提升）
+    semantic_conflict_mdeberta_notice_min_prob: float = 0.5
+    # 0.17.1 §3.2 攒批 (owner 2026-09-28 拍板)：0 = auto 按设备分档——
+    # 有 GPU（Apple Silicon MPS / NVIDIA）16，无 GPU 8；显式数值覆盖 auto。
+    semantic_conflict_mdeberta_batch: int = 0
+    semantic_conflict_gpu_layers: int = -1  # 0.17.1 vestigial: unused by the torch judge
     semantic_conflict_on_write: str = "async"
     # A3 (0.15.14): Qwen offload layer count. -1 = full Metal offload (the
     # default since grammar-free decoding restored GPU value: prefill speedup
     # ~1.1-1.25x), 0 = CPU-only, N = first N layers. Ignored where no GPU
     # backend is compiled in.
-    semantic_conflict_gpu_layers: int = -1
     # 0.15.8: restored as a config key (was frozen 5000 in 0.15.0). Default
     # 3000; 0 = the write response never waits for the post-commit check
     # (batch ingestion — the job still runs and notices still deliver on a
@@ -116,6 +128,15 @@ class Settings:
         warn_removed("embedding.", emb_cfg, _REMOVED_EMBEDDING_KEYS)
         semantic_cfg = section("semantic_conflict")
         warn_removed("semantic_conflict.", semantic_cfg, _REMOVED_SEMANTIC_KEYS)
+        # 0.17.1: claim 对比通道整体退役（memory_claims/memory_claim_vec 建表
+        # 与 claims.required 写入门一并移除）——与 model_path/n_gpu_layers 同批
+        # 退役键给同款「no longer」软着陆警告，不静默忽略。
+        if section("claims"):
+            config_warnings.append(
+                "claims is removed in 0.17.1 (the claim comparison channel and "
+                "the claims.required gate were retired with the memory_claims "
+                "tables); value ignored"
+            )
         # A5 (0.15.14): max_notice_pairs was not frozen — the notice-count cap
         # itself was removed (notices are bounded by the examined-pairs cap);
         # name that instead of the generic frozen-constant wording.
@@ -199,20 +220,48 @@ class Settings:
         if semantic_on_write not in {"async", "off"}:
             config_warnings.append(f"semantic_conflict.on_write={semantic_on_write!r} invalid; using async")
             semantic_on_write = "async"
-        semantic_model_raw = semantic_cfg.get("model_path")
+        semantic_model_raw = semantic_cfg.get("model_path")  # parsed only for the migration warning
+        mdeberta_ckpt_raw = semantic_cfg.get("mdeberta_ckpt")
+        # 0.17.1: legacy Qwen path configured → migration warning (the GGUF
+        # backend is deleted; the key is dead). mdeberta_ckpt is the new
+        # auto-enable intent key.
+        if semantic_model_raw is not None:
+            config_warnings.append(
+                "semantic_conflict.model_path is retired in 0.17.1 (the Qwen/GGUF judge was "
+                "replaced by mDeBERTa); configure semantic_conflict.mdeberta_ckpt instead"
+            )
+            semantic_model_raw = None  # the legacy value never reaches Settings
+        mdeberta_dir_raw = semantic_cfg.get("mdeberta_model_dir")
+        mdeberta_ckpt = Path(str(mdeberta_ckpt_raw)).expanduser() if mdeberta_ckpt_raw else None
+        mdeberta_model_dir = (
+            Path(str(mdeberta_dir_raw)).expanduser() if mdeberta_dir_raw
+            else (mdeberta_ckpt.parent / "mdeberta-base" if mdeberta_ckpt else None)
+        )
 
-        # model_path configured but enabled not explicitly set -> auto-enable.
-        # One intent shouldn't need two knobs; the user expressed intent by
-        # pointing at a model. Explicit enabled=false still wins.
-        _semantic_auto_enable = bool(semantic_model_raw)
+        # mdeberta_ckpt configured but enabled not explicitly set -> auto-enable
+        # (same one-intent rule the Qwen model_path key had). enabled=false wins.
+        _semantic_auto_enable = bool(mdeberta_ckpt)
         if (
             _semantic_auto_enable
             and semantic_cfg.get("enabled") is None
         ):
             config_warnings.append(
-                "semantic_conflict.enabled not set; model_path configured -> "
+                "semantic_conflict.enabled not set; mdeberta_ckpt configured -> "
                 "auto-enabled (and preloaded at startup). Set enabled=false to disable."
             )
+        mdeberta_min_prob = semantic_cfg.get("mdeberta_notice_min_prob")
+        # 标准 helper 链：NaN/Inf/越界全部走警告（手写 max/min 链会把 NaN
+        # 静默吞成 1.0 = 正式 notice 永不出的配置错误）。
+        mdeberta_min_prob_val = clamp_float(
+            parse_float(
+                mdeberta_min_prob, 0.5,
+                name="semantic_conflict.mdeberta_notice_min_prob",
+                warnings=config_warnings,
+            ),
+            0.0, 1.0,
+            name="semantic_conflict.mdeberta_notice_min_prob",
+            warnings=config_warnings,
+        )
 
         settings = cls(
             db_path=pick_env_path("db_path", "MEMORY_ARBITER_DB_PATH", cwd / "memory_arbiter.sqlite3"),
@@ -242,12 +291,17 @@ class Settings:
                 semantic_cfg.get("enabled"), name="semantic_conflict.enabled",
                 default_bool=_semantic_auto_enable,
             ),
-            semantic_conflict_model_path=Path(str(semantic_model_raw)).expanduser() if semantic_model_raw else None,
-            semantic_conflict_on_write=semantic_on_write,
-            semantic_conflict_gpu_layers=clamp_int(
-                pick_int_field(semantic_cfg.get("n_gpu_layers"), -1, name="semantic_conflict.n_gpu_layers"),
-                -1, 999, name="semantic_conflict.n_gpu_layers", warnings=config_warnings,
+            semantic_conflict_mdeberta_ckpt=mdeberta_ckpt,
+            semantic_conflict_mdeberta_model_dir=mdeberta_model_dir,
+            semantic_conflict_mdeberta_notice_min_prob=mdeberta_min_prob_val,
+            semantic_conflict_mdeberta_batch=clamp_int(
+                pick_int_field(
+                    semantic_cfg.get("mdeberta_batch"), 0,
+                    name="semantic_conflict.mdeberta_batch",
+                ),
+                0, 64, name="semantic_conflict.mdeberta_batch", warnings=config_warnings,
             ),
+            semantic_conflict_on_write=semantic_on_write,
             semantic_conflict_notice_sync_wait_ms=clamp_int(
                 pick_int_field(
                     semantic_cfg.get("notice_sync_wait_ms"), NOTICE_SYNC_WAIT_MS,
@@ -277,7 +331,7 @@ _REMOVED_VEC_KEYS = frozenset({"enabled", "dim"})
 _REMOVED_EMBEDDING_KEYS = frozenset({"provider", "n_ctx", "reserved_tokens", "max_unit_chars"})
 _REMOVED_HTTP_KEYS = frozenset({"path", "stateless", "json_response", "max_request_body_size"})
 _REMOVED_SEMANTIC_KEYS = frozenset({
-    "backend", "max_concurrency", "queue_max_size", "n_ctx", "n_threads", "n_batch",
+    "backend", "max_concurrency", "queue_max_size", "n_ctx", "n_threads", "n_batch", "n_gpu_layers",
     "resident", "preload", "job_timeout_ms", "inference_timeout_ms", "load_timeout_ms",
     "min_pair_budget_ms", "max_evidence_units", "scan_enhance", "scan_max_pairs",
     "scan_budget_ms", "workspace_qwen_budget_ms",

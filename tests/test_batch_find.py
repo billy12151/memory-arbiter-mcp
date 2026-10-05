@@ -185,3 +185,111 @@ def test_batch_find_rejects_non_list_queries(tmp_path: Path, bad) -> None:
     tools = make_tools(tmp_path)
     res = _batch(tools, queries=bad)
     assert not res.get("ok")
+
+
+# ── 0.17.0: batch_find hits 窗口（合并页 + matched 标记）─────────────────────
+
+
+class _FakeEmbedder:
+    """sqlite-vec-capable stand-in（范式照 tests/test_find_enhancements.py）。"""
+
+    embedding_space_id = "fake-batch-find-space"
+    dim = 2
+    last_encode_error = None
+
+    @staticmethod
+    def embed_text(prefix: str, body: str, max_body_chars: "int | None" = None):
+        from memory_arbiter.embedder import EmbedResult
+        return EmbedResult([0.0, 1.0], False, 1, 1)
+
+
+def _make_vec_tools(tmp_path: Path) -> MemoryTools:
+    pytest.importorskip("sqlite_vec")
+    from memory_arbiter.db import MemoryDB
+    model = tmp_path / "fake-batch.gguf"
+    model.write_bytes(b"fake")
+    settings = Settings(
+        db_path=tmp_path / "vec-batch.db", backup_jsonl=tmp_path / "vec-batch.jsonl",
+        embedding_model_path=model,
+        # batch_find 无逐 query embedding 参数：向量召回靠 auto-embed。
+        embedding_auto_query=True,
+        client="c", agent_id="a",
+    )
+    db = MemoryDB(settings)
+    tools = MemoryTools(settings=settings, db=db)
+    tools._embedder = _FakeEmbedder()
+    tools._embedder_loaded = True
+    assert db.ensure_vec_tables(_FakeEmbedder.dim) == []
+    db.init_vec_index_state(_FakeEmbedder.embedding_space_id, True, _FakeEmbedder.dim)
+    return tools
+
+
+def _publish_row_with_vector(tools: MemoryTools, mid: int, version: int,
+                             row_index: int, text: str, start: int, end: int) -> None:
+    import json as _json
+    from memory_arbiter.models import utc_now_iso
+    with tools.db.write_transaction() as conn:
+        cur = conn.execute(
+            "INSERT INTO memory_row(memory_id, memory_version, content_hash,"
+            " row_index, kind, text, start_offset, end_offset, created_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?)",
+            (mid, version, "h", row_index, "sentence", text, start, end, utc_now_iso()),
+        )
+        conn.execute(
+            "INSERT INTO memory_row_vec(id, parent_status, embedding) VALUES (?,?,?)",
+            (cur.lastrowid, "active", _json.dumps([0.0, 1.0])),
+        )
+
+
+def test_batch_find_hits_window_merged_page(tmp_path: Path, monkeypatch) -> None:
+    """两 query 命中同一 memory、deduplicate=true：hit_spans 与
+    matched_query_ids/best_query_id 共存，window 逐 id 生效，除
+    _evidence_hits（已被消费）外无 debug 字段残留。"""
+    monkeypatch.setattr("memory_arbiter.search.QUERY_RECALL_SCORE_FLOOR", -1.0)
+    tools = _make_vec_tools(tmp_path)
+    sentences = ["首句介绍合并页背景。", "次句给出窗口论断。", "三句补充收尾说明。"]
+    content = "\n".join(sentences)
+    mid = _write(tools, "合并页主题", content)
+    from memory_arbiter.models import utc_now_iso
+    pos = 0
+    for index, sentence in enumerate(sentences):
+        start = content.index(sentence, pos)
+        if index < 2:
+            # row 0/1 带向量 = 查询命中；row 2 无向量 = 只能作窗口邻句带出。
+            _publish_row_with_vector(tools, mid, 1, index, sentence, start, start + len(sentence))
+        else:
+            with tools.db.write_transaction() as conn:
+                conn.execute(
+                    "INSERT INTO memory_row(memory_id, memory_version, content_hash,"
+                    " row_index, kind, text, start_offset, end_offset, created_at)"
+                    " VALUES (?,?,?,?,?,?,?,?,?)",
+                    (mid, 1, "h", index, "sentence", sentence, start, start + len(sentence), utc_now_iso()),
+                )
+        pos = start + len(sentence)
+    res = tools.memory(action="batch_find", data={
+        "queries": [{"id": "q1", "query": "窗口论断"}, {"id": "q2", "query": "合并页背景"}],
+        "content_mode": "hits", "hit_window": 1,
+    })
+    assert res.get("ok"), res
+    data = res["data"]
+    assert data["deduplicated"] is True
+    assert len(data["results"]) == 1
+    item = data["results"][0]
+    assert item["id"] == mid
+    assert item["matched_query_ids"] == ["q1", "q2"]
+    assert item["best_query_id"] in {"q1", "q2"}
+    spans = item["hit_spans"]
+    assert spans, "window 扩展应产出 spans"
+    assert any(sp.get("matched") is False for sp in spans)
+    assert any(sp.get("matched") is True for sp in spans)
+    for sp in spans:
+        assert sp["text"] == content[sp["start_offset"]:sp["end_offset"]]
+    assert not [k for k in item if k.startswith("_")]
+    # window=0 同一数据：形状回 v0.15.10（无 matched 键）。
+    res0 = tools.memory(action="batch_find", data={
+        "queries": [{"id": "q1", "query": "窗口论断"}],
+        "content_mode": "hits",
+    })
+    assert res0.get("ok"), res0
+    for sp in res0["data"]["results"][0]["hit_spans"]:
+        assert "matched" not in sp

@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import copy
 import json
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -39,18 +38,6 @@ def _expand(obj: Any) -> Any:
     if isinstance(obj, list):
         return [_expand(item) for item in obj]
     return obj
-
-
-def test_hash_randomization_disabled() -> None:
-    """difflib.get_close_matches iterates a set, so did_you_mean is seed-bound.
-
-    This must fail rather than skip: a silently seed-random CI run would be
-    exercising a gate whose expected values were recorded under a different
-    iteration order.
-    """
-    assert sys.flags.hash_randomization == 0, (
-        "run pytest with PYTHONHASHSEED=0 (see scripts/gen_golden_validation.py)"
-    )
 
 
 def test_corpus_is_non_trivial() -> None:

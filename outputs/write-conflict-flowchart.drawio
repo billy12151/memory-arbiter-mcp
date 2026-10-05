@@ -1,0 +1,167 @@
+<mxfile host="app.diagrams.net" agent="mema-docs" version="24.7.8">
+  <diagram name="写入时冲突检测-流程图" id="wcon-flow">
+    <mxGraphModel dx="1000" dy="700" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="1800" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="t" value="mema 写入时冲突检测流程图（异步两段式）" style="text;html=1;fontSize=16;fontStyle=1;align=left;" vertex="1" parent="1">
+          <mxGeometry x="20" y="10" width="620" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="n1" value="写入落盘成功（insert_memory 已提交）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="40" y="60" width="260" height="44" as="geometry" />
+        </mxCell>
+        <mxCell id="n2" value="提交后派发：入队证据索引&#10;任务号 = semantic:{记忆号}@{版本号}，队列上限 200" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="30" y="150" width="280" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="n3" value="队列已满？" style="rhombus;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="40" y="250" width="260" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="n4" value="返回 busy；写入响应只加 warning，写入本身不失败" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="380" y="265" width="240" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="n5" value="同步等待索引结果&#10;默认最多 3000 毫秒（可配置为 0 = 完全不等待）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="30" y="380" width="280" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="n6" value="等待超时或未配置嵌入/关闭写时检查？" style="rhombus;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="30" y="480" width="280" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="n7" value="写入响应标 conflict_check.status：&#10;超时 → async；不可检查 → deferred；立即返回写入结果" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="380" y="495" width="260" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="n8" value="后台：证据索引线程处理（版本不符 → 放弃；新快照顶掉旧任务）&#10;正文切分为证据单元并生成向量" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="30" y="620" width="280" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="n9" value="索引状态 = indexed？" style="rhombus;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="40" y="730" width="260" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="n10" value="仅完成索引（冲突检查等下一轮）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="380" y="745" width="240" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="n11" value="入队语义冲突检查（单线程串行）&#10;前置校验：pending / active / 版本·哈希一致 / 后端与向量空间可用" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="30" y="860" width="280" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="n12" value="前置校验不通过？" style="rhombus;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="40" y="970" width="260" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="n13" value="结束并给出原因：&#10;skipped / incomplete / stale_snapshot" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="380" y="985" width="240" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="n14" value="同一记忆内部：证据单元两两比对&#10;（先走与扫描共用的准入过滤 internal_pair_admission）&#10;通过的经小模型复核；被否决的落 dismissed 审计行" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="30" y="1100" width="280" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="n15" value="内部发现先落库（内部结论不丢）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="30" y="1220" width="280" height="44" as="geometry" />
+        </mxCell>
+        <mxCell id="n16" value="跨记忆：每个证据单元取向量近邻 top5&#10;（同工作区、排除自身、只要正文类单元）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="30" y="1314" width="280" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="n17" value="确定性过滤链（不调模型）：&#10;① 局部规则判定为忽略 → 跳过&#10;② 属于跨版本演进域（待办快照/极性翻转）→ 跳过&#10;③ 双方来源元数据齐备且相等 → 否则跳过&#10;④ 差异分类为「清晰」→ 跳过&#10;⑤ 每个邻居只保留最近的一条" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="370" y="1244" width="300" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="n18" value="确定性直连：同一键、值不同 →&#10;直接判定，不调用模型" style="rhombus;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="370" y="1414" width="300" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="n19" value="小模型单向判定（先查预算：不足或已达 10 对上限 → 停止；&#10;失败按超时/不可用/报错/输出非法/未验证分类记账，未验证留扫描兜底）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="730" y="1404" width="300" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="n20" value="判定为「同槽位新值」？" style="rhombus;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="740" y="1534" width="280" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="n21" value="槽位正被应用中的变更占用？&#10;（命中则抑制，不发新提示）" style="rhombus;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1080" y="1534" width="280" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="n22" value="落 semantic_evidence 提示（notice）：&#10;成员版本 / 取值分组 / 左右证据片段 / 两侧正文哈希 / 模型信号&#10;severity = normal" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1080" y="1660" width="280" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="n23" value="结果汇总：&#10;有提示 → notices_created（后续被截断则标 truncated）&#10;无提示 → checked_no_notice；未跑完 → incomplete" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="730" y="1660" width="280" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="e1" style="html=1;endArrow=block;" edge="1" parent="1" source="n1" target="n2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" style="html=1;endArrow=block;" edge="1" parent="1" source="n2" target="n3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" value="是" style="html=1;endArrow=block;fontSize=11;" edge="1" parent="1" source="n3" target="n4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4" value="否" style="html=1;endArrow=block;fontSize=11;" edge="1" parent="1" source="n3" target="n5">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5" style="html=1;endArrow=block;" edge="1" parent="1" source="n5" target="n6">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6" value="是" style="html=1;endArrow=block;fontSize=11;" edge="1" parent="1" source="n6" target="n7">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e7" value="否（索引按时完成）" style="html=1;endArrow=block;fontSize=11;" edge="1" parent="1" source="n6" target="n8">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e8" style="html=1;endArrow=block;" edge="1" parent="1" source="n8" target="n9">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e9" value="否" style="html=1;endArrow=block;fontSize=11;" edge="1" parent="1" source="n9" target="n10">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e10" value="是" style="html=1;endArrow=block;fontSize=11;" edge="1" parent="1" source="n9" target="n11">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e11" style="html=1;endArrow=block;" edge="1" parent="1" source="n11" target="n12">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e12" value="是" style="html=1;endArrow=block;fontSize=11;" edge="1" parent="1" source="n12" target="n13">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e13" value="否" style="html=1;endArrow=block;fontSize=11;" edge="1" parent="1" source="n12" target="n14">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e14" style="html=1;endArrow=block;" edge="1" parent="1" source="n14" target="n15">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e15" style="html=1;endArrow=block;" edge="1" parent="1" source="n15" target="n16">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e16" style="html=1;endArrow=block;" edge="1" parent="1" source="n16" target="n17">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e17" style="html=1;endArrow=block;" edge="1" parent="1" source="n17" target="n18">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e18" value="否（仍需模型判断）" style="html=1;endArrow=block;fontSize=11;" edge="1" parent="1" source="n18" target="n19">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e19" style="html=1;endArrow=block;" edge="1" parent="1" source="n19" target="n20">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e20" value="是（含确定性直连）" style="html=1;endArrow=block;fontSize=11;" edge="1" parent="1" source="n18" target="n21">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="520" y="1574" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e21" value="是" style="html=1;endArrow=block;fontSize=11;" edge="1" parent="1" source="n20" target="n21">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e22" value="否（无提示）" style="html=1;endArrow=block;fontSize=11;" edge="1" parent="1" source="n20" target="n23">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e23" value="否" style="html=1;endArrow=block;fontSize=11;" edge="1" parent="1" source="n21" target="n22">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e24" style="html=1;endArrow=block;" edge="1" parent="1" source="n22" target="n23">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e25" value="是（抑制）" style="html=1;endArrow=block;fontSize=11;" edge="1" parent="1" source="n21" target="n23">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1360" y="1574" />
+              <mxPoint x="1450" y="1574" />
+              <mxPoint x="1450" y="1700" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
