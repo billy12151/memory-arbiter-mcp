@@ -18,10 +18,8 @@ env/
 *.sqlite3-journal
 *.sqlite3-shm
 *.sqlite3-wal
-*.jsonl
 # eval fixtures are the harness exam papers — they must ship with the repo
-!eval/fixtures/**/*.jsonl
-
+!eval/fixtures/**/
 # Environment files
 .env
 .env.*
@@ -54,3 +52,9 @@ htmlcov/
 
 # harness per-run raw output (baselines under eval/baselines/ DO go to git)
 eval/results/
+
+# LoCoMo-Refined eval: dataset is CC BY-NC (download separately), runs and keys stay local
+evals/locomo/data/
+evals/locomo/run/
+evals/locomo/env.local.sh
+evals/locomo/run_v*/

@@ -39,6 +39,23 @@
 - **AI 只负责发现矛盾，没权力改。** 发现两条记忆打架时，AI（本地 mDeBERTa 小模型）只能"举手报告"，选哪个、改哪个，必须你点头。
 - **改任何东西都留痕。** 每次修改都有历史版本，可以查到谁、什么时候、把什么改成了什么。
 
+## 公开评测：LoCoMo-Refined
+
+在 [LoCoMo-Refined](https://github.com/mem-eval-suite/LoCoMo_refined) 上全量评测
+（1,382 题，官方判分 Qwen3-14B）：
+
+| 配置 | 总体 | 文本类 |
+|---|---:|---:|
+| **mema + 写入代理**（deepseek-v4.1-flash + 公开规则） | **61.00%** | **65.62%** |
+| **mema 零抽取**（写入端无 LLM，原话照存 + `event_time`） | 43.13% | **49.48%** |
+
+对照：Mem0 完整管线 48.91%（组委会重判）——**写入端不带任何 LLM 的裸 mema
+与之打平**；带写入代理后为文本类口径榜眼。写入路径同时检出 **552 对语义冲突**
+（自训练 mDeBERTa 判定，生产配置原样运行）。
+
+完整方法论、消融实验（含答题器无关性、82% 信息天花板）、复现步骤与提交文件：
+[`evals/locomo/RESULTS.md`](./evals/locomo/RESULTS.md)。
+
 ## 交给 AI Agent 安装
 
 把下面这段话直接发给 Codex、Claude Code、Cursor，或其他能操作终端的编程 Agent：

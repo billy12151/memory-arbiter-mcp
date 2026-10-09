@@ -17,6 +17,26 @@ Memory Arbiter is a trustworthy local fact layer for AI agents — not just shar
 - **Authorized governance.** Every state-changing `memory_govern` action requires per-action `authorized=true` after the user confirms that specific action.
 - **Local-only.** Embeddings run on a local GGUF model; the optional conflict judge is a local mDeBERTa checkpoint (CPU). The single outbound call is an optional PyPI update check, disabled with `update_check.enabled=false`.
 
+## Benchmark: LoCoMo-Refined
+
+Evaluated on [LoCoMo-Refined](https://github.com/mem-eval-suite/LoCoMo_refined)
+(all 1,382 questions, official judge `Qwen3-14B`):
+
+| Configuration | Overall | Text-only |
+|---|---:|---:|
+| **mema + writer-agent** (deepseek-v4.1-flash writer, public rules) | **61.00%** | **65.62%** |
+| **mema verbatim** (zero-LLM write path, utterances + `event_time` as-is) | 43.13% | **49.48%** |
+
+Context: Mem0's full pipeline scores 48.91% (text-only re-scored by the
+benchmark authors) — **bare mema with no LLM in the write path matches it**;
+with a writer-agent, mema sits second on the leaderboard's text-only basis.
+The write path also detected **552 semantic conflicts** across the 20 replayed
+conversations (self-trained mDeBERTa judge, running as shipped).
+
+Full methodology, ablations (including answerer-independence and the 82%
+information ceiling), reproduction steps and submission files:
+[`evals/locomo/RESULTS.md`](./evals/locomo/RESULTS.md).
+
 ## Install & quickstart
 
 ### Install with your AI Agent
