@@ -99,6 +99,27 @@ local gateway).
 Read-side selection — not answerer strength, not storage fidelity — is the
 remaining gap between 64% and the low-80s ceiling.
 
+
+## Addendum — detector iteration (2026-10-10)
+
+Re-ran the extraction-arm replay with an updated mini-clash checkpoint
+(`mdeberta-v58_ep3_fp16`, swapped into the local production config). Note:
+this replay's extractor was qwen3-14b (the original gateway was unavailable),
+so absolute counts carry a small extractor confound; the comparable metric is
+the context-free triage rate.
+
+| Detector | Detections | True updates (context-free triage) | Rate |
+|---|---:|---:|---:|
+| original (submission run) | 207 | 9 | 4.3% |
+| v58_ep3_fp16 | 276 | 12 | 4.9% |
+
+Precision is unchanged; recall of true conflicts is marginally higher
+(9 → 12). The dominant failure mode remains **complementary pairs flagged as
+conflicts** (parallel facts, same-scene different-subject, causal/narrative
+links) — a triage problem, not a sensitivity problem. The full labeled pair
+sets for both detector generations are exported alongside this repo's eval
+workspace for detector training.
+
 ## Reproducing
 
 ```bash
