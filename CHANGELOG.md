@@ -3,6 +3,29 @@
 All notable changes to memory-arbiter-mcp are documented in this file.
 Versions follow semantic versioning.
 
+## [Unreleased / 0.18.0] — Console 知识库工作台
+
+（个人知识库 + LLM 学习工作台：kb_member 治理位、知识库页、六学习动作、用户自带 OpenAI 兼容 API、两步走回写；方案 v2 与两轮 review 见 ZCodeProject/docs/mema-console-knowledge-plan-2026-10-10.md）
+
+### Added
+
+- **知识库成员治理位**：`memories.kb_member` 列（additive 迁移 + partial index），set/list 原语走 governance_audit；不入 tags（update 管道 new_tags 整体替换语义会静默冲掉 tag 形态标记）。
+- **知识库页（Console 新 tab）**：workspace→tag 两级分类树 + 记忆卡片；document_extracted 候选池批量勾选加入；搜索加入；一键移出。归集是人工策展（写入侧不打扰：docstring 仅非强制提示，不确定不加、不询问用户）。
+- **全局桶选择器 + strict 缺口修复**：strict 下 Console 此前实际不可用（前端从不传 workspace）——现 strict 必选单桶（console 侧单 canonical 等值判定，不开跨桶豁免）、none/weak 可选"全部"。
+- **记忆正文 markdown 渲染**：自写白名单渲染器（先转义后解析，无外链、无内容衍生属性），长文折叠；知识库页与详情页共用。
+- **LLM 学习工作台**：用户自带 OpenAI 兼容 API（`llm.*` 六键：base_url/api_key/model/max_context_tokens/max_output_tokens/timeout_seconds；Settings 页可写、key 打码、热加载）；六个学习动作（快速总结/知识点梳理/生成考试题/费曼讲解/反过来考我/时间线梳理）+ 自定义指令；skill 式提示词文件 + 薄结构校验 + 一次纠正性重试 + degraded 透传；reasoning 思考过程灰字折叠展示；上下文按用户维护的最大上下文动态预算（构词求和 token 估算，超预算带逐条估算表报错不截断）。
+- **产物回写（两步走）**：标准 write 管道（request identity 归因 agent_id=console）+ kb_member 置位；PRODUCT_FIELD_REGISTRY 与 MCP schema 零改动。strict 新桶 pending 分支给治理指引。
+- **POST 防御层**：Host 门→Content-Type json→X-Console-Request 头→Content-Length 帽（不读 body）→畸形 JSON 拒；OPTIONS 钉死不带 CORS 头（回归钉）。
+
+### Changed
+
+- Console 定位从"只读治理"扩展为"治理审计 + 知识库工作台"（只读文案全量清理）。
+- `mema setup` 重生成 config 时保留未知段（llm.* 不再被清；`--force` 仍为重置语义）。
+
+### Security
+
+- api_key 明文存本地 config.json（localhost-only 场景，README 明示建议文件权限 600）；GET 打码、提交哨兵 `__unchanged__`、错误信息脱敏；LLM 调用仅由后端代理。
+
 ## [0.17.1] — 2026-10-04
 
 （claim 对比通道退役 + 判定输入上下文化 + 判定引擎重标 v46_ep1@0.55 + workspace 必传 + 全量修复批 + 内部向量自查/表格豁免）

@@ -31,11 +31,11 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
 
     url = f"http://{args.host}:{args.port}"
     if args.json:
-        print(json.dumps({"ok": True, "url": url, "read_only": True, "local_only": True}, ensure_ascii=False))
+        print(json.dumps({"ok": True, "url": url, "read_only": False, "knowledge_workbench": True, "local_only": True}, ensure_ascii=False))
     else:
         print("memory-arbiter console — mema / 迷码")
         print(f"Listening on {url}")
-        print("Read-only local governance console. Do not expose this port publicly.")
+        print("Local governance console with a knowledge workbench (curate + LLM study). Do not expose this port publicly.")
         print("Press Ctrl+C to stop.")
     if not args.no_open:
         webbrowser.open(url)

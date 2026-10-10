@@ -95,7 +95,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
     def _route_post(self, path: str, body: dict[str, Any]) -> None:
         if path == "/api/knowledge/membership":
             payload = self.api.knowledge_membership(
-                memory_id=body.get("memory_id"),
+                memory_id=body.get("memory_id") or 0,
                 op=str(body.get("op") or ""),
                 workspace=_optional_str(body.get("workspace")),
             )

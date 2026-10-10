@@ -29,7 +29,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Any, Callable
 
 # Model + download sources — kept as module constants so they are easy to update.
 DEFAULT_MODEL_FILENAME = "embeddinggemma-300m-qat-Q8_0.gguf"
@@ -386,7 +386,7 @@ def _model_size_ok(path: Path, *, expected: int = EXPECTED_MODEL_BYTES) -> tuple
     return low <= size <= high, size
 
 
-def _merge_unknown_sections(config_dict: dict, config_path: Path) -> dict:
+def _merge_unknown_sections(config_dict: "dict[str, Any]", config_path: Path) -> "dict[str, Any]":
     """0.18.0 (plan R2 P1-9): carry unknown top-level keys of an existing
     config into the freshly generated one so setup doesn't silently wipe
     sections it doesn't know about (llm.* is the first such tenant). A

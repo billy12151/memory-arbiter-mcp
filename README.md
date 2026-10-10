@@ -134,6 +134,26 @@ Workspaces listed in `recall_blacklist.jsonl` (next to the database file) are ex
 
 What is *not* filtered: an explicit `workspace` argument (even a blacklisted one), strict isolation, filter-driven recall (empty query + `tags_filter`/time/`source_type`), the expired-audit path, write-time dedup, conflict scans, and id-based reads. Exclusion matches both the canonical and the raw workspace column, so rows whose canonical drifted are still caught. `doctor` reports the effective list (`recall.blacklist`).
 
+## Console: governance + knowledge workbench (0.18.0)
+
+`memory-arbiter console` opens the local browser console (127.0.0.1 only).
+
+- **Governance**: overview, conflict review with side-by-side members, doctor, read-only settings.
+- **Knowledge base tab**: curate which memories belong to your knowledge base
+  (one-click add/remove, document-extracted candidate pool, search-to-add).
+  Membership is a dedicated `kb_member` column — agents cannot accidentally
+  drop it while rewriting tags. Browse by workspace → tag, with rendered
+  markdown bodies and one-hop relation graphs.
+- **LLM study workbench**: bring your own OpenAI-compatible API (base URL /
+  API key / model / context budget in Settings — stored locally, proxied by
+  the console backend, never exposed to the page). Six one-click study
+  actions on selected memories — summarize, outline, quiz, Feynman explain,
+  quiz-me, timeline — plus a free-form prompt. Outputs can be saved back as
+  memories through the standard write pipeline (attributed `agent_id=console`).
+
+Under `isolation=strict` the console views one workspace at a time (no
+cross-bucket bypass); pick "All workspaces" under the default `none` mode.
+
 ## Operating mema
 
 - `mema doctor [--json|--deep]` — read-only health checks; `--deep` loads the GGUF model and probes the live embedding dimension. `workspace.review` warns (CLI exit 1) for canonicals missing from the reviewed snapshot. Rename/merge duplicates first, then call authorized `memory_govern(confirm_workspaces)` without an explicit list to snapshot the current registry and return this check to pass. The overall CLI exits 0 only when no other warning remains.

@@ -507,7 +507,7 @@ def write_llm_config(
     values: dict[str, Any], *,
     config_path: Path | None = None,
     identity: "Settings | None" = None,
-) -> tuple[list[str], Path]:
+) -> tuple[list[str], Path, dict[str, Any]]:
     """Persist the ``llm`` section of config.json (plan §B.2.2).
 
     Whitelist-only (six keys); unknown keys are rejected. When the file does

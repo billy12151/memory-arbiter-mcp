@@ -50,7 +50,7 @@ class ConsoleAPI:
         return max(0, parsed)
 
     def health(self) -> dict[str, Any]:
-        return {"ok": True, "version": __version__, "read_only": True, "brand": {"en": "mema", "zh": "迷码"}}
+        return {"ok": True, "version": __version__, "read_only": False, "knowledge_workbench": True, "brand": {"en": "mema", "zh": "迷码"}}
 
     def _strict_workspace_required(self, workspace: str | None) -> dict[str, Any] | None:
         if getattr(self.tools.settings, "isolation", "none") == "strict" and not str(workspace or "").strip():
@@ -175,7 +175,7 @@ class ConsoleAPI:
         return {
             "version": __version__,
             "brand": {"en": "mema", "zh": "迷码", "full": "Memory Arbiter"},
-            "read_only": True,
+            "read_only": False, "knowledge_workbench": True,
             "local_only": True,
             "db_path": status.get("db_path"),
             "backup_jsonl": status.get("backup_jsonl"),
