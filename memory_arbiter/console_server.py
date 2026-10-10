@@ -104,6 +104,28 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/settings/llm":
             self._json_or_error(self.api.llm_config_save(body))
             return
+        if path == "/api/llm/ask":
+            payload = self.api.llm_ask(
+                memory_ids=body.get("memory_ids") or [],
+                action=str(body.get("action") or ""),
+                custom_prompt=str(body.get("custom_prompt") or ""),
+                workspace=_optional_str(body.get("workspace")),
+            )
+            self._json_or_error(payload)
+            return
+        if path == "/api/llm/test":
+            self._json_or_error(self.api.llm_test())
+            return
+        if path == "/api/knowledge/save":
+            tags = body.get("tags")
+            payload = self.api.knowledge_save(
+                subject=str(body.get("subject") or ""),
+                content=str(body.get("content") or ""),
+                tags=tags if isinstance(tags, list) else [],
+                workspace=_optional_str(body.get("workspace")),
+            )
+            self._json_or_error(payload)
+            return
         self._json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
 
     def _handle(self, send_body: bool) -> None:

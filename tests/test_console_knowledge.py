@@ -515,3 +515,255 @@ def test_setup_merges_unknown_sections(tmp_path: Path) -> None:
     # corrupt old config: merge is a no-op, setup proceeds
     cfg_path.write_text("{not json")
     assert setup_cli._merge_unknown_sections(dict(fresh), cfg_path) == fresh
+
+
+# ---- c6: llm ask / test / save ----------------------------------------------
+
+import http.server
+import threading as _threading
+
+from memory_arbiter.llm_client import ContextMaterial, LLMError, assemble_context, validate_output
+
+_FAKE_STATE: dict = {"responses": [], "requests": []}
+
+
+class _FakeOpenAIHandler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *args): pass
+
+    def do_POST(self):  # noqa: N802
+        length = int(self.headers.get("Content-Length") or 0)
+        body = json.loads(self.rfile.read(length) or b"{}")
+        _FAKE_STATE["requests"].append(body)
+        if self.path == "/v1/chat/completions" or self.path == "/chat/completions":
+            self._reply(200, _FAKE_STATE["responses"].pop(0) if _FAKE_STATE["responses"] else {"ok": True})
+        else:
+            self._reply(404, {"error": "not found"})
+
+    def _reply(self, status: int, payload: dict) -> None:
+        data = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+
+def _fake_llm_settings(tmp_path: Path, port: int) -> Settings:
+    return Settings(
+        db_path=tmp_path / "llm.sqlite3", backup_jsonl=tmp_path / "llm.jsonl",
+        client="pytest", agent_id="kb-test", workspace="kb-ws",
+        llm_base_url=f"http://127.0.0.1:{port}", llm_api_key="sk-fake",
+        llm_model="fake-model", llm_max_context_tokens=32000,
+    )
+
+
+def _fake_completion(content: str, reasoning: str | None = None) -> dict:
+    message: dict = {"content": content}
+    if reasoning:
+        message["reasoning_content"] = reasoning
+    return {"choices": [{"message": message, "finish_reason": "stop"}], "usage": {"prompt_tokens": 10, "completion_tokens": 5}}
+
+
+@pytest.fixture()
+def fake_llm():
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _FakeOpenAIHandler)
+    _threading.Thread(target=server.serve_forever, daemon=True).start()
+    _FAKE_STATE["responses"] = []
+    _FAKE_STATE["requests"] = []
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+GOOD_SUMMARY = (
+    "总括：这两条记忆说明了测试主题的核心事实，材料之间互相印证，"
+    "给出了从基础到扩展的完整图景，适合作为复习的起点材料来看待。[101]\n"
+    "- 要点一：第一条记忆确认了基础事实，即测试主题的出发点与边界条件 [101]\n"
+    "- 要点二：第二条记忆给出了扩展方向，与要点一互相印证而非互相矛盾 [102]"
+)
+
+
+def test_llm_ask_happy_path_with_reasoning(tmp_path: Path, fake_llm) -> None:
+    _FAKE_STATE["responses"] = [_fake_completion(GOOD_SUMMARY, reasoning="我需要先归纳材料")]
+    port = fake_llm.server_address[1]
+    api = ConsoleAPI(MemoryTools(_fake_llm_settings(tmp_path, port)))
+    mid = _write(api.tools, "topic one", tags=["t"])
+    mid2 = _write(api.tools, "topic two", tags=["t"])
+    api.knowledge_membership(mid, "add")
+    api.knowledge_membership(mid2, "add")
+
+    res = api.llm_ask([mid, mid2], "summarize")
+    assert "error" not in res, res
+    assert res["degraded"] is False and res["attempt"] == 1
+    assert res["reasoning"] == "我需要先归纳材料"
+    assert res["source_memory_ids"] == [mid, mid2]
+    sent = _FAKE_STATE["requests"][0]
+    assert sent["model"] == "fake-model" and sent["max_tokens"] == 8192
+    assert f"[{mid}]" in sent["messages"][1]["content"]
+
+
+def test_llm_ask_retry_then_degraded(tmp_path: Path, fake_llm) -> None:
+    # attempt 1 fails the gate (too short), attempt 2 fails again → degraded
+    _FAKE_STATE["responses"] = [
+        _fake_completion("short"),
+        _fake_completion("still short"),
+    ]
+    port = fake_llm.server_address[1]
+    api = ConsoleAPI(MemoryTools(_fake_llm_settings(tmp_path, port)))
+    mid = _write(api.tools, "m1")
+    res = api.llm_ask([mid], "summarize")
+    assert res["degraded"] is True and res["attempt"] == 2
+    assert res["warnings"] and "100" in res["warnings"][0]
+    assert len(_FAKE_STATE["requests"]) == 2  # exactly one corrective retry
+
+    # retry path passes on the second attempt
+    _FAKE_STATE["responses"] = [_fake_completion("short"), _fake_completion(GOOD_SUMMARY)]
+    res2 = api.llm_ask([mid], "summarize")
+    assert res2["degraded"] is False and res2["attempt"] == 2
+    corrective = _FAKE_STATE["requests"][1]["messages"]
+    assert corrective[-1]["role"] == "user" and "结构校验" in corrective[-1]["content"]
+
+
+def test_llm_ask_v1_fallback_and_cache_keyed_by_url(tmp_path: Path, fake_llm) -> None:
+    """404 on /chat/completions falls back to /v1/chat/completions; the probe
+    is cached per base_url (R2 P2-2)."""
+    from memory_arbiter import llm_client
+
+    port = fake_llm.server_address[1]
+    llm_client._V1_PROBE_CACHE.clear()
+    settings = _fake_llm_settings(tmp_path, port)
+    # first response is a 404 (plain path missing), then a good v1 response
+    _FAKE_STATE["responses"] = [{"error": {"message": "no route"}}]
+
+    class _First404Handler(_FakeOpenAIHandler):
+        def do_POST(self):  # noqa: N802
+            if self.path == "/chat/completions":
+                _FAKE_STATE["requests"].append({"path": self.path})
+                self._reply(404, {"error": "not found"})
+                return
+            super().do_POST()
+
+    server2 = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _First404Handler)
+    _threading.Thread(target=server2.serve_forever, daemon=True).start()
+    try:
+        port2 = server2.server_address[1]
+        settings2 = Settings(
+            db_path=tmp_path / "llm2.sqlite3", backup_jsonl=tmp_path / "llm2.jsonl",
+            client="pytest", agent_id="kb-test", workspace="kb-ws",
+            llm_base_url=f"http://127.0.0.1:{port2}", llm_api_key="sk-fake",
+            llm_model="fake-model", llm_max_context_tokens=32000,
+        )
+        _FAKE_STATE["responses"] = [_fake_completion(GOOD_SUMMARY)]
+        result = llm_client.chat_completion(settings2, [{"role": "user", "content": "hi"}])
+        assert result["content"] == GOOD_SUMMARY
+        assert llm_client._V1_PROBE_CACHE[f"http://127.0.0.1:{port2}"] is True
+        # second call goes straight to the /v1 path (no 404 round trip needed)
+        _FAKE_STATE["requests"] = []
+        _FAKE_STATE["responses"] = [_fake_completion(GOOD_SUMMARY)]
+        llm_client.chat_completion(settings2, [{"role": "user", "content": "hi"}])
+        assert _FAKE_STATE["requests"][0].get("path") != "/chat/completions"
+    finally:
+        server2.shutdown()
+        server2.server_close()
+
+
+def test_llm_ask_budget_and_config_errors(tmp_path: Path, fake_llm) -> None:
+    port = fake_llm.server_address[1]
+    settings = _fake_llm_settings(tmp_path, port)
+    settings.llm_max_context_tokens = 5000  # budget after reserves ≈ 104 tokens
+    api = ConsoleAPI(MemoryTools(settings))
+    huge = api.tools.memory_write(
+        content="词" * 2000, subject="huge memory", tags=[], workspace="kb-ws",
+    )["data"]["id"]
+    # one huge memory → single-over-budget error with guidance (no LLM call made)
+    res = api.llm_ask([huge], "summarize")
+    assert res["_http_status"] == 400 and "budget" in res["error"]
+    assert _FAKE_STATE["requests"] == []  # fails before transport
+
+    # unconfigured llm → guided error
+    bare = Settings(
+        db_path=tmp_path / "bare.sqlite3", backup_jsonl=tmp_path / "bare.jsonl",
+        client="t", agent_id="t", workspace="kb-ws",
+    )
+    api2 = ConsoleAPI(MemoryTools(bare))
+    own = _write(api2.tools, "own memory")
+    res2 = api2.llm_ask([own], "summarize")
+    assert res2["_http_status"] == 400 and "Settings" in res2["error"]
+
+    # bad action / empty ids / oversize ids
+    assert api.llm_ask([huge], "nope")["_http_status"] == 400
+    assert api.llm_ask([], "summarize")["_http_status"] == 400
+    assert api.llm_ask(list(range(51)), "summarize")["_http_status"] == 400
+
+
+def test_llm_timeline_fabricated_year_rejected(tmp_path: Path, fake_llm) -> None:
+    port = fake_llm.server_address[1]
+    api = ConsoleAPI(MemoryTools(_fake_llm_settings(tmp_path, port)))
+    mid = api.tools.memory_write(
+        content="in 2015 something happened", subject="policy memory",
+        tags=[], workspace="kb-ws", event_time="2015-06-01",
+    )["data"]["id"]
+    _FAKE_STATE["responses"] = [
+        _fake_completion("- 2015 — 事件A [101]\n- 2039 — 我编造的事件 [101]"),
+        _fake_completion("- 2015 — 事件A [101]\n- 2015 — 事件B [101]"),
+    ]
+    api.tools.db.memories.set_kb_member(mid, True)
+    res = api.llm_ask([mid], "timeline")
+    assert res["attempt"] == 2 and res["degraded"] is False
+    assert "2039" in _FAKE_STATE["requests"][1]["messages"][-1]["content"]
+
+
+def test_validate_output_table() -> None:
+    mats = [ContextMaterial(1, "s", "2015-01-01", "in 2015 something happened; 2019 too")]
+    assert validate_output("timeline", "- 2015 — a [1]", mats) == []
+    errs = validate_output("timeline", "- 2039 — fabricated [1]", mats)
+    assert errs and "2039" in errs[0]
+    assert validate_output("quiz_me", "一?二?三?", []) == []
+    assert validate_output("quiz_me", "一?", [])  # too few questions
+    assert validate_output("outline", "# only one", [])  # fewer than two ## headings
+    assert validate_output("custom", "ok", [])  # under 10 chars → violation
+    assert validate_output("custom", "ok-ish answer", []) == []
+
+
+def test_llm_test_probe(tmp_path: Path, fake_llm) -> None:
+    port = fake_llm.server_address[1]
+    api = ConsoleAPI(MemoryTools(_fake_llm_settings(tmp_path, port)))
+    _FAKE_STATE["responses"] = [_fake_completion("ok")]
+    res = api.llm_test()
+    assert res["reply"] == "ok" and res["model"] == "fake-model"
+
+
+def test_knowledge_save_two_step_and_attribution(tmp_path: Path) -> None:
+    api = _kb_api(tmp_path)
+    res = api.knowledge_save(
+        subject="总结 · 测试主题",
+        content="# 总结\n\n要点一 [101]",
+        tags=["llm-output", "llm-summary"],
+        workspace="kb-ws",
+    )
+    assert res["saved"] is True and res["kb_member"] is True
+    row = api.tools.db.get_memory(res["memory_id"])
+    assert row["kb_member"] == 1
+    assert row["agent_id"] == "console"  # request-identity attribution (R2 P0-1)
+    assert row["tags"] == ["llm-output", "llm-summary"]
+    assert row["status"] == "active"
+
+    # empty save rejected
+    assert api.knowledge_save(subject="", content="x", tags=[], workspace=None)["_http_status"] == 400
+
+
+def test_knowledge_save_strict_pending_branch(tmp_path: Path) -> None:
+    """strict + unconfirmed bucket: write lands pending; save reports the
+    governance path instead of failing silently (plan R2 P1-10)."""
+    settings = Settings(
+        db_path=tmp_path / "sp.sqlite3", backup_jsonl=tmp_path / "sp.jsonl",
+        client="t", agent_id="t", workspace="kb-ws", isolation="strict",
+    )
+    tools = MemoryTools(settings)
+    api = ConsoleAPI(tools)
+    res = api.knowledge_save(subject="s", content="c", tags=[], workspace="brand-new-ws")
+    assert res["saved"] is True and res["pending_workspace"] is True and res["kb_member"] is False
+    row = tools.db.get_memory(res["memory_id"])
+    assert row["status"] == "pending"

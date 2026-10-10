@@ -38,7 +38,7 @@ mema-production-smoke = "memory_arbiter.post_release_smoke:main"
 include = ["memory_arbiter*"]
 
 [tool.setuptools.package-data]
-memory_arbiter = ["AGENT_ONBOARDING.md", "FIRST_RUN_DEMO.zh-CN.md"]
+memory_arbiter = ["AGENT_ONBOARDING.md", "FIRST_RUN_DEMO.zh-CN.md", "llm_skills/*.md"]
 
 [tool.setuptools.dynamic]
 version = { attr = "memory_arbiter.__version__" }

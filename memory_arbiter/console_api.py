@@ -780,6 +780,130 @@ class ConsoleAPI:
         after = self.tools.db.get_memory(mid) or {}
         return {"memory_id": mid, "member": bool(after.get("kb_member")), "changed": bool(changed)}
 
+    # ---- llm workbench (0.18.0, plan §B.4-B.5) ------------------------------
+
+    def _kb_materials(
+        self, memory_ids: list[int], workspace: str | None,
+    ) -> "tuple[list[Any], dict[str, Any] | None]":
+        """Fetch ContextMaterial rows under the console-side single-canonical
+        equality rule (same as membership — plan R2 P1-7)."""
+        rows_map = self.tools.db.memories.get_memories_by_ids([int(i) for i in memory_ids])
+        from .llm_client import ContextMaterial
+
+        materials: list[Any] = []
+        strict = getattr(self.tools.settings, "isolation", "none") == "strict"
+        canonical: str | None = None
+        if strict:
+            explicit = str(workspace or "").strip()
+            caller = self.tools._caller_workspace(explicit or None)
+            if not caller.canonical:
+                return [], {"error": "forbidden_strict_workspace", "_http_status": 403}
+            canonical = str(caller.canonical)
+        for mid in memory_ids:
+            row = rows_map.get(int(mid))
+            if row is None:
+                return [], {"error": f"memory {mid} not found", "_http_status": 404}
+            if strict:
+                target_ws = str(row.get("workspace_canonical") or row.get("workspace") or "")
+                if target_ws != canonical:
+                    return [], {"error": f"memory {mid} is outside the selected workspace", "_http_status": 403}
+            materials.append(ContextMaterial(
+                memory_id=int(mid),
+                subject=str(row.get("subject") or ""),
+                event_time=str(row.get("event_time") or ""),
+                content=str(row.get("content") or ""),
+            ))
+        return materials, None
+
+    def llm_ask(
+        self,
+        memory_ids: list[Any],
+        action: str,
+        custom_prompt: str = "",
+        workspace: str | None = None,
+    ) -> dict[str, Any]:
+        missing = self._strict_workspace_required(workspace)
+        if missing is not None:
+            return missing
+        if not isinstance(memory_ids, list) or not memory_ids:
+            return {"error": "memory_ids must be a non-empty list", "_http_status": 400}
+        if len(memory_ids) > 50:
+            return {"error": "at most 50 memories per action", "_http_status": 400}
+        try:
+            ids = [int(i) for i in memory_ids]
+        except (TypeError, ValueError):
+            return {"error": "memory_ids must be integers", "_http_status": 400}
+        materials, error = self._kb_materials(ids, workspace)
+        if error is not None:
+            return error
+        from . import llm_client
+
+        try:
+            return llm_client.run_action(
+                self.settings, action, materials, custom_prompt=str(custom_prompt or ""),
+            )
+        except llm_client.LLMError as exc:
+            return {"error": str(exc), "_http_status": 400}
+
+    def llm_test(self) -> dict[str, Any]:
+        from . import llm_client
+
+        try:
+            return llm_client.run_test_probe(self.settings)
+        except llm_client.LLMError as exc:
+            return {"error": str(exc), "_http_status": 400}
+
+    def knowledge_save(
+        self,
+        subject: str,
+        content: str,
+        tags: list[str] | None,
+        workspace: str | None,
+    ) -> dict[str, Any]:
+        """Two-step save (plan §B.1.4, R2 P0-1): the standard write pipeline
+        under a console request identity, then the kb_member flip via the
+        governance primitive. Never touches PRODUCT_FIELD_REGISTRY."""
+        missing = self._strict_workspace_required(workspace)
+        if missing is not None:
+            return missing
+        if not str(subject or "").strip() or not str(content or "").strip():
+            return {"error": "subject and content are required", "_http_status": 400}
+        from .request_identity import RequestIdentity, request_identity_scope
+
+        payload: dict[str, Any] = {
+            "subject": str(subject).strip(),
+            "content": str(content),
+            "tags": [str(t) for t in (tags or []) if str(t).strip()],
+            "source_type": "agent_generated",
+        }
+        if str(workspace or "").strip():
+            payload["workspace"] = str(workspace).strip()
+        with request_identity_scope(RequestIdentity(client="console", agent_id="console")):
+            response = self.tools.memory_write(**payload)
+        data = response.get("data") if isinstance(response, dict) else None
+        if not (isinstance(response, dict) and response.get("ok") and isinstance(data, dict) and data.get("id")):
+            error = (data or {}).get("error") if isinstance(data, dict) else None
+            return {"error": error or "write pipeline rejected the save", "_http_status": 400, "detail": data}
+        memory_id = int(data["id"])
+        if str((data.get("record") or {}).get("status") or "") == "pending":
+            # strict + unconfirmed bucket: the memory landed as pending; the
+            # membership flip would reject it — surface the governance path.
+            return {
+                "memory_id": memory_id,
+                "saved": True,
+                "kb_member": False,
+                "pending_workspace": True,
+                "hint_en": "Saved as pending: confirm the workspace in governance first, then add it to the knowledge base.",
+                "hint_zh": "已存为 pending：请先在治理面确认该工作区，再加入知识库。",
+            }
+        changed = self.tools.db.memories.set_kb_member(memory_id, True)
+        return {
+            "memory_id": memory_id,
+            "saved": True,
+            "kb_member": True,
+            "kb_changed": bool(changed),
+        }
+
     def doctor(self) -> dict[str, Any]:
         return self._payload(self.tools.memory_doctor_overview(deep=False))
 
