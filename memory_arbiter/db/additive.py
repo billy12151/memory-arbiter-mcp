@@ -155,6 +155,18 @@ def ensure_additive_structures(conn: sqlite3.Connection) -> list[str]:
         if not has_column(conn, "memories", "last_scanned_at"):
             conn.execute("ALTER TABLE memories ADD COLUMN last_scanned_at TEXT")
             applied.append("memories.last_scanned_at")
+        # 0.18.0 知识库工作台：kb_member 是治理位（同 protection_level 一类），
+        # 不入 tags——update 管道的 new_tags 整体替换语义会静默冲掉 tag 形态
+        # 的成员标记（方案 v2 §B.1）。partial index 对齐 0.16.6 防重门手法。
+        if not has_column(conn, "memories", "kb_member"):
+            conn.execute(
+                "ALTER TABLE memories ADD COLUMN kb_member INTEGER NOT NULL DEFAULT 0"
+            )
+            applied.append("memories.kb_member")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memories_kb_active "
+            "ON memories (workspace_canonical) WHERE kb_member = 1 AND status = 'active'"
+        )
 
     _run_additive_segment(conn, "columns", applied, _columns)
 

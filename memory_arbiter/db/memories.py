@@ -21,6 +21,7 @@ from ..text import (
 )
 from ..timeutil import parse_iso8601_utc
 from ._mem_edit import _MemEditMixin
+from .audit import AuditStore
 from ._mem_helpers import (  # noqa: F401  (split re-export)
     DuplicateActiveContentError as DuplicateActiveContentError,
     content_sha as content_sha,
@@ -412,6 +413,74 @@ class MemoriesStore(_MemVectorsMixin, _MemEditMixin):
                 params,
             ).fetchall()
             return [_row_to_dict(row) for row in rows]
+
+    # ---- knowledge-base membership (0.18.0 console knowledge workbench) ----
+
+    def set_kb_member(self, memory_id: int, member: bool, *, actor: str = "console") -> int:
+        """Flip the ``kb_member`` governance bit for one memory.
+
+        治理位翻转（0.18.0 知识库工作台）：不 bump 内容版本、不写
+        memory_history（内容未变，无需 re-embedding / FTS 重同步）；审计走
+        governance_audit（actor 进 detail——该表无 actor 列）。仅 active
+        记忆可入知识库（pending/expired/deleted 拒），返回受影响行数
+        （0 = id 不存在或状态不符）。
+        """
+        memory_id = int(memory_id)
+        if not self._db_available:
+            return 0
+        with self.write_transaction() as conn:
+            row = conn.execute(
+                "SELECT status FROM memories WHERE id = ?", (memory_id,)
+            ).fetchone()
+            if row is None or str(row["status"]) != "active":
+                return 0
+            cur = conn.execute(
+                "UPDATE memories SET kb_member = ? WHERE id = ? AND kb_member != ?",
+                (1 if member else 0, memory_id, 1 if member else 0),
+            )
+            AuditStore.record_governance_action_on_conn(
+                conn,
+                action="kb_membership_set" if member else "kb_membership_clear",
+                reason="console knowledge workbench",
+                detail={"actor": actor, "memory_id": memory_id, "member": member},
+            )
+            return int(cur.rowcount)
+
+    def list_kb_members(
+        self, ws_canonical: "str | None" = None, limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        """Active knowledge-base members, newest event_time first.
+
+        树接口的数据源：只带元信息（正文按需另取），防大库 payload 爆炸；
+        ``ws_canonical`` 为空 = 全部桶（none/weak 模式的"全部"视图）。
+        """
+        if not self._db_available:
+            return []
+        clauses = ["kb_member = 1", "status = 'active'"]
+        params: list[Any] = []
+        if str(ws_canonical or "").strip():
+            clauses.append("COALESCE(NULLIF(workspace_canonical, ''), workspace) = ?")
+            params.append(str(ws_canonical).strip())
+        params.append(int(limit))
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT id, subject, tags, workspace, workspace_canonical, event_time, "
+                f"ingest_time, LENGTH(content) AS content_chars "
+                f"FROM memories WHERE {' AND '.join(clauses)} "
+                "ORDER BY event_time DESC, ingest_time DESC LIMIT ?",
+                params,
+            ).fetchall()
+            out: list[dict[str, Any]] = []
+            for row in rows:
+                item = dict(row)
+                raw_tags = item.get("tags")
+                if isinstance(raw_tags, str):
+                    try:
+                        item["tags"] = json.loads(raw_tags)
+                    except (ValueError, TypeError):
+                        item["tags"] = []
+                out.append(item)
+            return out
 
 
 
