@@ -832,8 +832,10 @@ def test_console_server_graph_route_bad_id_and_missing(tmp_path) -> None:
 
 def test_memory_graph_frontend_contract() -> None:
     """The memory detail page must fetch the graph endpoint and render the
-    canvas + fallback list — locks the wiring a node --check parse cannot."""
-    assert "api(`/api/memories/${encodeURIComponent(id)}/graph`)" in INDEX_HTML
+    canvas + fallback list — locks the wiring a node --check parse cannot.
+    (0.18.0: the graph fetch is wrapped in wsJoin() so the global workspace
+    picker rides along — the literal template moved inside the wrapper.)"""
+    assert "wsJoin(`/api/memories/${encodeURIComponent(id)}/graph`)" in INDEX_HTML
     assert "function drawEgoGraph(" in INDEX_HTML
     assert "function relationsCard(" in INDEX_HTML
     assert 'id="egoGraph"' in INDEX_HTML
