@@ -116,6 +116,28 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/llm/test":
             self._json_or_error(self.api.llm_test())
             return
+        if path == "/api/knowledge/edit":
+            payload = self.api.knowledge_edit(
+                memory_id=body.get("memory_id") or 0,
+                old_text=str(body.get("old_text") or ""),
+                new_text=str(body.get("new_text") or ""),
+                add_tags=body.get("add_tags") if isinstance(body.get("add_tags"), list) else [],
+                remove_tags=body.get("remove_tags") if isinstance(body.get("remove_tags"), list) else [],
+                reason=str(body.get("reason") or ""),
+                workspace=_optional_str(body.get("workspace")),
+                authorized=bool(body.get("authorized")),
+            )
+            self._json_or_error(payload)
+            return
+        if path == "/api/knowledge/retire":
+            payload = self.api.knowledge_retire(
+                memory_id=body.get("memory_id") or 0,
+                reason=str(body.get("reason") or ""),
+                workspace=_optional_str(body.get("workspace")),
+                authorized=bool(body.get("authorized")),
+            )
+            self._json_or_error(payload)
+            return
         if path == "/api/knowledge/save":
             tags = body.get("tags")
             payload = self.api.knowledge_save(

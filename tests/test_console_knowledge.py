@@ -782,3 +782,71 @@ def test_knowledge_save_strict_pending_branch(tmp_path: Path) -> None:
     assert res["saved"] is True and res["pending_workspace"] is True and res["kb_member"] is False
     row = tools.db.get_memory(res["memory_id"])
     assert row["status"] == "pending"
+
+
+# ---- c6+: console edit / retire (owner 2026-10-10 mid-run instruction) ------
+
+def test_knowledge_edit_and_retire_in_process(tmp_path: Path) -> None:
+    """Console edit/retire go through the same in-process pipeline
+    (memory_edit / memory_supersede) — no MCP service, no cross-process
+    write; version bump + history + kb_member survival included."""
+    api = _kb_api(tmp_path)
+    tools = api.tools
+    mid = _write(tools, "editable knowledge", tags=["knowledge-ish"])
+    tools.db.memories.set_kb_member(mid, True)
+
+    res = api.knowledge_edit(mid, old_text="editable", new_text="edited", reason="typo")
+    assert res["edited"] is True
+    row = tools.db.get_memory(mid)
+    assert row["content"] == "content of edited knowledge"
+    assert int(row["version"]) >= 2  # edit bumped the content version
+    assert row["kb_member"] == 1  # governance bit untouched by the edit
+
+    # tags-only edit also works; bogus arg combos are rejected
+    res2 = api.knowledge_edit(mid, add_tags=["curated"], reason="tag")
+    assert res2["edited"] is True
+    bad = api.knowledge_edit(mid)  # nothing to do
+    assert bad["_http_status"] == 400
+    half = api.knowledge_edit(mid, old_text="edited")  # old without new
+    assert half["_http_status"] == 400
+
+    # retire always requires the explicit authorization bit (the console
+    # confirm dialog is that authorization); unauthenticated first, then approved
+    denied = api.knowledge_retire(mid, reason="outdated")
+    assert denied.get("needs_authorization") is True
+    ret = api.knowledge_retire(mid, reason="outdated", authorized=True)
+    assert ret["retired"] is True
+    assert tools.db.get_memory(mid)["status"] == "superseded"
+
+
+def test_knowledge_retire_locked_needs_authorization(tmp_path: Path) -> None:
+    api = _kb_api(tmp_path)
+    tools = api.tools
+    mid = _write(tools, "user confirmed fact", source_type="user_confirmed")
+    denied = api.knowledge_retire(mid, reason="try without auth")
+    assert denied.get("needs_authorization") is True
+    assert tools.db.get_memory(mid)["status"] == "active"
+    approved = api.knowledge_retire(mid, reason="owner approved", authorized=True)
+    assert approved["retired"] is True
+    assert tools.db.get_memory(mid)["status"] == "superseded"
+
+
+def test_knowledge_edit_strict_gate(tmp_path: Path) -> None:
+    settings = Settings(
+        db_path=tmp_path / "se.sqlite3", backup_jsonl=tmp_path / "se.jsonl",
+        client="t", agent_id="t", workspace="kb-ws", isolation="strict",
+    )
+    tools = MemoryTools(settings)
+    api = ConsoleAPI(tools)
+    mine = _write(tools, "mine")
+    other = _write(tools, "other", workspace="other-ws")
+    tools.memory_confirm_pending_workspace(
+        memory_id=mine, canonical="kb-ws", reason="t", authorized=True, workspace="kb-ws",
+    )
+    tools.memory_confirm_pending_workspace(
+        memory_id=other, canonical="other-ws", reason="t", authorized=True, workspace="other-ws",
+    )
+    ok = api.knowledge_edit(mine, old_text="mine", new_text="ours", workspace="kb-ws")
+    assert ok["edited"] is True
+    denied = api.knowledge_edit(other, old_text="other", new_text="x", workspace="kb-ws")
+    assert denied["_http_status"] == 403

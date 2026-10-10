@@ -904,6 +904,108 @@ class ConsoleAPI:
             "kb_changed": bool(changed),
         }
 
+    # ---- console memory edit / retire (owner 2026-10-10: same-process
+    # internal interfaces — never a second MCP service, no cross-process
+    # write concurrency) -------------------------------------------------------
+
+    def _kb_operable(self, memory_id: int, workspace: str | None) -> dict[str, Any] | None:
+        """Shared strict-mode equality gate for console edit/retire (same
+        single-canonical rule as membership — plan R2 P1-7)."""
+        if getattr(self.tools.settings, "isolation", "none") != "strict":
+            return None
+        explicit = str(workspace or "").strip()
+        caller = self.tools._caller_workspace(explicit or None)
+        if not caller.canonical:
+            return {"error": "forbidden_strict_workspace", "_http_status": 403}
+        row = self.tools.db.get_memory(memory_id)
+        if row is None:
+            return {"error": f"memory {memory_id} not found", "_http_status": 404}
+        target_ws = str(row.get("workspace_canonical") or row.get("workspace") or "")
+        if target_ws != caller.canonical:
+            return {"error": "memory is outside the selected workspace", "_http_status": 403}
+        return None
+
+    def knowledge_edit(
+        self,
+        memory_id: int,
+        old_text: str = "",
+        new_text: str = "",
+        add_tags: list[str] | None = None,
+        remove_tags: list[str] | None = None,
+        reason: str = "",
+        workspace: str | None = None,
+        authorized: bool = False,
+    ) -> dict[str, Any]:
+        """POST /api/knowledge/edit — in-process memory_edit (single-point
+        text replace and/or tag add/remove; never a whole-content rewrite
+        from the console)."""
+        try:
+            mid = int(memory_id)
+        except (TypeError, ValueError):
+            return {"error": "memory_id must be an integer", "_http_status": 400}
+        missing = self._strict_workspace_required(workspace)
+        if missing is not None:
+            return missing
+        denied = self._kb_operable(mid, workspace)
+        if denied is not None:
+            return denied
+        has_text = bool(str(old_text).strip()) and bool(str(new_text).strip())
+        has_tags = bool(add_tags) or bool(remove_tags)
+        if not (has_text or has_tags):
+            return {"error": "provide old_text+new_text and/or add_tags/remove_tags", "_http_status": 400}
+        if bool(str(old_text).strip()) != bool(str(new_text).strip()):
+            return {"error": "old_text and new_text must be given together", "_http_status": 400}
+        response = self.tools.memory_edit(
+            memory_id=mid,
+            old_text=str(old_text) if has_text else None,
+            new_text=str(new_text) if has_text else None,
+            # tags-only fast path: no content parameters may ride along, or
+            # memory_edit rejects the combo (tags_only x content is refused).
+            tags_only=not has_text,
+            add_tags=[str(t) for t in (add_tags or [])],
+            remove_tags=[str(t) for t in (remove_tags or [])],
+            reason=str(reason or "console knowledge workbench edit")[:500],
+            authorized=bool(authorized),
+        )
+        data = self._payload(response)
+        if not response.get("ok"):
+            detail_str = str(data)
+            return {
+                "error": (data.get("error") if isinstance(data, dict) else None) or "edit rejected",
+                "_http_status": 400,
+                "needs_authorization": "authoriz" in detail_str or "locked" in detail_str,
+                "detail": data,
+            }
+        return {"memory_id": mid, "edited": True, "result": data}
+
+    def knowledge_retire(
+        self, memory_id: int, reason: str = "", workspace: str | None = None, authorized: bool = False,
+    ) -> dict[str, Any]:
+        """POST /api/knowledge/retire — in-process memory_supersede. Locked /
+        user_confirmed rows need an explicit second click (authorized=true)."""
+        try:
+            mid = int(memory_id)
+        except (TypeError, ValueError):
+            return {"error": "memory_id must be an integer", "_http_status": 400}
+        missing = self._strict_workspace_required(workspace)
+        if missing is not None:
+            return missing
+        denied = self._kb_operable(mid, workspace)
+        if denied is not None:
+            return denied
+        response = self.tools.memory_supersede(
+            memory_id=mid,
+            reason=str(reason or "console knowledge workbench retire")[:500],
+            authorized=bool(authorized),
+        )
+        data = self._payload(response)
+        if not response.get("ok"):
+            return {
+                "error": (data.get("error") if isinstance(data, dict) else None) or "retire rejected",
+                "_http_status": 400, "needs_authorization": True, "detail": data,
+            }
+        return {"memory_id": mid, "retired": True}
+
     def doctor(self) -> dict[str, Any]:
         return self._payload(self.tools.memory_doctor_overview(deep=False))
 
