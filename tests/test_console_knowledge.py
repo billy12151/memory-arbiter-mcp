@@ -517,6 +517,21 @@ def test_setup_merges_unknown_sections(tmp_path: Path) -> None:
     assert setup_cli._merge_unknown_sections(dict(fresh), cfg_path) == fresh
 
 
+def test_knowledge_tree_special_chars_in_workspace(tmp_path: Path) -> None:
+    """Workspace names with quotes/unicode must survive the canonical
+    resolution and parameterized SQL of the tree/membership path."""
+    api = _kb_api(tmp_path)
+    tools = api.tools
+    weird = "桶'名\"引号"
+    mid = _write(tools, "weird bucket doc", workspace=weird)
+    tools.db.memories.set_kb_member(mid, True)
+    tree = api.knowledge_tree(workspace=weird)
+    assert tree["total"] == 1
+    assert tree["workspaces"][0]["workspace"] == weird
+    assert api.knowledge_membership(mid, "remove")["member"] is False
+    assert api.knowledge_membership(mid, "add")["member"] is True
+
+
 # ---- c6: llm ask / test / save ----------------------------------------------
 
 import http.server
