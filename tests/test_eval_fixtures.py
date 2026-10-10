@@ -140,6 +140,8 @@ CONFLICT_FIXTURES = REPO / "eval" / "fixtures" / "conflict"
 CONFLICT_LABELS = {"true_conflict", "coexist", "noise", "non_conflict"}
 CONFLICT_NON_CONFLICT_KINDS = {
     "version_evolution", "point_in_time", "different_topic", "same_value_duplicate",
+    # 0.17.2 locomo_gold_4way cohort（2026-10-09 四线程亲审）新增细分
+    "subject_mismatch", "same_subject_parallel",
 }
 CONFLICT_SHAPES = {"scan_evolution", "governed_negative", "write_opposition"}
 
@@ -154,7 +156,9 @@ def _conflict_pairs() -> list[dict]:
 
 def test_conflict_pairs_composition_and_integrity() -> None:
     pairs = _conflict_pairs()
-    assert len(pairs) == 66
+    # 66（owner_resolved/constructed）+ 8（locomo_gold_4way，0.17.2 扩容：
+    # 6 non_conflict + 2 true_conflict，LoCoMo 四线程亲审金标）
+    assert len(pairs) == 74
     for pair in pairs:
         assert pair["label"] in CONFLICT_LABELS, pair["pair_id"]
         assert pair["shape"] in CONFLICT_SHAPES, pair["pair_id"]
@@ -168,9 +172,16 @@ def test_conflict_pairs_composition_and_integrity() -> None:
         # 必须带信息充足度标注（insufficient 对疑似=满分口径的计分依据）
         if pair["label"] == "non_conflict":
             assert pair.get("non_conflict_kind") in CONFLICT_NON_CONFLICT_KINDS, pair["pair_id"]
-            assert pair.get("relabel_20260928", {}).get("from") == "true_conflict", pair["pair_id"]
+            if pair["label_source"] == "locomo_gold_4way":
+                # locomo cohort 无 relabel 前史，改标台账由 adjudication 承担
+                assert pair.get("adjudication"), pair["pair_id"]
+            else:
+                assert pair.get("relabel_20260928", {}).get("from") == "true_conflict", pair["pair_id"]
         if pair["label"] == "true_conflict":
-            assert pair.get("opposition_quality") in {"sufficient", "insufficient"}, pair["pair_id"]
+            if pair["label_source"] == "locomo_gold_4way":
+                assert pair.get("adjudication"), pair["pair_id"]
+            else:
+                assert pair.get("opposition_quality") in {"sufficient", "insufficient"}, pair["pair_id"]
     labels = {p["label"] for p in pairs}
     assert labels == CONFLICT_LABELS
     # owner 判定来源的对不得为空（ground truth 主体；non_conflict 改标对

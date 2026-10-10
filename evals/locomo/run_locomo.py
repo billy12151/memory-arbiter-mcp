@@ -355,8 +355,83 @@ def chat_with_fallback(primary: LLM, fallback: LLM | None, prompt: str, max_toke
         return fallback.chat(prompt, max_tokens=max_tokens), fallback.model
 
 
-def answer_questions(tools, conv: dict, answerer: LLM, judge: LLM, out_path: Path, log, limit=None, fallback: LLM | None = None):
+def conflict_members_of(tools, log) -> dict[int, list[int]]:
+    """conflict_id -> member memory ids, via the product surface
+    (memory_review view=conflicts)."""
+    out: dict[int, list[int]] = {}
+    try:
+        # candidate = detected-but-not-yet-adjudicated (write-time detections)
+        res = tools.memory_review(view="conflicts", data={"status": "candidate"})
+        items = (res.get("data") or {}).get("conflicts", [])
+        for c in items:
+            cid = c.get("id")
+            raw = c.get("candidate_key")
+            if isinstance(raw, str):
+                try:
+                    raw = json.loads(raw)
+                except Exception:
+                    raw = {}
+            members = raw.get("members") if isinstance(raw, dict) else None
+            if not members and isinstance(c.get("members"), list):
+                members = c["members"]
+            if cid is not None and members:
+                out[int(cid)] = [int(str(m).split("@")[0]) for m in members]
+    except Exception as exc:  # noqa: BLE001
+        log(f"  [conflict-aware] memory_review failed ({str(exc)[:90]}); no filtering")
+    if not out:
+        log("  [conflict-aware] WARNING: 0 groups loaded — filter inactive")
+    return out
+
+
+def drop_superseded(tools, hits: list[dict], groups: dict[int, list[int]]) -> list[dict]:
+    """Conflict-aware recall: a conflict group is an expansion edge. When any
+    member is recalled, ensure the NEWEST member of the group is in the context
+    (fetched via read even if ranked out) and older members are dropped."""
+    if not groups:
+        return hits
+
+    def ts(h, key):
+        return str(h.get(key) or "")
+
+    ids = {h.get("id") for h in hits}
+    kept = set(ids)
+    additions: dict[int, dict] = {}
+    for members in groups.values():
+        present = [m for m in members if m in ids]
+        if not present:
+            continue
+        # newest across the whole group (event_time, then ingest_time), not
+        # just among the recalled ones
+        info = {}
+        for m in members:
+            if m in ids:
+                info[m] = hits[[h.get("id") for h in hits].index(m)]
+            elif m not in additions:
+                full = tools.memory(action="read", data={"memory_id": m})
+                if full.get("ok"):
+                    d = full.get("data", {})
+                    additions[m] = d
+                    info[m] = d
+        if not info:
+            continue
+        newest = max(info, key=lambda m: (ts(info[m], "event_time"), ts(info[m], "ingest_time"), m))
+        for m in present:
+            if m != newest:
+                kept.discard(m)
+        if newest not in kept and newest in additions:
+            kept.add(newest)
+    out = [h for h in hits if h.get("id") in kept]
+    for mid, d in additions.items():
+        if mid in kept and mid not in ids:
+            out.append(d)
+    return out
+
+
+def answer_questions(tools, conv: dict, answerer: LLM, judge: LLM, out_path: Path, log, limit=None, fallback: LLM | None = None, conflict_aware: bool = False):
     a, b = conv["conversation"]["speaker_a"], conv["conversation"]["speaker_b"]
+    groups = conflict_members_of(tools, log) if conflict_aware else {}
+    if conflict_aware:
+        log(f"  conflict-aware: {len(groups)} conflict groups loaded")
     done = 0
     mode = "a" if out_path.exists() else "w"
     seen_questions = set()
@@ -376,6 +451,8 @@ def answer_questions(tools, conv: dict, answerer: LLM, judge: LLM, out_path: Pat
             reform_raw, _ = chat_with_fallback(answerer, fallback, REFORM_PROMPT.format(question=q), 48, log)
             reform_q = reform_raw.strip().strip('"')
             hits = recall(tools, q, reform_q)
+            if conflict_aware:
+                hits = drop_superseded(tools, hits, groups)
             def _line(h):
                 et = str(h.get("event_time") or "")[:10]
                 return f"- {h.get('content', '')}" + (f" [date: {et}]" if et else "")
@@ -464,6 +541,8 @@ def main() -> None:
     ap.add_argument("--qa-file", default="predictions.jsonl", help="QA output filename (per-answerer reruns)")
     ap.add_argument("--verbatim", action="store_true", help="zero-extraction arm: store each utterance verbatim with event_time (mema-as-documented)")
     ap.add_argument("--hybrid", action="store_true", help="dual-write arm: curated facts AND verbatim utterances in one library")
+    ap.add_argument("--v2det", action="store_true", help="fresh replay dir suffix for re-running conflict detection with a new detector checkpoint")
+    ap.add_argument("--conflict-aware", action="store_true", help="conflict-aware recall: drop superseded members of detected conflicts from the recalled context (newest event_time wins)")
     args = ap.parse_args()
 
     for var in ("EVALUATOR_API_BASE", "EVALUATOR_API_KEY"):
@@ -496,6 +575,8 @@ def main() -> None:
         sid = conv.get("sample_id", f"conv-{i}")
         if args.verbatim:
             sid = f"{sid}-verbatim"
+        if args.v2det:
+            sid = f"{sid}-v2det"
         if args.hybrid:
             sid = f"{sid}-hybrid"
         conv_dir = RUN_DIR / sid
@@ -525,7 +606,8 @@ def main() -> None:
             log(f"replay already done: {replay_marker.read_text()}")
         if not args.replay_only:
             answered = answer_questions(
-                tools, conv, answerer, judge, conv_dir / args.qa_file, log, args.limit, fallback=fallback
+                tools, conv, answerer, judge, conv_dir / args.qa_file, log, args.limit,
+                fallback=fallback, conflict_aware=args.conflict_aware,
             )
             log(f"answered {answered} new questions")
 
