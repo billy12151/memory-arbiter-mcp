@@ -108,17 +108,24 @@ this replay's extractor was qwen3-14b (the original gateway was unavailable),
 so absolute counts carry a small extractor confound; the comparable metric is
 the context-free triage rate.
 
-| Detector | Detections | True updates (context-free triage) | Rate |
-|---|---:|---:|---:|
-| original (submission run) | 207 | 9 | 4.3% |
-| v58_ep3_fp16 | 276 | 12 | 4.9% |
+Counts above mix the two detection tiers mema records
+(`model_classified_conflict` vs `model_classified_possible_conflict`) —
+tier-aware (context-free triage):
 
-Precision is unchanged; recall of true conflicts is marginally higher
-(9 → 12). The dominant failure mode remains **complementary pairs flagged as
-conflicts** (parallel facts, same-scene different-subject, causal/narrative
-links) — a triage problem, not a sensitivity problem. The full labeled pair
-sets for both detector generations are exported alongside this repo's eval
-workspace for detector training.
+| Detector | high-confidence tier | possible tier |
+|---|---:|---:|
+| original | 136 | 71 |
+| v58_ep3_fp16 | **15** (2 supersede / 13 complementary) | 232 (10 / 222) |
+
+The new checkpoint cuts high-confidence conflict classifications by ~89%
+(136 → 15) — its high tier is far more conservative. Both tiers still deliver
+notices, so user-facing notice volume is driven by the pairing layer. Manual
+review of the 13 remaining high-tier complementary pairs: 7 share an identical
+session timestamp (same-scene facts slotted together by scope), the rest are
+parallel-fact / same-scene patterns, and 1 is arguably a genuine catch —
+i.e., the residual noise is born in **candidate pairing** (slot/scope keys),
+not in classification. Labeled pair sets for both generations are exported in
+the eval workspace for detector and funnel training.
 
 ## Reproducing
 
