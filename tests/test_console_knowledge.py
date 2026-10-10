@@ -141,3 +141,80 @@ def test_new_tag_replace_does_not_drop_kb_member(tmp_path: Path) -> None:
     row = tools.db.get_memory(mid)
     assert row["kb_member"] == 1
     assert row["tags"] == ["brand", "new"]
+
+
+# ---- c3: renderMd escaping/rendering ---------------------------------------
+
+_NODE_JS_PROBE = """
+const html = renderMd(input);
+console.log(JSON.stringify(html));
+"""
+
+
+def _render_md_via_node(text: str) -> str:
+    import json
+    import re
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not available for renderMd JS checks")
+    from memory_arbiter.console_static import INDEX_HTML
+
+    script = re.search(r"<script>(.*)</script>", INDEX_HTML, re.S)
+    assert script is not None
+    js = script.group(1)
+    prefix = js.split("const I18N")[0]
+    esc_fn = "function esc(v){ return String(v ?? '').replace(/[&<>\"']/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',\"'\":'&#39;'}[s])); }"
+    inline_fn = re.search(r"function inlineMd.*?\n}", js, re.S)
+    md_fn = re.search(r"function renderMd.*?\n}", js, re.S)
+    assert inline_fn and md_fn, "renderMd/inlineMd missing from INDEX_HTML"
+    body = (
+        prefix + esc_fn + "\n"
+        + inline_fn.group(0) + "\n"
+        + md_fn.group(0) + "\n"
+        + f"const input = {json.dumps(text)};\n" + _NODE_JS_PROBE
+    )
+    proc = subprocess.run([node, "-e", body], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def test_render_md_escapes_html_before_rendering() -> None:
+    out = _render_md_via_node('<script>alert(1)</script> **bold**')
+    assert "<script>" not in out
+    assert "&lt;script&gt;" in out
+    assert "<strong>bold</strong>" in out
+
+
+def test_render_md_attribute_injection_stays_inert() -> None:
+    """No content-derived attributes: img/onerror payloads must come out as
+    escaped text, never as tags or attributes (CSP allows unsafe-inline, so
+    the esc-first pipeline is the only line of defense)."""
+    out = _render_md_via_node('<img src=x onerror=alert(1)>')
+    assert "<img" not in out
+    assert "&lt;img" in out
+
+
+def test_render_md_structures() -> None:
+    out = _render_md_via_node(
+        "# Title\n\n- a\n- b\n\n> quote\n\n| h1 | h2 |\n| --- | --- |\n| 1 | 2 |\n\n```\ncode\n```"
+    )
+    for fragment in ("<h1>", "<ul>", "<li>", "<blockquote>", "<table>", "<th>", "<pre>"):
+        assert fragment in out, (fragment, out)
+
+
+def test_render_md_links_render_as_text() -> None:
+    out = _render_md_via_node("see https://evil.example x")
+    assert "<a " not in out and "href" not in out
+    assert "https://evil.example" in out
+
+
+def test_render_md_fold_marker_for_long_content() -> None:
+    """memoryBodyHtml keeps long (>4000 chars) bodies behind the fold marker."""
+    from memory_arbiter.console_static import INDEX_HTML
+
+    assert 'id="memFold"' in INDEX_HTML
+    assert "function renderMd(" in INDEX_HTML
+    assert "toggleMemFold" in INDEX_HTML
