@@ -41,6 +41,16 @@ class Settings:
     # workspace scopes that read) | weak (soft rerank) | strict (hard scope).
     isolation: str = "none"
     update_check_enabled: bool = True
+    # 0.18.0 console knowledge workbench: the user's own OpenAI-compatible LLM
+    # (plan §B.2). File-only channel — from_env parses the "llm" config
+    # section; empty base_url/model = feature not configured. api_key is
+    # stored locally in plaintext (README states the risk; console masks it).
+    llm_base_url: str = ""
+    llm_api_key: str = ""
+    llm_model: str = ""
+    llm_max_context_tokens: int = 0  # 0 = unset; ask surfaces guide to Settings
+    llm_max_output_tokens: int = 8192
+    llm_timeout_seconds: int = 120
     # Global switch for the recall size block (v0.15.6): on = every recall
     # surface (find/read/expired/history) attaches {returned_chars,
     # returned_count, tokens_estimate}; off = none of them do. One knob for
@@ -200,6 +210,23 @@ class Settings:
         if isolation not in {"none", "weak", "strict"}:
             config_warnings.append(f"isolation={isolation!r} invalid; using none")
             isolation = "none"
+
+        llm_cfg = section("llm")
+        llm_base_url = str(llm_cfg.get("base_url") or "").strip()
+        llm_api_key = str(llm_cfg.get("api_key") or "").strip()
+        llm_model = str(llm_cfg.get("model") or "").strip()
+        llm_max_context_tokens = clamp_int(
+            pick_int_field(llm_cfg.get("max_context_tokens"), 0, name="llm.max_context_tokens"),
+            0, 10_000_000, name="llm.max_context_tokens", warnings=config_warnings,
+        )
+        llm_max_output_tokens = clamp_int(
+            pick_int_field(llm_cfg.get("max_output_tokens"), 8192, name="llm.max_output_tokens"),
+            1, 1_000_000, name="llm.max_output_tokens", warnings=config_warnings,
+        )
+        llm_timeout_seconds = clamp_int(
+            pick_int_field(llm_cfg.get("timeout_seconds"), 120, name="llm.timeout_seconds"),
+            1, 3600, name="llm.timeout_seconds", warnings=config_warnings,
+        )
         if isolation == "strict":
             config_warnings.append(
                 "isolation=strict: review new workspaces before relying on scoped recall; "
@@ -284,6 +311,12 @@ class Settings:
             ),
             isolation=isolation,
             update_check_enabled=update_check_enabled,
+            llm_base_url=llm_base_url,
+            llm_api_key=llm_api_key,
+            llm_model=llm_model,
+            llm_max_context_tokens=llm_max_context_tokens,
+            llm_max_output_tokens=llm_max_output_tokens,
+            llm_timeout_seconds=llm_timeout_seconds,
             include_size=pick_bool_field(
                 cfg.get("include_size"), name="include_size", default_bool=True
             ),
@@ -454,3 +487,93 @@ def load_config_file(path: Path | None, warnings: list[str]) -> dict[str, Any]:
     except OSError as exc:
         warnings.append(f"Config file {path} read failed: {exc}; falling back to env.")
         return {}
+
+
+# ---- 0.18.0 console knowledge workbench: LLM config write channel ----------
+
+
+def default_config_skeleton() -> dict[str, Any]:
+    """Minimal skeleton with the identity keys the MCP server refuses to
+    start without (config.py module docstring / server.build_runtime)."""
+    return {
+        "client": "",
+        "agent_id": "",
+        "mcp": {"transport": "stdio"},
+        "llm": {},
+    }
+
+
+def write_llm_config(
+    values: dict[str, Any], *,
+    config_path: Path | None = None,
+    identity: "Settings | None" = None,
+) -> tuple[list[str], Path]:
+    """Persist the ``llm`` section of config.json (plan §B.2.2).
+
+    Whitelist-only (six keys); unknown keys are rejected. When the file does
+    not exist yet, the skeleton carries the *current effective* identity keys
+    (client/agent_id from ``identity``) — a bare skeleton without them would
+    brick the next MCP boot (R2 P1-8). Atomic write via tmp+rename. Returns
+    (applied_key_list, path, normalized_values) — normalized_values carries
+    the parsed/coerced values so callers hot-reload exactly what hit the
+    disk; warnings are advisory and non-blocking.
+    """
+    allowed = {
+        "base_url", "api_key", "model",
+        "max_context_tokens", "max_output_tokens", "timeout_seconds",
+    }
+    unknown = sorted(set(str(k) for k in values) - allowed)
+    if unknown:
+        raise ValueError(f"unknown llm config keys: {', '.join(unknown)}")
+
+    warnings: list[str] = []
+    if config_path is None:
+        # An explicitly-set MEMORY_ARBITER_CONFIG wins even when the file does
+        # not exist yet (we create it) — silently falling back to the XDG path
+        # here once wrote test fixtures into the user's real config.
+        env_path = os.getenv("MEMORY_ARBITER_CONFIG")
+        if env_path:
+            config_path = Path(env_path).expanduser()
+        else:
+            config_path = _find_config_file([])
+        if config_path is None:
+            config_path = Path.home() / ".config" / "memory-arbiter" / "config.json"
+    if config_path.exists():
+        cfg = load_config_file(config_path, warnings)
+    else:
+        cfg = default_config_skeleton()
+        if identity is not None:
+            cfg["client"] = str(getattr(identity, "client", "") or "")
+            cfg["agent_id"] = str(getattr(identity, "agent_id", "") or "")
+        warnings.append(f"config file created at {config_path}")
+
+    llm_section = cfg.get("llm")
+    if not isinstance(llm_section, dict):
+        if llm_section is not None:
+            warnings.append("existing llm section was not an object; replaced")
+        llm_section = {}
+    normalized: dict[str, Any] = {}
+    for key in allowed:
+        if key not in values:
+            continue
+        raw = values[key]
+        if key in {"max_context_tokens", "max_output_tokens", "timeout_seconds"}:
+            normalized[key] = parse_int(
+                raw, 0 if key == "max_context_tokens" else (8192 if key == "max_output_tokens" else 120),
+                name=f"llm.{key}", warnings=warnings,
+            )
+        else:
+            normalized[key] = str(raw or "").strip()
+    llm_section.update(normalized)
+    cfg["llm"] = llm_section
+
+    if str(llm_section.get("base_url") or "").startswith("http://"):
+        warnings.append("llm.base_url uses plain http — fine for local self-hosting, avoid on shared networks")
+
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = config_path.with_suffix(".json.tmp")
+    with tmp_path.open("w", encoding="utf-8") as fh:
+        json.dump(cfg, fh, ensure_ascii=False, indent=2)
+        fh.write("\n")
+    os.replace(tmp_path, config_path)
+    return sorted(normalized), config_path, normalized

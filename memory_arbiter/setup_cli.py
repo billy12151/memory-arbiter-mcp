@@ -386,6 +386,23 @@ def _model_size_ok(path: Path, *, expected: int = EXPECTED_MODEL_BYTES) -> tuple
     return low <= size <= high, size
 
 
+def _merge_unknown_sections(config_dict: dict, config_path: Path) -> dict:
+    """0.18.0 (plan R2 P1-9): carry unknown top-level keys of an existing
+    config into the freshly generated one so setup doesn't silently wipe
+    sections it doesn't know about (llm.* is the first such tenant). A
+    corrupt old config is ignored — setup still proceeds with defaults."""
+    try:
+        old_cfg = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return config_dict
+    if not isinstance(old_cfg, dict):
+        return config_dict
+    for key, value in old_cfg.items():
+        if key not in config_dict:
+            config_dict[key] = value
+    return config_dict
+
+
 def _detect_existing_model_path(config_path: Path) -> tuple[Path | None, str]:
     """If an existing config.json points at a real model file, honour it.
 
@@ -618,6 +635,12 @@ def run_cli(argv: list[str]) -> int:
     config_dict = _default_config_dict(
         model_path, default_db_path, default_backup_jsonl,
     )
+    # 0.18.0 (knowledge-workbench plan R2 P1-9): setup used to regenerate the
+    # config from scratch (keeping only embedding.model_path), which silently
+    # wiped unknown sections — llm.* included. Merge non-conflicting unknown
+    # keys back in instead; --force keeps meaning "reset to defaults".
+    if not args.force and config_path.exists():
+        config_dict = _merge_unknown_sections(config_dict, config_path)
     backup_path: Path | None = None
     written = False
     config_write_error: str | None = None

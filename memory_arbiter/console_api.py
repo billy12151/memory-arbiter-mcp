@@ -796,7 +796,13 @@ class ConsoleAPI:
                 value = current.get(item.get("settings_attr") or item["path"])
                 if isinstance(value, Path):
                     value = str(value)
-                enriched = {**item, "current": value, "source": "effective", "editable": False}
+                # 0.18.0 (R2 P1-3): editable follows the registry descriptor —
+                # the llm block is console-writable, everything else stays
+                # read-only. The api_key never leaves the backend unmasked.
+                editable = bool(item.get("editable"))
+                if item.get("path") == "llm.api_key":
+                    value = self._mask_api_key(str(value or ""))
+                enriched = {**item, "current": value, "source": "effective", "editable": editable}
                 items.append(enriched)
             groups.append({k: v for k, v in group.items() if k != "items"} | {"items": items})
         return {
@@ -806,10 +812,48 @@ class ConsoleAPI:
                 "warnings": list(dict.fromkeys(warnings + list(self.settings.config_warnings))),
             },
             "groups": groups,
-            "read_only": True,
-            "message_en": "Read-only in this version",
-            "message_zh": "当前版本只读",
+            "read_only": False,
+            "message_en": "Only the LLM workspace block is editable; other settings stay read-only.",
+            "message_zh": "仅 LLM 学习工作台块可编辑；其余配置保持只读。",
         }
+
+    @staticmethod
+    def _mask_api_key(key: str) -> str:
+        if not key:
+            return ""
+        tail = key[-4:] if len(key) > 4 else "****"
+        return f"***{tail}"
+
+    def llm_config_save(self, values: dict[str, Any]) -> dict[str, Any]:
+        """POST /api/settings/llm — persist the six llm keys (plan §B.2.2).
+
+        ``api_key="__unchanged__"`` keeps the stored key (the frontend submits
+        the masked placeholder back). Applies in-process (hot reload on the
+        shared Settings object) so no restart is needed.
+        """
+        if not isinstance(values, dict):
+            return {"error": "body must be an object", "_http_status": 400}
+        cleaned = dict(values)
+        if str(cleaned.get("api_key") or "") == "__unchanged__":
+            cleaned.pop("api_key", None)
+        from .config import write_llm_config
+
+        try:
+            applied, path, normalized = write_llm_config(cleaned, identity=self.settings)
+        except ValueError as exc:
+            return {"error": str(exc), "_http_status": 400}
+        # hot reload on the shared settings object (console_api holds the same
+        # instance as tools — plan §B.2.2); normalized values are exactly what
+        # landed on disk (parsed/coerced by write_llm_config).
+        attr_by_key = {
+            "base_url": "llm_base_url", "api_key": "llm_api_key", "model": "llm_model",
+            "max_context_tokens": "llm_max_context_tokens",
+            "max_output_tokens": "llm_max_output_tokens",
+            "timeout_seconds": "llm_timeout_seconds",
+        }
+        for key, value in normalized.items():
+            setattr(self.settings, attr_by_key[key], value)
+        return {"saved": applied, "config_file": str(path)}
 
     def _settings_values(self) -> dict[str, Any]:
         values: dict[str, Any] = {}

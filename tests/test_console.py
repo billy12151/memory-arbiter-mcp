@@ -403,12 +403,17 @@ def test_settings_view_renders_mdeberta_model_dir_and_batch(tmp_path: Path) -> N
 
 
 def test_settings_view_is_read_only_and_bilingual(tmp_path: Path) -> None:
+    """0.18.0: the llm workspace block is console-writable; every other
+    descriptor stays read-only (plan §B.2, R2 P1-3)."""
     api = _api(tmp_path)
     view = api.settings_view()
-    assert view["read_only"] is True
+    assert view["read_only"] is False
     items = [item for group in view["groups"] for item in group["items"]]
     assert items
-    assert all(item["editable"] is False for item in items)
+    llm = [item for item in items if str(item["path"]).startswith("llm.")]
+    other = [item for item in items if not str(item["path"]).startswith("llm.")]
+    assert llm and all(item["editable"] is True for item in llm)
+    assert other and all(item["editable"] is False for item in other)
     assert all(item["label_en"] and item["label_zh"] for item in items)
 
 

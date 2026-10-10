@@ -101,6 +101,9 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             )
             self._json_or_error(payload)
             return
+        if path == "/api/settings/llm":
+            self._json_or_error(self.api.llm_config_save(body))
+            return
         self._json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
 
     def _handle(self, send_body: bool) -> None:

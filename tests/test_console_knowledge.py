@@ -421,3 +421,97 @@ def test_post_defense_and_membership_route(tmp_path: Path) -> None:
     finally:
         server.shutdown()
         server.server_close()
+
+
+# ---- c5: llm config ---------------------------------------------------------
+
+import os
+
+from memory_arbiter.config import Settings as CfgSettings, write_llm_config
+
+
+def test_write_llm_config_roundtrip_and_from_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg_path = tmp_path / "config.json"
+    applied, path, normalized = write_llm_config(
+        {
+            "base_url": "https://api.example.com/v4",
+            "api_key": "sk-test-1234",
+            "model": "glm-test",
+            "max_context_tokens": "64000",
+        },
+        config_path=cfg_path,
+        identity=CfgSettings(
+            db_path=tmp_path / "x.sqlite3", backup_jsonl=tmp_path / "x.jsonl",
+            client="pytest", agent_id="kb-test",
+        ),
+    )
+    assert applied == ["api_key", "base_url", "max_context_tokens", "model"]
+    assert normalized["max_context_tokens"] == 64000
+    on_disk = json.loads(cfg_path.read_text())
+    assert on_disk["client"] == "pytest" and on_disk["agent_id"] == "kb-test"  # skeleton identity
+    assert on_disk["llm"]["base_url"] == "https://api.example.com/v4"
+
+    # restart path: from_env parses the llm section back
+    monkeypatch.setenv("MEMORY_ARBITER_CONFIG", str(cfg_path))
+    s = CfgSettings.from_env()
+    assert s.llm_base_url == "https://api.example.com/v4"
+    assert s.llm_api_key == "sk-test-1234"
+    assert s.llm_model == "glm-test"
+    assert s.llm_max_context_tokens == 64000
+    assert s.llm_max_output_tokens == 8192  # default preserved
+
+    # unknown keys rejected; other config sections survive a write
+    with pytest.raises(ValueError):
+        write_llm_config({"evil": "1"}, config_path=cfg_path)
+    cfg_path.write_text(json.dumps({"workspace": "keepme", "llm": {"model": "m1"}}))
+    write_llm_config({"model": "m2"}, config_path=cfg_path)
+    after = json.loads(cfg_path.read_text())
+    assert after["workspace"] == "keepme" and after["llm"]["model"] == "m2"
+
+
+def test_llm_config_save_endpoint_mask_and_sentinel(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg_path = tmp_path / "config.json"
+    monkeypatch.setenv("MEMORY_ARBITER_CONFIG", str(cfg_path))
+    api = ConsoleAPI(MemoryTools(Settings(
+        db_path=tmp_path / "c.sqlite3", backup_jsonl=tmp_path / "c.jsonl",
+        client="pytest", agent_id="kb-test", workspace="kb-ws",
+    )))
+    # settings_view masks the key and marks only llm editable
+    api.llm_config_save({"base_url": "https://x.example", "api_key": "sk-secret-99"})
+    view = api.settings_view()
+    llm_items = [i for g in view["groups"] for i in g["items"] if g["key"] == "llm"]
+    key_item = next(i for i in llm_items if i["path"] == "llm.api_key")
+    assert key_item["current"] == "***t-99" and "sk-secret-99" not in str(view)
+    assert all(i["editable"] for i in llm_items)
+    ro_items = [i for g in view["groups"] for i in g["items"] if g["key"] != "llm"]
+    assert ro_items and all(not i["editable"] for i in ro_items)
+
+    # sentinel keeps the stored key; hot reload applies immediately
+    res = api.llm_config_save({"api_key": "__unchanged__", "model": "glm-4.7"})
+    assert "api_key" not in res["saved"]
+    assert api.settings.llm_model == "glm-4.7"
+    assert api.settings.llm_api_key == "sk-secret-99"
+    on_disk = json.loads(cfg_path.read_text())
+    assert on_disk["llm"]["api_key"] == "sk-secret-99"
+
+    # bad input surfaces as 400 payload
+    bad = api.llm_config_save({"nope": 1})
+    assert bad["_http_status"] == 400
+
+
+def test_setup_merges_unknown_sections(tmp_path: Path) -> None:
+    """setup must not wipe the llm section when regenerating config (R2 P1-9)."""
+    from memory_arbiter import setup_cli
+
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({
+        "client": "old", "workspace": "keepme",
+        "llm": {"base_url": "https://api.example", "model": "glm-x"},
+    }))
+    fresh = setup_cli._default_config_dict(tmp_path / "m.gguf", tmp_path / "db.sqlite3", tmp_path / "b.jsonl")
+    merged = setup_cli._merge_unknown_sections(dict(fresh), cfg_path)
+    assert merged["llm"]["model"] == "glm-x"  # unknown section survives
+    assert merged["workspace"] == fresh["workspace"]  # known keys stay fresh
+    # corrupt old config: merge is a no-op, setup proceeds
+    cfg_path.write_text("{not json")
+    assert setup_cli._merge_unknown_sections(dict(fresh), cfg_path) == fresh

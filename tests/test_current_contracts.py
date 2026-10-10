@@ -28,6 +28,8 @@ def test_config_registry_only_describes_current_architecture() -> None:
     # keys (ckpt + notice_min_prob) replace them in the registry;
     # 0.17.1 P2 #3: mdeberta_model_dir + mdeberta_batch (0 = auto) joined
     # their sibling descriptors (19 -> 21 current keys).
+    # 0.18.0: llm.* six keys joined for the console knowledge workbench
+    # (21 -> 27 current keys).
     # Everything else froze into memory_arbiter.constants
     # and must NOT reappear here.
     assert paths == {
@@ -38,6 +40,8 @@ def test_config_registry_only_describes_current_architecture() -> None:
         "semantic_conflict.mdeberta_model_dir", "semantic_conflict.mdeberta_batch",
         "semantic_conflict.on_write", "semantic_conflict.mdeberta_notice_min_prob",
         "semantic_conflict.notice_sync_wait_ms",
+        "llm.base_url", "llm.api_key", "llm.model",
+        "llm.max_context_tokens", "llm.max_output_tokens", "llm.timeout_seconds",
         "update_check.enabled", "include_size",
     }
     assert not any(
@@ -48,7 +52,13 @@ def test_config_registry_only_describes_current_architecture() -> None:
     # old "claim*" tombstone guard is narrowed to the dead split/pair keys.
     assert not any("split" in path or "pair_text_gate" in path for path in paths)
     assert sum(len(group["items"]) for group in grouped_descriptors()) == len(CONFIG_DESCRIPTORS)
-    assert all(item["label_en"] and item["label_zh"] and item["editable"] is False for item in CONFIG_DESCRIPTORS)
+    # 0.18.0: llm.* descriptors are console-writable (knowledge workbench
+    # plan §B.2); everything else stays read-only.
+    assert all(
+        item["label_en"] and item["label_zh"]
+        and item["editable"] is (str(item["path"]).startswith("llm."))
+        for item in CONFIG_DESCRIPTORS
+    )
 
 
 def _record_current_group(tool: MemoryTools, left: int, right: int) -> dict:

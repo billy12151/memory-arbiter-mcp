@@ -1178,6 +1178,12 @@ SLIM_SETTINGS_FIELDS = frozenset(
         "semantic_conflict_notice_sync_wait_ms",
         "config_warnings",
         "config_file_loaded",
+        "llm_base_url",
+        "llm_api_key",
+        "llm_model",
+        "llm_max_context_tokens",
+        "llm_max_output_tokens",
+        "llm_timeout_seconds",
     }
 )
 
@@ -1189,7 +1195,8 @@ def test_settings_field_set_matches_slim_contract() -> None:
     # runtime-injected field (never a file key, not in the registry).
     # 0.17.0 P2-5.2: claims_required added (grey-period switch, default off).
     # 0.17.1: mdeberta judge keys added (ckpt/model_dir/notice_min_prob/batch).
-    assert len(SLIM_SETTINGS_FIELDS) == 25
+    # 0.18.0: llm.* six keys added (console knowledge workbench, plan §B.2).
+    assert len(SLIM_SETTINGS_FIELDS) == 31
     assert set(Settings.__dataclass_fields__) == SLIM_SETTINGS_FIELDS
 
 

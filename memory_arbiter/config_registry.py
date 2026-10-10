@@ -18,6 +18,7 @@ GROUPS = [
     {"key": "workspace", "label_en": "Workspace", "label_zh": "工作区"},
     {"key": "embedding", "label_en": "Evidence embedding", "label_zh": "Evidence 向量"},
     {"key": "semantic", "label_en": "Conflict filtering", "label_zh": "冲突降噪"},
+    {"key": "llm", "label_en": "LLM workspace", "label_zh": "LLM 学习工作台"},
     {"key": "update", "label_en": "Update check", "label_zh": "更新检查"},
     {"key": "reporting", "label_en": "Recall metering", "label_zh": "召回计量"},
 ]
@@ -53,6 +54,12 @@ CONFIG_DESCRIPTORS = [
     _item("semantic_conflict.on_write", "semantic", "semantic_conflict_on_write", "async"),
     _item("semantic_conflict.mdeberta_notice_min_prob", "semantic", "semantic_conflict_mdeberta_notice_min_prob", 0.5),
     _item("semantic_conflict.notice_sync_wait_ms", "semantic", "semantic_conflict_notice_sync_wait_ms", NOTICE_SYNC_WAIT_MS),
+    _item("llm.base_url", "llm", "llm_base_url", ""),
+    _item("llm.model", "llm", "llm_model", ""),
+    _item("llm.api_key", "llm", "llm_api_key", ""),
+    _item("llm.max_context_tokens", "llm", "llm_max_context_tokens", 0),
+    _item("llm.max_output_tokens", "llm", "llm_max_output_tokens", 8192),
+    _item("llm.timeout_seconds", "llm", "llm_timeout_seconds", 120),
     _item("update_check.enabled", "update", "update_check_enabled", True),
     _item("include_size", "reporting", default=True),
 ]
@@ -60,6 +67,21 @@ CONFIG_DESCRIPTORS = [
 for _descriptor in CONFIG_DESCRIPTORS:
     if _descriptor["path"] == "isolation":
         _descriptor["label_zh"] = "工作区隔离等级"
+    if _descriptor["group"] == "llm":
+        # 0.18.0 knowledge workbench: the llm block is the only console-writable
+        # section (plan §B.2) — settings_view passes this through instead of
+        # hard-coding editable: False (R2 P1-3).
+        _descriptor["editable"] = True
+        _descriptor["restart_required"] = False
+        _descriptor["risk"] = "high" if _descriptor["path"] == "llm.api_key" else "caution"
+        _descriptor["label_zh"] = {
+            "llm.base_url": "API 地址（OpenAI 兼容）",
+            "llm.model": "模型名",
+            "llm.api_key": "API Key（本地明文存储）",
+            "llm.max_context_tokens": "最大上下文 tokens",
+            "llm.max_output_tokens": "最大输出 tokens",
+            "llm.timeout_seconds": "超时秒数",
+        }[_descriptor["path"]]
 
 
 def grouped_descriptors() -> list[dict[str, Any]]:
