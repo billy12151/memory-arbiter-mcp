@@ -83,17 +83,24 @@ class _JudgeBatch:
         return out
 
 
-def _judge_outcome(verdict: Any, min_prob: float) -> str:
+def _judge_outcome(verdict: Any, min_prob: float, possible_min_susp: float = 0.0) -> str:
     """§3.3 decision table (owner 2026-09-28): conflict ≥ min_prob → 'notice';
     conflict below → 'below_threshold'; possible → 'possible'; no_conflict →
-    'clear'. Technical failures surface via verdict.error (the caller's
-    fail-open path) and never reach this function."""
+    'clear'. 0.17.2 (owner 2026-10-10): possible is a gated gray zone —
+    P(conflict)+P(possible_conflict) ≥ possible_min_susp → 'possible' (info
+    notice); below → 'possible_below_gate' (silent, counted). Signature
+    default 0.0 = the pre-0.17.2 ungated behavior (pure-function tests);
+    every production call site passes the configured gate. Technical
+    failures surface via verdict.error (the caller's fail-open path) and
+    never reach this function."""
     if getattr(verdict, "error", None):
         return "error"
     if verdict.label == "conflict":
         return "notice" if float(verdict.probs.get("conflict", 0.0)) >= min_prob else "below_threshold"
     if verdict.label == "possible_conflict":
-        return "possible"
+        susp = (float(verdict.probs.get("conflict", 0.0))
+                + float(verdict.probs.get("possible_conflict", 0.0)))
+        return "possible" if susp >= possible_min_susp else "possible_below_gate"
     return "clear"
 
 

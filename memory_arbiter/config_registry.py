@@ -53,6 +53,7 @@ CONFIG_DESCRIPTORS = [
     _item("semantic_conflict.mdeberta_batch", "semantic", "semantic_conflict_mdeberta_batch", 0),
     _item("semantic_conflict.on_write", "semantic", "semantic_conflict_on_write", "async"),
     _item("semantic_conflict.mdeberta_notice_min_prob", "semantic", "semantic_conflict_mdeberta_notice_min_prob", 0.5),
+    _item("semantic_conflict.mdeberta_possible_min_susp", "semantic", "semantic_conflict_mdeberta_possible_min_susp", 0.7),
     _item("semantic_conflict.notice_sync_wait_ms", "semantic", "semantic_conflict_notice_sync_wait_ms", NOTICE_SYNC_WAIT_MS),
     _item("llm.base_url", "llm", "llm_base_url", ""),
     _item("llm.model", "llm", "llm_model", ""),

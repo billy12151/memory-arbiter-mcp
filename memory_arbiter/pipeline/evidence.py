@@ -189,8 +189,9 @@ class EvidencePipeline(_EvidencePhases, _EvidenceLand):
                 verdicts = [_PV("no_conflict", {}, None, "mdeberta:unavailable",
                                 error="judge verdict count mismatch")] * len(pairs)
             min_prob = float(self.settings.semantic_conflict_mdeberta_notice_min_prob)
+            possible_min_susp = float(self.settings.semantic_conflict_mdeberta_possible_min_susp)
             for entry, verdict in zip(judge_pool, verdicts):
-                outcome = _judge_outcome(verdict, min_prob)
+                outcome = _judge_outcome(verdict, min_prob, possible_min_susp)
                 if outcome == "error":
                     # 留队重试（owner A-5）：下个 backend-bearing pass 再来
                     # （留队靠「不调 complete」实现——entry 不出队即重试）

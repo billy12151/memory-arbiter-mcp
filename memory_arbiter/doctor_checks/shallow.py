@@ -166,6 +166,7 @@ def _c_semantic_judge_model(ctx: _DoctorCtx) -> Finding | None:
             "ckpt": str(ckpt),
             "model_dir": str(model_dir or ""),
             "notice_min_prob": ctx.settings.semantic_conflict_mdeberta_notice_min_prob,
+            "possible_min_susp": ctx.settings.semantic_conflict_mdeberta_possible_min_susp,
             "batch_size": (
                 int(ctx.settings.semantic_conflict_mdeberta_batch)
                 or _device_default_batch()

@@ -1172,6 +1172,7 @@ SLIM_SETTINGS_FIELDS = frozenset(
         "semantic_conflict_mdeberta_ckpt",
         "semantic_conflict_mdeberta_model_dir",
         "semantic_conflict_mdeberta_notice_min_prob",
+        "semantic_conflict_mdeberta_possible_min_susp",
         "semantic_conflict_mdeberta_batch",
         "semantic_conflict_on_write",
         "semantic_conflict_gpu_layers",
@@ -1196,7 +1197,8 @@ def test_settings_field_set_matches_slim_contract() -> None:
     # 0.17.0 P2-5.2: claims_required added (grey-period switch, default off).
     # 0.17.1: mdeberta judge keys added (ckpt/model_dir/notice_min_prob/batch).
     # 0.18.0: llm.* six keys added (console knowledge workbench, plan §B.2).
-    assert len(SLIM_SETTINGS_FIELDS) == 31
+    # 0.17.2: semantic_conflict_mdeberta_possible_min_susp added (possible 灰区门).
+    assert len(SLIM_SETTINGS_FIELDS) == 32
     assert set(Settings.__dataclass_fields__) == SLIM_SETTINGS_FIELDS
 
 

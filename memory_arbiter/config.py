@@ -70,6 +70,12 @@ class Settings:
     # only. possible_conflict → info notice (no threshold — ~1% rate).
     # owner 2026-10-05 终拍 T=0.5（召回优先，阈值不抬高，后续靠模型提升）
     semantic_conflict_mdeberta_notice_min_prob: float = 0.5
+    # 0.17.2 owner 拍板 2026-10-10: possible_conflict 灰区门——argmax=possible
+    # 且 P(conflict)+P(possible_conflict) ≥ this 才落 info 通知；低于只计数
+    # （model_possible_below_gate）。0 = 旧行为（无门）。定标：v58_ep3 合并
+    # 标定（四卷考+LoCoMo 金标）甜区 [0.65, 0.73] 取 0.70——疑似命中 40/66
+    # 全保、no→疑似误报 5→2。
+    semantic_conflict_mdeberta_possible_min_susp: float = 0.7
     # 0.17.1 §3.2 攒批 (owner 2026-09-28 拍板)：0 = auto 按设备分档——
     # 有 GPU（Apple Silicon MPS / NVIDIA）16，无 GPU 8；显式数值覆盖 auto。
     semantic_conflict_mdeberta_batch: int = 0
@@ -289,6 +295,17 @@ class Settings:
             name="semantic_conflict.mdeberta_notice_min_prob",
             warnings=config_warnings,
         )
+        possible_min_susp = semantic_cfg.get("mdeberta_possible_min_susp")
+        possible_min_susp_val = clamp_float(
+            parse_float(
+                possible_min_susp, 0.7,
+                name="semantic_conflict.mdeberta_possible_min_susp",
+                warnings=config_warnings,
+            ),
+            0.0, 1.0,
+            name="semantic_conflict.mdeberta_possible_min_susp",
+            warnings=config_warnings,
+        )
 
         settings = cls(
             db_path=pick_env_path("db_path", "MEMORY_ARBITER_DB_PATH", cwd / "memory_arbiter.sqlite3"),
@@ -327,6 +344,7 @@ class Settings:
             semantic_conflict_mdeberta_ckpt=mdeberta_ckpt,
             semantic_conflict_mdeberta_model_dir=mdeberta_model_dir,
             semantic_conflict_mdeberta_notice_min_prob=mdeberta_min_prob_val,
+            semantic_conflict_mdeberta_possible_min_susp=possible_min_susp_val,
             semantic_conflict_mdeberta_batch=clamp_int(
                 pick_int_field(
                     semantic_cfg.get("mdeberta_batch"), 0,

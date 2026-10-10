@@ -30,6 +30,8 @@ def test_config_registry_only_describes_current_architecture() -> None:
     # their sibling descriptors (19 -> 21 current keys).
     # 0.18.0: llm.* six keys joined for the console knowledge workbench
     # (21 -> 27 current keys).
+    # 0.17.2: semantic_conflict.mdeberta_possible_min_susp joined (possible
+    # gray-zone gate, 27 -> 28 current keys).
     # Everything else froze into memory_arbiter.constants
     # and must NOT reappear here.
     assert paths == {
@@ -39,6 +41,7 @@ def test_config_registry_only_describes_current_architecture() -> None:
         "semantic_conflict.enabled", "semantic_conflict.mdeberta_ckpt",
         "semantic_conflict.mdeberta_model_dir", "semantic_conflict.mdeberta_batch",
         "semantic_conflict.on_write", "semantic_conflict.mdeberta_notice_min_prob",
+        "semantic_conflict.mdeberta_possible_min_susp",
         "semantic_conflict.notice_sync_wait_ms",
         "llm.base_url", "llm.api_key", "llm.model",
         "llm.max_context_tokens", "llm.max_output_tokens", "llm.timeout_seconds",

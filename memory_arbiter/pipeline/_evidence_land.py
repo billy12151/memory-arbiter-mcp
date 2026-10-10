@@ -81,6 +81,7 @@ class _EvidenceLand:
         budget: _JobJudgeBudget = ctx["budget"]
         min_budget: float = ctx["min_budget"]
         min_prob = float(self.settings.semantic_conflict_mdeberta_notice_min_prob)
+        possible_min_susp = float(self.settings.semantic_conflict_mdeberta_possible_min_susp)
         content = str(ctx["content"])
         record = ctx["record"]
         own_subject_text = str((record or {}).get("subject") or "")
@@ -129,7 +130,7 @@ class _EvidenceLand:
                 # below_threshold→unannotated fail-open——池内全部落地。
                 for item, (unit_a, unit_b, reason_text) in zip(judged[:internal_count], internal_entries):
                     verdict = item["verdict"]
-                    outcome = _judge_outcome(verdict, min_prob)
+                    outcome = _judge_outcome(verdict, min_prob, possible_min_susp)
                     if outcome in ("notice", "possible"):
                         if verdict.error is None:
                             reason_text = (
@@ -148,7 +149,7 @@ class _EvidenceLand:
                 for item in judged[internal_count:]:
                     verdict = item["verdict"]
                     self._tools._record_pair_sample(pair_ms=per_pair_ms)
-                    outcome = _judge_outcome(verdict, min_prob)
+                    outcome = _judge_outcome(verdict, min_prob, possible_min_susp)
                     if outcome == "error":
                         error_text = str(verdict.error or "")
                         reason = (
@@ -171,6 +172,13 @@ class _EvidenceLand:
                     if outcome == "below_threshold":
                         ctx["model_conflict_below_threshold"] = (
                             ctx.get("model_conflict_below_threshold", 0) + 1
+                        )
+                        continue
+                    if outcome == "possible_below_gate":
+                        # 0.17.2 possible 灰区门（owner 2026-10-10）：低于
+                        # susp 门的对静默转扫描兜底，只留观测计数。
+                        ctx["model_possible_below_gate"] = (
+                            ctx.get("model_possible_below_gate", 0) + 1
                         )
                         continue
                     # 等值守卫（owner 2026-09-28，对抗轮收窄）：只比较确定性层抽取的
@@ -647,6 +655,7 @@ class _EvidenceLand:
             result["judge_budget"] = judge_budget
         # 0.17.1 §3.3 outcome counters — observability, zero values absent.
         for key in ("model_clear", "model_conflict_below_threshold",
+                    "model_possible_below_gate",
                     "model_possible_count", "model_notices_capped"):
             if ctx.get(key):
                 result[key] = int(ctx[key])
