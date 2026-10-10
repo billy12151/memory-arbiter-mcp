@@ -6,6 +6,7 @@ c5 llm config, c6 llm ask/save. See docs/mema-console-knowledge-plan-2026-10-10.
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 
 import pytest
@@ -218,3 +219,205 @@ def test_render_md_fold_marker_for_long_content() -> None:
     assert 'id="memFold"' in INDEX_HTML
     assert "function renderMd(" in INDEX_HTML
     assert "toggleMemFold" in INDEX_HTML
+
+
+# ---- c4: knowledge tree / candidates / membership --------------------------
+
+import threading
+import urllib.error
+import urllib.request
+
+from memory_arbiter.console_api import ConsoleAPI
+from memory_arbiter.console_server import build_http_server
+
+
+def _kb_api(tmp_path: Path) -> ConsoleAPI:
+    return ConsoleAPI(_tools(tmp_path))
+
+
+def test_knowledge_tree_groups_by_workspace_and_tags(tmp_path: Path) -> None:
+    api = _kb_api(tmp_path)
+    tools = api.tools
+    a = _write(tools, "vop basics", tags=["vop", "pm"])
+    b = _write(tools, "vop advanced", tags=["vop"])
+    c = _write(tools, "untagged one", tags=[])
+    d = _write(tools, "other bucket doc", workspace="other-ws", tags=["doc"])
+    for mid in (a, b, c, d):
+        tools.db.memories.set_kb_member(mid, True)
+
+    tree = api.knowledge_tree()
+    assert tree["total"] == 4
+    by_name = {w["workspace"]: w for w in tree["workspaces"]}
+    assert set(by_name) == {"kb-ws", "other-ws"}
+    kb = by_name["kb-ws"]
+    assert kb["total"] == 3
+    tags = {g["tag"]: g for g in kb["tags"]}
+    assert tags["vop"]["count"] == 2  # multi-tag memory counted in both groups
+    assert tags["pm"]["memory_ids"] == [a]
+    assert tags["(untagged)"]["memory_ids"] == [c]
+
+    sliced = api.knowledge_tree(workspace="other-ws")
+    assert sliced["total"] == 1
+    assert sliced["workspaces"][0]["workspace"] == "other-ws"
+
+
+def test_knowledge_candidates_excludes_members(tmp_path: Path) -> None:
+    api = _kb_api(tmp_path)
+    tools = api.tools
+    doc = _write(tools, "extracted doc", source_type="document_extracted")
+    doc2 = _write(tools, "another doc", source_type="document_extracted", workspace="other-ws")
+    _write(tools, "agent note", source_type="agent_generated")
+
+    items = api.knowledge_candidates()["items"]
+    ids = {i["id"] for i in items}
+    assert doc in ids and doc2 in ids  # only document_extracted actives
+
+    tools.db.memories.set_kb_member(doc, True)
+    ids2 = {i["id"] for i in api.knowledge_candidates()["items"]}
+    assert doc not in ids2 and doc2 in ids2
+
+    sliced = {i["id"] for i in api.knowledge_candidates(workspace="other-ws")["items"]}
+    assert sliced == {doc2}
+
+
+def test_knowledge_membership_roundtrip_and_errors(tmp_path: Path) -> None:
+    api = _kb_api(tmp_path)
+    tools = api.tools
+    mid = _write(tools, "membership target")
+
+    res = api.knowledge_membership(mid, "add")
+    assert res == {"memory_id": mid, "member": True, "changed": True}
+    assert api.knowledge_membership(mid, "add")["changed"] is False  # idempotent
+    assert api.knowledge_membership(mid, "remove")["member"] is False
+
+    assert api.knowledge_membership(mid, "bogus")["error"]
+    assert api.knowledge_membership(424242, "add")["_http_status"] == 404
+
+
+def test_knowledge_membership_strict_equality_gate(tmp_path: Path) -> None:
+    """strict: only the selected single canonical bucket is operable — the
+    vector-admitted neighbor set is NOT a console boundary (plan R2 P1-7)."""
+    settings = Settings(
+        db_path=tmp_path / "strict.sqlite3", backup_jsonl=tmp_path / "strict.jsonl",
+        client="pytest", agent_id="kb-test", workspace="kb-ws", isolation="strict",
+    )
+    tools = MemoryTools(settings)
+    api = ConsoleAPI(tools)
+    mine = _write(tools, "in bucket")  # first write to a new bucket lands pending under strict
+    other = _write(tools, "other bucket", workspace="other-ws")
+    # activate both pending buckets through the governance surface
+    tools.memory_confirm_pending_workspace(
+        memory_id=mine, canonical="kb-ws", reason="test", authorized=True, workspace="kb-ws",
+    )
+    tools.memory_confirm_pending_workspace(
+        memory_id=other, canonical="other-ws", reason="test", authorized=True, workspace="other-ws",
+    )
+    assert tools.db.get_memory(mine)["status"] == "active"
+
+    assert api.knowledge_membership(mine, "add", workspace="kb-ws")["member"] is True
+    denied = api.knowledge_membership(other, "add", workspace="kb-ws")
+    assert denied["_http_status"] == 403
+    missing = api.knowledge_membership(mine, "add")
+    assert missing["_http_status"] == 400  # strict requires explicit workspace
+    # tree/candidates slice under strict too
+    assert api.knowledge_tree(workspace="kb-ws")["total"] == 1
+
+
+def _http_json(
+    port: int, path: str, body: dict | None = None,
+    headers: dict[str, str] | None = None, method: str | None = None,
+):
+    url = f"http://127.0.0.1:{port}{path}"
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("Content-Type", "application/json")
+    req.add_header("X-Console-Request", "1")
+    for key, value in (headers or {}).items():
+        req.add_header(key, value)
+    return urllib.request.urlopen(req, timeout=5)
+
+
+def test_post_defense_and_membership_route(tmp_path: Path) -> None:
+    api = _kb_api(tmp_path)
+    tools = api.tools
+    mid = _write(tools, "http route target")
+    server = build_http_server("127.0.0.1", 0, api=api)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        _, port = server.server_address
+
+        # missing custom header → 403
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/knowledge/membership",
+            data=json.dumps({"memory_id": mid, "op": "add"}).encode(),
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        try:
+            urllib.request.urlopen(req, timeout=5)
+            raise AssertionError("expected 403")
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 403
+
+        # wrong content-type → 415
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/knowledge/membership",
+            data=b"memory_id=1", headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "X-Console-Request": "1",
+            }, method="POST",
+        )
+        try:
+            urllib.request.urlopen(req, timeout=5)
+            raise AssertionError("expected 415")
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 415
+
+        # malformed json → 400
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/knowledge/membership",
+            data=b"{not json", headers={
+                "Content-Type": "application/json", "X-Console-Request": "1",
+            }, method="POST",
+        )
+        try:
+            urllib.request.urlopen(req, timeout=5)
+            raise AssertionError("expected 400")
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 400
+
+        # oversized content-length → 413 without reading the body
+        import http.client
+
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.putrequest("POST", "/api/knowledge/membership")
+        conn.putheader("Content-Type", "application/json")
+        conn.putheader("X-Console-Request", "1")
+        conn.putheader("Content-Length", str(3 * 1024 * 1024))
+        conn.endheaders()
+        try:
+            assert conn.getresponse().status == 413
+        finally:
+            conn.close()
+
+        # OPTIONS never carries CORS headers (R2 P1-1 regression pin)
+        opt = urllib.request.urlopen(
+            urllib.request.Request(
+                f"http://127.0.0.1:{port}/api/knowledge/tree", method="OPTIONS",
+            ), timeout=5,
+        )
+        assert opt.status == 204
+        assert not any(k.lower().startswith("access-control-") for k in opt.headers.keys())
+
+        # happy path over HTTP
+        resp = _http_json(port, "/api/knowledge/membership", {"memory_id": mid, "op": "add"})
+        payload = json.loads(resp.read().decode("utf-8"))
+        assert payload["member"] is True
+
+        # GET endpoints over HTTP
+        tree = json.loads(_http_json(port, "/api/knowledge/tree").read().decode("utf-8"))
+        assert tree["total"] == 1
+    finally:
+        server.shutdown()
+        server.server_close()

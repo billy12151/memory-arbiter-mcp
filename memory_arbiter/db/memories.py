@@ -414,6 +414,44 @@ class MemoriesStore(_MemVectorsMixin, _MemEditMixin):
             ).fetchall()
             return [_row_to_dict(row) for row in rows]
 
+    def list_kb_candidates(
+        self, ws_canonical: "str | None" = None, limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """document_extracted actives not yet in the knowledge base.
+
+        知识库页候选池（方案 §B.3.3）：规则只出候选、人拍板——这是唯一
+        接近"自动"的安全形态。kb_member 判空兼容 NULL（迁移前行）。
+        """
+        if not self._db_available:
+            return []
+        clauses = [
+            "source_type = 'document_extracted'", "status = 'active'",
+            "COALESCE(kb_member, 0) = 0",
+        ]
+        params: list[Any] = []
+        if str(ws_canonical or "").strip():
+            clauses.append("COALESCE(NULLIF(workspace_canonical, ''), workspace) = ?")
+            params.append(str(ws_canonical).strip())
+        params.append(int(limit))
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT id, subject, tags, workspace, workspace_canonical, event_time, "
+                f"LENGTH(content) AS content_chars FROM memories WHERE {' AND '.join(clauses)} "
+                "ORDER BY ingest_time DESC LIMIT ?",
+                params,
+            ).fetchall()
+            out: list[dict[str, Any]] = []
+            for row in rows:
+                item = dict(row)
+                raw_tags = item.get("tags")
+                if isinstance(raw_tags, str):
+                    try:
+                        item["tags"] = json.loads(raw_tags)
+                    except (ValueError, TypeError):
+                        item["tags"] = []
+                out.append(item)
+            return out
+
     # ---- knowledge-base membership (0.18.0 console knowledge workbench) ----
 
     def set_kb_member(self, memory_id: int, member: bool, *, actor: str = "console") -> int:

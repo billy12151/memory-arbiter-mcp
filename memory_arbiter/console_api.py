@@ -690,6 +690,96 @@ class ConsoleAPI:
             "truncated": truncated,
         }
 
+    # ---- knowledge workbench (0.18.0, plan §B.3) ---------------------------
+
+    def _knowledge_ws_canonical(self, workspace: str | None) -> "tuple[str | None, dict[str, Any] | None]":
+        """Resolve the optional workspace filter to its canonical name.
+
+        strict 下 workspace 必传（读端点同门）；none/weak 显式传则归一后
+        过滤、缺省 None=全部。second element None = no error.
+        """
+        missing = self._strict_workspace_required(workspace)
+        if missing is not None:
+            return None, missing
+        explicit = str(workspace or "").strip()
+        if not explicit:
+            return None, None
+        caller = self.tools._caller_workspace(explicit)
+        return (str(caller.canonical or explicit)), None
+
+    def knowledge_tree(self, workspace: str | None = None) -> dict[str, Any]:
+        ws_canonical, error = self._knowledge_ws_canonical(workspace)
+        if error is not None:
+            return error
+        rows = self.tools.db.memories.list_kb_members(ws_canonical=ws_canonical)
+        by_ws: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            ws_name = str(row.get("workspace_canonical") or row.get("workspace") or "default")
+            bucket = by_ws.setdefault(
+                ws_name, {"workspace": ws_name, "total": 0, "tags": {}, "items": []}
+            )
+            bucket["total"] += 1
+            bucket["items"].append({
+                "id": int(row["id"]), "subject": row.get("subject"),
+                "tags": [str(t) for t in (row.get("tags") or [])],
+                "event_time": row.get("event_time"),
+                "content_chars": row.get("content_chars"),
+            })
+            tags = [str(t) for t in (row.get("tags") or []) if str(t).strip()]
+            for tag in dict.fromkeys(tags):  # order-preserving dedup
+                bucket["tags"].setdefault(tag, set()).add(int(row["id"]))
+            if not tags:
+                bucket["tags"].setdefault("(untagged)", set()).add(int(row["id"]))
+        workspaces = []
+        for ws_name in sorted(by_ws, key=lambda k: -by_ws[k]["total"]):
+            bucket = by_ws[ws_name]
+            tag_groups = [
+                {"tag": tag, "count": len(ids), "memory_ids": sorted(ids)}
+                for tag, ids in sorted(bucket["tags"].items(), key=lambda kv: (-len(kv[1]), kv[0]))
+            ]
+            workspaces.append({
+                "workspace": ws_name, "total": bucket["total"], "tags": tag_groups,
+                "items": bucket["items"],
+            })
+        return {"workspaces": workspaces, "total": len(rows)}
+
+    def knowledge_candidates(self, workspace: str | None = None, limit: Any = 50) -> dict[str, Any]:
+        ws_canonical, error = self._knowledge_ws_canonical(workspace)
+        if error is not None:
+            return error
+        items = self.tools.db.memories.list_kb_candidates(
+            ws_canonical=ws_canonical, limit=self._limit(limit, 50, 200),
+        )
+        return {"items": items}
+
+    def knowledge_membership(self, memory_id: int, op: str, workspace: str | None = None) -> dict[str, Any]:
+        if op not in {"add", "remove"}:
+            return {"error": "op must be add or remove", "_http_status": 400}
+        missing = self._strict_workspace_required(workspace)
+        if missing is not None:
+            return missing
+        try:
+            mid = int(memory_id)
+        except (TypeError, ValueError):
+            return {"error": "memory_id must be an integer", "_http_status": 400}
+        row = self.tools.db.get_memory(mid)
+        if row is None:
+            return {"error": f"memory {mid} not found", "_http_status": 404}
+        if getattr(self.tools.settings, "isolation", "none") == "strict":
+            # Console-side single-canonical equality (plan R2 P1-7): the
+            # agent-recall admitted set (vector-relaxed neighbors) is NOT a
+            # boundary here — the picker selects exactly one bucket.
+            explicit = str(workspace or "").strip()
+            caller = self.tools._caller_workspace(explicit or None)
+            if not caller.canonical:
+                return {"error": "forbidden_strict_workspace", "_http_status": 403}
+            target_ws = str(row.get("workspace_canonical") or row.get("workspace") or "")
+            if target_ws != caller.canonical:
+                return {"error": "memory is outside the selected workspace", "_http_status": 403}
+        changed = self.tools.db.memories.set_kb_member(mid, op == "add")
+        after = self.tools.db.get_memory(mid) or {}
+        return {"memory_id": mid, "member": bool(after.get("kb_member")), "changed": bool(changed)}
+
     def doctor(self) -> dict[str, Any]:
         return self._payload(self.tools.memory_doctor_overview(deep=False))
 

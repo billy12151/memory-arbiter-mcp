@@ -44,8 +44,64 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             self._json({"error": "forbidden host"}, status=HTTPStatus.FORBIDDEN, send_body=False)
             return
         self.send_response(HTTPStatus.NO_CONTENT)
-        self.send_header("Allow", "GET, HEAD, OPTIONS")
+        # R2 P1-1 pin: this 204 carries NO Access-Control-* headers on purpose —
+        # that is the CSRF defense for the POST surface (preflight always
+        # fails). Never "fix" this by adding CORS headers.
+        self.send_header("Allow", "GET, HEAD, POST, OPTIONS")
         self.end_headers()
+
+    _MAX_POST_BODY = 2 * 1024 * 1024
+
+    def do_POST(self) -> None:  # noqa: N802 - stdlib hook name
+        address = self.server.server_address
+        port = int(address[1]) if isinstance(address, tuple) and len(address) > 1 else 0
+        # Order matters (plan §B.3.2): Host gate BEFORE body parse — it is the
+        # only DNS-rebinding defense.
+        if not _host_allowed(self.headers.get("Host"), port):
+            self._json({"error": "forbidden host"}, status=HTTPStatus.FORBIDDEN)
+            return
+        if self.headers.get("Content-Type", "").split(";")[0].strip().lower() != "application/json":
+            self._json({"error": "content-type must be application/json"}, status=HTTPStatus.UNSUPPORTED_MEDIA_TYPE)
+            return
+        if self.headers.get("X-Console-Request") != "1":
+            self._json({"error": "missing X-Console-Request header"}, status=HTTPStatus.FORBIDDEN)
+            return
+        length_header = self.headers.get("Content-Length")
+        try:
+            length = int(length_header) if length_header else -1
+        except ValueError:
+            length = -1
+        if length < 0:
+            # chunked / missing length: stdlib http.server does not decode
+            # chunked bodies — reject rather than mis-parse.
+            self._json({"error": "content-length required"}, status=HTTPStatus.LENGTH_REQUIRED)
+            return
+        if length > self._MAX_POST_BODY:
+            self._json({"error": "body too large"}, status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+            return
+        try:
+            body = json.loads(self.rfile.read(length).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            self._json({"error": "invalid json body"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        if not isinstance(body, dict):
+            self._json({"error": "json body must be an object"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        try:
+            self._route_post(urlparse(self.path).path, body)
+        except Exception:
+            self._json({"error": "internal server error"}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    def _route_post(self, path: str, body: dict[str, Any]) -> None:
+        if path == "/api/knowledge/membership":
+            payload = self.api.knowledge_membership(
+                memory_id=body.get("memory_id"),
+                op=str(body.get("op") or ""),
+                workspace=_optional_str(body.get("workspace")),
+            )
+            self._json_or_error(payload)
+            return
+        self._json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
 
     def _handle(self, send_body: bool) -> None:
         address = self.server.server_address
@@ -112,6 +168,19 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                     return
                 ws = _one(qs, "workspace", "") or None
                 self._json_or_error(self.api.memory_detail(memory_id, workspace=ws) if ws else self.api.memory_detail(memory_id), send_body=send_body)
+                return
+            if parsed.path == "/api/knowledge/tree":
+                qs = parse_qs(parsed.query)
+                ws = _one(qs, "workspace", "") or None
+                self._json_or_error(self.api.knowledge_tree(workspace=ws), send_body=send_body)
+                return
+            if parsed.path == "/api/knowledge/candidates":
+                qs = parse_qs(parsed.query)
+                ws = _one(qs, "workspace", "") or None
+                self._json_or_error(
+                    self.api.knowledge_candidates(workspace=ws, limit=_one(qs, "limit", "50")),
+                    send_body=send_body,
+                )
                 return
             if parsed.path == "/api/doctor":
                 self._json(self.api.doctor(), send_body=send_body)
@@ -181,6 +250,11 @@ def _path_int(path: str) -> int | None:
 def _one(qs: dict[str, list[str]], key: str, default: str) -> str:
     values = qs.get(key)
     return values[0] if values else default
+
+
+def _optional_str(value: Any) -> str | None:
+    text = str(value or "").strip()
+    return text or None
 
 
 def build_http_server(host: str, port: int, api: ConsoleAPI | None = None) -> ThreadingHTTPServer:
