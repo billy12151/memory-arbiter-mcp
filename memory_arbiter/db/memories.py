@@ -476,12 +476,15 @@ class MemoriesStore(_MemVectorsMixin, _MemEditMixin):
                 "UPDATE memories SET kb_member = ? WHERE id = ? AND kb_member != ?",
                 (1 if member else 0, memory_id, 1 if member else 0),
             )
-            AuditStore.record_governance_action_on_conn(
-                conn,
-                action="kb_membership_set" if member else "kb_membership_clear",
-                reason="console knowledge workbench",
-                detail={"actor": actor, "memory_id": memory_id, "member": member},
-            )
+            if cur.rowcount:
+                # no-op flips (same value again) are not governance events —
+                # auditing them floods the trail (adversarial review P2-2)
+                AuditStore.record_governance_action_on_conn(
+                    conn,
+                    action="kb_membership_set" if member else "kb_membership_clear",
+                    reason="console knowledge workbench",
+                    detail={"actor": actor, "memory_id": memory_id, "member": member},
+                )
             return int(cur.rowcount)
 
     def list_kb_members(

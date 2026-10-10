@@ -432,7 +432,7 @@ from memory_arbiter.config import Settings as CfgSettings, write_llm_config
 
 def test_write_llm_config_roundtrip_and_from_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     cfg_path = tmp_path / "config.json"
-    applied, path, normalized = write_llm_config(
+    applied, path, normalized, _warnings = write_llm_config(
         {
             "base_url": "https://api.example.com/v4",
             "api_key": "sk-test-1234",
@@ -673,12 +673,15 @@ def test_llm_ask_v1_fallback_and_cache_keyed_by_url(tmp_path: Path, fake_llm) ->
         _FAKE_STATE["responses"] = [_fake_completion(GOOD_SUMMARY)]
         result = llm_client.chat_completion(settings2, [{"role": "user", "content": "hi"}])
         assert result["content"] == GOOD_SUMMARY
-        assert llm_client._V1_PROBE_CACHE[f"http://127.0.0.1:{port2}"] is True
-        # second call goes straight to the /v1 path (no 404 round trip needed)
+        assert llm_client._V1_PROBE_CACHE[f"http://127.0.0.1:{port2}"] == "v1"
+        # second call: the cached variant serves directly (no 404 round trip;
+        # the fake consumed exactly one response — a plain-path probe would
+        # have eaten the 404 first and left the good response unconsumed)
         _FAKE_STATE["requests"] = []
         _FAKE_STATE["responses"] = [_fake_completion(GOOD_SUMMARY)]
-        llm_client.chat_completion(settings2, [{"role": "user", "content": "hi"}])
-        assert _FAKE_STATE["requests"][0].get("path") != "/chat/completions"
+        again = llm_client.chat_completion(settings2, [{"role": "user", "content": "hi"}])
+        assert again["content"] == GOOD_SUMMARY
+        assert llm_client._V1_PROBE_CACHE[f"http://127.0.0.1:{port2}"] == "v1"
     finally:
         server2.shutdown()
         server2.server_close()
@@ -850,3 +853,130 @@ def test_knowledge_edit_strict_gate(tmp_path: Path) -> None:
     assert ok["edited"] is True
     denied = api.knowledge_edit(other, old_text="other", new_text="x", workspace="kb-ws")
     assert denied["_http_status"] == 403
+
+
+# ---- adversarial review R2 regression pins ----------------------------------
+
+def test_v1_suffixed_base_url_not_poisoned(fake_llm, tmp_path: Path) -> None:
+    """P0-1 pin: base_url ending in /v1 must work on EVERY call — the
+    variant cache must never send it to /v1/v1/..."""
+    from memory_arbiter import llm_client
+
+    llm_client._V1_PROBE_CACHE.clear()
+    port = fake_llm.server_address[1]
+
+    class _OnlyV1Style(http.server.BaseHTTPRequestHandler):
+        hits: list[str] = []
+
+        def log_message(self, *args): pass
+
+        def do_POST(self):  # noqa: N802
+            _OnlyV1Style.hits.append(self.path)
+            if self.path == "/v1/chat/completions":  # what base+"/chat/completions" resolves to
+                length = int(self.headers.get("Content-Length") or 0)
+                self.rfile.read(length)
+                payload = _fake_completion("ok")
+                data = json.dumps(payload).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+            else:
+                self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _OnlyV1Style)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        settings = Settings(
+            db_path=tmp_path / "v1s.sqlite3", backup_jsonl=tmp_path / "v1s.jsonl",
+            client="t", agent_id="t", workspace="kb-ws",
+            llm_base_url=f"http://127.0.0.1:{server.server_address[1]}/v1",
+            llm_api_key="sk-fake", llm_model="m", llm_max_context_tokens=32000,
+        )
+        for _ in range(3):  # every subsequent call must keep working
+            assert llm_client.chat_completion(settings, [{"role": "user", "content": "hi"}])["content"] == "ok"
+        assert all(h == "/v1/chat/completions" for h in _OnlyV1Style.hits)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_tree_markup_no_inline_js_interpolation() -> None:
+    """P0-2 pin: knowledge-tree buttons must never interpolate library
+    values inside an inline JS string — data-* attributes only."""
+    from memory_arbiter.console_static import INDEX_HTML
+
+    assert "state.kb.filter={ws:'${" not in INDEX_HTML
+    assert "state.kb.filter={ws:'${esc" not in INDEX_HTML
+    assert 'data-ws="${esc(w.workspace)}"' in INDEX_HTML
+    assert 'data-tag="${esc(g.tag)}"' in INDEX_HTML
+    assert "kbFilterWs(this)" in INDEX_HTML and "kbFilterTag(this)" in INDEX_HTML
+
+
+def test_knowledge_save_duplicate_replay_passthrough(tmp_path: Path) -> None:
+    """P1-5 pin: identical content re-save replays the old id, reuses it for
+    the knowledge base, and says so."""
+    api = _kb_api(tmp_path)
+    first = api.knowledge_save(subject="note A", content="same body", tags=[], workspace="kb-ws")
+    second = api.knowledge_save(subject="note B", content="same body", tags=[], workspace="kb-ws")
+    assert second["duplicate_replay"] is True
+    assert second["memory_id"] == first["memory_id"]
+    assert second["kb_member"] is True
+    assert api.tools.db.get_memory(first["memory_id"])["kb_member"] == 1
+
+
+def test_timeline_accepts_material_event_time_day() -> None:
+    """P1-1 pin: full-ISO stored event_time ("...T05:39:47+00:00") — the day
+    part must count as a material time point, not 'fabricated'."""
+    mats = [ContextMaterial(1, "s", "2026-10-10T05:39:47+00:00", "body without dates")]
+    assert validate_output("timeline", "- 2026-10-10 — 事件A [1]", mats) == []
+
+
+def test_quiz_validator_counts_questions_only() -> None:
+    """P1-2 pin: a compliant 8-question quiz WITH numbered answers must pass
+    (the old regex counted answers+headings too and false-flagged >20)."""
+    questions = "\n\n".join(f"### 第{i}题\n\n题目{i}？出处 [10{i}]" for i in range(1, 9))
+    answers = "\n".join(f"{i}. 答案{i}。" for i in range(1, 9))
+    text = f"# 考卷\n\n{questions}\n\n## 答案\n\n{answers}"
+    assert validate_output("quiz", text, []) == []
+
+
+def test_kb_membership_noop_flip_not_audited(tmp_path: Path) -> None:
+    """P2-2 pin: same-value flips must not add governance audit rows."""
+    api = _kb_api(tmp_path)
+    mid = _write(api.tools, "audit target")
+    api.tools.db.memories.set_kb_member(mid, True)
+    before = len(api.tools.db.audit.recent_governance_actions(limit=50))
+    api.tools.db.memories.set_kb_member(mid, True)  # no-op
+    api.tools.db.memories.set_kb_member(mid, True)  # no-op
+    after = len(api.tools.db.audit.recent_governance_actions(limit=50))
+    assert before == after
+
+
+def test_deep_json_body_gets_400_not_thread_death(tmp_path: Path) -> None:
+    """P2-1 pin: 100k-deep nested JSON must answer 400, not crash the
+    handler thread with RecursionError."""
+    api = _kb_api(tmp_path)
+    server = build_http_server("127.0.0.1", 0, api=api)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        _, port = server.server_address
+        import http.client
+
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        body = ("[" * 100000) + ("]" * 100000)
+        conn.putrequest("POST", "/api/knowledge/membership")
+        conn.putheader("Content-Type", "application/json")
+        conn.putheader("X-Console-Request", "1")
+        conn.putheader("Content-Length", str(len(body)))
+        conn.endheaders()
+        conn.send(body.encode())
+        resp = conn.getresponse()
+        assert resp.status == 400
+        conn.close()
+    finally:
+        server.shutdown()
+        server.server_close()

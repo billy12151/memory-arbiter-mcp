@@ -349,11 +349,6 @@ def build_runtime() -> ServerBundle:
     def memory(action: str = "help", data: dict[str, Any] | None = None) -> Any:
         """Daily memory operations: remember, find, batch_find, read, update, judge, status, help.
 
-        Knowledge-base note (0.18.0): if content is clearly systematic knowledge
-        AND the user explicitly asks to keep it as knowledge, you may add the
-        tag "knowledge"; when unsure, do NOT add it and do NOT ask the user —
-        they curate the knowledge base themselves in mema Console.
-
         workspace is required on remember — discover buckets once with
         memory_review(view="workspaces") (e.g., at session start) and reuse
         that list; re-query only when unsure or before deliberately creating

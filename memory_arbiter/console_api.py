@@ -830,7 +830,9 @@ class ConsoleAPI:
         if len(memory_ids) > 50:
             return {"error": "at most 50 memories per action", "_http_status": 400}
         try:
-            ids = [int(i) for i in memory_ids]
+            # order-preserving dedup: [id]*50 must not blow the token budget
+            # with 50 copies of one memory (adversarial review P2-4)
+            ids = list(dict.fromkeys(int(i) for i in memory_ids))
         except (TypeError, ValueError):
             return {"error": "memory_ids must be integers", "_http_status": 400}
         materials, error = self._kb_materials(ids, workspace)
@@ -885,6 +887,16 @@ class ConsoleAPI:
             error = (data or {}).get("error") if isinstance(data, dict) else None
             return {"error": error or "write pipeline rejected the save", "_http_status": 400, "detail": data}
         memory_id = int(data["id"])
+        if data.get("duplicate_replay"):
+            # dedup gate replayed an existing memory: honor the collection
+            # intent on the existing row and tell the user which one it is.
+            self.tools.db.memories.set_kb_member(memory_id, True)
+            return {
+                "memory_id": memory_id, "saved": True, "kb_member": True,
+                "duplicate_replay": True,
+                "hint_en": f"Identical content already stored as memory {memory_id}; reused it and added it to the knowledge base.",
+                "hint_zh": f"内容与已有记忆 {memory_id} 相同：已复用该条并加入知识库。",
+            }
         if str((data.get("record") or {}).get("status") or "") == "pending":
             # strict + unconfirmed bucket: the memory landed as pending; the
             # membership flip would reject it — surface the governance path.
@@ -1065,7 +1077,7 @@ class ConsoleAPI:
         from .config import write_llm_config
 
         try:
-            applied, path, normalized = write_llm_config(cleaned, identity=self.settings)
+            applied, path, normalized, warnings = write_llm_config(cleaned, identity=self.settings)
         except ValueError as exc:
             return {"error": str(exc), "_http_status": 400}
         # hot reload on the shared settings object (console_api holds the same
@@ -1079,7 +1091,7 @@ class ConsoleAPI:
         }
         for key, value in normalized.items():
             setattr(self.settings, attr_by_key[key], value)
-        return {"saved": applied, "config_file": str(path)}
+        return {"saved": applied, "config_file": str(path), "warnings": warnings}
 
     def _settings_values(self) -> dict[str, Any]:
         values: dict[str, Any] = {}

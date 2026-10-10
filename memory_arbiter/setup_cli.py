@@ -29,7 +29,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Any, Callable
+from typing import Any, Callable
 
 # Model + download sources — kept as module constants so they are easy to update.
 DEFAULT_MODEL_FILENAME = "embeddinggemma-300m-qat-Q8_0.gguf"

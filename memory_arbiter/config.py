@@ -507,7 +507,7 @@ def write_llm_config(
     values: dict[str, Any], *,
     config_path: Path | None = None,
     identity: "Settings | None" = None,
-) -> tuple[list[str], Path, dict[str, Any]]:
+) -> tuple[list[str], Path, dict[str, Any], list[str]]:
     """Persist the ``llm`` section of config.json (plan §B.2.2).
 
     Whitelist-only (six keys); unknown keys are rejected. When the file does
@@ -576,4 +576,4 @@ def write_llm_config(
         json.dump(cfg, fh, ensure_ascii=False, indent=2)
         fh.write("\n")
     os.replace(tmp_path, config_path)
-    return sorted(normalized), config_path, normalized
+    return sorted(normalized), config_path, normalized, warnings

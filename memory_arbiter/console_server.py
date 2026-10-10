@@ -84,6 +84,12 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         except (ValueError, UnicodeDecodeError):
             self._json({"error": "invalid json body"}, status=HTTPStatus.BAD_REQUEST)
             return
+        except RecursionError:
+            # deeply nested JSON crashes the C parser with RecursionError
+            # (not a ValueError) — answer 400 instead of killing the handler
+            # thread mid-request (adversarial review P2-1)
+            self._json({"error": "json body nesting too deep"}, status=HTTPStatus.BAD_REQUEST)
+            return
         if not isinstance(body, dict):
             self._json({"error": "json body must be an object"}, status=HTTPStatus.BAD_REQUEST)
             return

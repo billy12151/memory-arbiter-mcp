@@ -26,9 +26,12 @@ RESERVE_PROMPT = 800
 
 ACTIONS = ("summarize", "outline", "quiz", "feynman", "quiz_me", "timeline", "custom")
 
-# /v1-suffix probe result keyed by base_url (R2 P2-2): switching the URL must
-# invalidate the probe immediately.
-_V1_PROBE_CACHE: dict[str, bool] = {}
+# last-successfully-used URL variant keyed by base_url ("plain" | "v1")
+# (R2 P2-2: keyed so switching the URL invalidates immediately). Storing the
+# variant instead of a bool survives base_urls that already end in /v1 —
+# their plain path IS .../v1/chat/completions and a bool cache would poison
+# the next call into .../v1/v1/... (adversarial review P0-1).
+_V1_PROBE_CACHE: dict[str, str] = {}
 
 
 class LLMError(Exception):
@@ -90,13 +93,16 @@ def chat_completion(settings: Settings, messages: list[dict[str, Any]]) -> dict[
     if (problem := _settings_ready(settings)) is not None:
         raise LLMError(problem)
     base = str(settings.llm_base_url).rstrip("/")
-    tried_v1 = bool(_V1_PROBE_CACHE.get(base))
-    urls = [base + "/chat/completions"]
-    if not tried_v1:
-        urls.append(base + "/v1/chat/completions")
+    plain_url = base + "/chat/completions"
+    v1_url = base + "/v1/chat/completions"
+    cached = _V1_PROBE_CACHE.get(base)
+    if cached == "v1":
+        urls = [v1_url, plain_url]
     else:
-        urls.insert(0, base + "/v1/chat/completions")
-        urls = urls[:1]
+        # unknown or "plain": try the plain path first — for base_urls already
+        # ending in /v1 the plain path IS the correct OpenAI-style endpoint.
+        urls = [plain_url, v1_url]
+    variant = "plain"
     last_error: LLMError | None = None
     for url in urls:
         try:
@@ -112,14 +118,12 @@ def chat_completion(settings: Settings, messages: list[dict[str, Any]]) -> dict[
                 timeout=int(settings.llm_timeout_seconds or 120),
             )
         except LLMError as exc:
-            if exc.status == 404 and url == base + "/chat/completions":
+            if exc.status == 404:
                 last_error = exc
                 continue
             raise
-        if url.endswith("/v1/chat/completions"):
-            _V1_PROBE_CACHE[base] = True
-        else:
-            _V1_PROBE_CACHE[base] = False
+        variant = "v1" if url == v1_url else "plain"
+        _V1_PROBE_CACHE[base] = variant
         choice = (data.get("choices") or [{}])[0]
         message = choice.get("message") or {}
         content = message.get("content")
@@ -227,7 +231,13 @@ def validate_output(action: str, output: str, materials: list[ContextMaterial]) 
         if len(re.findall(r"^##+ ", text, re.M)) < 2:
             errors.append("fewer than two ## headings")
     elif action == "quiz":
-        numbered = re.findall(r"^#{2,3}\s|\b\d+[.、)]\s", text, re.M)
+        # count questions ONLY in the section before the answers heading —
+        # answer lines and headings are numbered too and double-counted into
+        # a false over-limit (adversarial review P1-2). No trailing \s so
+        # "1、题" (CJK enumeration comma) counts.
+        split = re.split(r"^#{2,3}\s*(?:答案|answers?)\s*$", text, flags=re.M | re.I)
+        question_section = split[0] if split else text
+        numbered = re.findall(r"^#{2,3}\s|^\d{1,2}[.、)]", question_section, re.M)
         if not 3 <= len(numbered) <= 20:
             errors.append(f"question count {len(numbered)} outside 3..20")
         if "答案" not in text and "answer" not in text.lower():
@@ -242,9 +252,15 @@ def validate_output(action: str, output: str, materials: list[ContextMaterial]) 
     elif action == "timeline":
         material_times: set[str] = set()
         for m in materials:
+            # stored event_time is a full ISO datetime ("2026-10-10T…"): the
+            # date-part string itself counts, plus bare years — the  in
+            # _ISO_RE never matches past the "T" (adversarial review P1-1).
+            event_day = str(m.event_time or "")[:10]
+            if len(event_day) == 10 and event_day[4] == "-" and event_day[7] == "-":
+                material_times.add(event_day)
+                material_times.add(event_day[:7])
             material_times.update(_YEAR_RE.findall(m.event_time or ""))
             material_times.update(_YEAR_RE.findall(m.content))
-            material_times.update(_ISO_RE.findall(m.event_time or ""))
             material_times.update(_ISO_RE.findall(m.content))
         claimed = set(_YEAR_RE.findall(text)) | set(_ISO_RE.findall(text))
         fabricated = claimed - material_times
@@ -286,8 +302,21 @@ def run_action(
         {"role": "user", "content": "\n\n".join(user_parts)},
     ]
 
+    result: dict[str, Any] | None = None
+    errors: list[str] = []
     for attempt in (1, 2):
-        result = chat_completion(settings, messages)
+        try:
+            result = chat_completion(settings, messages)
+        except LLMError:
+            if attempt == 1:
+                raise
+            # attempt 2 hit a transport failure after attempt 1 already
+            # produced (unvalidated) content — degrade with what we have
+            # instead of surfacing a hard error (adversarial review P2-7).
+            if result is not None:
+                errors = validate_output(action, result["content"], materials)
+                break
+            raise
         errors = validate_output(action, result["content"], materials)
         if not errors:
             return {
@@ -309,6 +338,8 @@ def run_action(
                 },
             ]
     # both attempts failed the gate — degraded passthrough with warnings
+    if result is None:  # unreachable in practice: attempt 1 raises on failure
+        raise LLMError("no model output was produced")
     return {
         "output_markdown": result["content"],
         "reasoning": result["reasoning"],
