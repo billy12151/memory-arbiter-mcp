@@ -3,7 +3,7 @@
 **[English](README.md) | 中文**
 
 > 这份文档写给所有人，不需要你是专业研发。精确的字段级契约见[集成指南](docs/INTEGRATION.zh-CN.md)。
-> 当前正式版本 `0.17.1`（判定引擎换 mDeBERTa 三分类、claims 通道退役 + workspace 必传 + workspaces 选桶视图 + 升级后语句向量自动回填 + 全量修复批）。
+> 当前正式版本 `0.17.2`（判定引擎换 mDeBERTa 三分类、claims 通道退役 + workspace 必传 + workspaces 选桶视图 + 升级后语句向量自动回填 + 全量修复批）。
 
 ## 一句话说明白
 
@@ -155,7 +155,7 @@ mema doctor
 
 几个让人安心的点：
 
-- **宁可漏报，不乱报。** 写入时的提醒门槛很高：先过确定性漏斗（余弦带、规则证据），再由判定模型给出"真冲突"判决且置信度 ≥ 阈值（`mdeberta_notice_min_prob`，现 0.5）。不满足就静默转入后台扫描，不拿不确定的东西打扰你。
+- **宁可漏报，不乱报。** 写入时的提醒门槛很高：先过确定性漏斗（余弦带、规则证据），再由判定模型给出"真冲突"判决且置信度 ≥ 阈值（`mdeberta_notice_min_prob`，现 0.5）。判定为"可能冲突"的灰区提醒同样有门（0.17.2 起）：组合置信 P(冲突)+P(疑似) ≥ `mdeberta_possible_min_susp`（默认 0.7）才发 info 级提示。不满足就静默转入后台扫描，不拿不确定的东西打扰你。
 - **后台还有一道兜底扫描。** 定时扫描（`scan_candidates`）门槛宽、保召回，模型不在线也能跑出确定性候选。两道门配合：宽门保证不漏，严门保证不吵。
 - **想清一遍全库的重复记忆？** 用 `memory_repair(task="scan_duplicates")` 一次拿全：服务端把所有页的近重复对聚合成一份有界结果（最多 200 对，默认只给 id/主题/workspace/原因/距离这类轻量字段，`include_quotes=true` 再附上证据引文），不会把 agent 会话撑爆。分诊后该合并的走 `merge_memories`，误报的照旧用 `record_conflict` 压掉。
 - **装完记得设定时任务。** 迷码自己不带定时器（扫描的价值闭环在 agent 判流，得靠外部调度器到点唤醒 agent）。0.16.0 规格升到 v2：①每小时先反复踢一脚 `memory_repair(task="scan_pipeline", data={"action": "kick"})` 直到返回 `complete=true`（服务端自己走库：全量还是增量、断点在哪全由水位线自判；扫出的疑似项进独立的判断队列，不进通知、也不进用户面冲突列表），再按页清队列 `memory_repair(task="scan_queue", data={"action": "page"}` / `action="submit"`——服务端代行落库：驳回即抑制源，确证时 agent 只需给 slot 和各组显示值）；②每天跑一次 `doctor` 做治理提醒。`scan_candidates` 降级为手动/排查通道；老版「分页+分诊」任务会被 doctor 的 `conflicts.spec_drift` 点名重建。完整规格：`memory(action="help", data={"topic": "scheduled_tasks"})`。

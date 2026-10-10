@@ -5,7 +5,7 @@
 
 Memory Arbiter is a trustworthy local fact layer for AI agents — not just shared memory, but shared facts that are current, trusted, traceable, and safe to use. It is a local SQLite service exposed over MCP: four product tools, evidence-based recall, advisory conflict notices, and user-authorized governance. Every fact is stored once in local SQLite and every model it can call runs locally.
 
-> Current release: `0.17.1` (mDeBERTa three-class judge with the claims channel retired; workspace required on remember + workspace-govern actions, `workspaces` view; automatic row-vector backfill after upgrade; full-project review fix wave).
+> Current release: `0.17.2` (mDeBERTa three-class judge with the claims channel retired; workspace required on remember + workspace-govern actions, `workspaces` view; automatic row-vector backfill after upgrade; full-project review fix wave).
 
 ## Why trust it
 
@@ -108,7 +108,7 @@ Lexical and evidence channels recall independently and merge per memory with rec
 Evidence KNN recalls sentence-level neighbours; it does not decide conflict truth. Since 0.17.1, each candidate pair that survives the deterministic funnel (sentence prefilter, memory-level screen, cosine band, rule evidence) is judged by an optional local **mDeBERTa** encoder (three classes: `conflict` / `no_conflict` / `possible_conflict`, plus a mechanism head). The judge sees the two bare row texts — no metadata, no prompt engineering — and returns calibrated probabilities:
 
 - `conflict` at P ≥ `semantic_conflict.mdeberta_notice_min_prob` (default 0.5) → a normal-severity notice;
-- `possible_conflict` → an `info`-severity notice (grey-zone reference, no `action_required`);
+- `possible_conflict` at P(conflict)+P(possible_conflict) ≥ `semantic_conflict.mdeberta_possible_min_susp` (default 0.7, since 0.17.2) → an `info`-severity notice (grey-zone reference, no `action_required`); below the gate the pair is counted (`model_possible_below_gate`), not notified;
 - `no_conflict` → silent clear (counted in the receipt).
 
 The judge never chooses a winner, suppresses the scheduled scan, or edits memory.
@@ -244,6 +244,7 @@ The complete user surface is 21 keys (0.15.14: added `semantic_conflict.n_gpu_la
 | `semantic_conflict.notice_sync_wait_ms` | How long the write response waits for the post-commit check so its result rides along (v0.15.8, default `3000`, clamp `0–5000`); `0` = never block the write response — batch ingestion still gets the check run asynchronously and notices deliver on a later response |
 | `semantic_conflict.mdeberta_model_dir` | config.json + tokenizer directory; default = `<ckpt dir>/mdeberta-base` |
 | `semantic_conflict.mdeberta_notice_min_prob` | P(conflict) floor for a normal-severity notice (default `0.5`); below it the pair is counted, not notified |
+| `semantic_conflict.mdeberta_possible_min_susp` | P(conflict)+P(possible_conflict) floor for an `info`-severity grey-zone notice (default `0.7`, v0.17.2; calibrated on the exam + LoCoMo gold corpora); below it the pair is counted (`model_possible_below_gate`), not notified; `0` restores the pre-0.17.2 ungated behavior |
 | `semantic_conflict.mdeberta_batch` | Judge batch size (default `0` = auto, device-tiered: 16 with a GPU — Apple Silicon / NVIDIA — 8 on CPU; an explicit value `>0` overrides the tier. No startup probe) |
 | `mcp.transport` | `stdio` (default) or opt-in `streamable-http` localhost server |
 | `mcp.http.host` / `port` | Local HTTP endpoint; host is restricted to loopback, defaults to `127.0.0.1:8000`; the endpoint path is fixed at `/mcp` |

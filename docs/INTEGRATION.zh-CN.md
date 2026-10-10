@@ -2,7 +2,7 @@
 
 **[English](INTEGRATION.md) | 中文**
 
-本指南描述 `0.17.1` 的正式契约。
+本指南描述 `0.17.2` 的正式契约。
 
 ## MCP 接口面
 
@@ -28,7 +28,7 @@ stdio 是默认传输。要让多个本地客户端共享一个社区版进程�
   "update_check": {"enabled": true},
   "include_size": true,
   "embedding": {"model_path": "…", "auto_query": true, "auto_write": true},
-  "semantic_conflict": {"enabled": true, "mdeberta_ckpt": "…", "mdeberta_model_dir": "…", "mdeberta_batch": 16, "mdeberta_notice_min_prob": 0.5, "on_write": "async", "notice_sync_wait_ms": 3000},
+  "semantic_conflict": {"enabled": true, "mdeberta_ckpt": "…", "mdeberta_model_dir": "…", "mdeberta_batch": 16, "mdeberta_notice_min_prob": 0.5, "mdeberta_possible_min_susp": 0.7, "on_write": "async", "notice_sync_wait_ms": 3000},
   "mcp": {"transport": "stdio", "http": {"host": "127.0.0.1", "port": 8000}}
 }
 ```
@@ -87,7 +87,7 @@ stdio 是默认传输。要让多个本地客户端共享一个社区版进程�
 
 ### 三分类判定（0.17.1）
 
-证据 KNN 只提供有界的短 pair 召回和排序。0.17.1 起判定由本地 mDeBERTa（v52_ep3）三分类完成：conflict 且 P ≥ `mdeberta_notice_min_prob`（现 0.5）出 normal notice、possible 出 info 灰区通知、no_conflict 静默 clear；写入漏斗门（初筛/G5/余弦带/规则证据）全部保留。
+证据 KNN 只提供有界的短 pair 召回和排序。0.17.1 起判定由本地 mDeBERTa（v52_ep3）三分类完成：conflict 且 P ≥ `mdeberta_notice_min_prob`（现 0.5）出 normal notice、possible 且 P(冲突)+P(疑似) ≥ `mdeberta_possible_min_susp`（0.17.2 起默认 0.7，低于只计 `model_possible_below_gate`）出 info 灰区通知、no_conflict 静默 clear；写入漏斗门（初筛/G5/余弦带/规则证据）全部保留。
 
 模型绝不选出赢家、压制定时扫描或修改记忆。其概率与确定性漏斗共同生效——确定性直出路径（同键归一值不同，不经判定直接出 notice）仍要求：
 
