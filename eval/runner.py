@@ -467,7 +467,8 @@ def _remember_envelope(
         "subject": envelope["subject"],
         "tags": envelope.get("tags") or [],
         "workspace": envelope.get("workspace") or "default",
-        "event_time": envelope.get("event_time"),
+        # locomo_gold_4way 等外部语料的空串=未设置（写接口拒收空 ISO 串）
+        "event_time": envelope.get("event_time") or None,
         "source_type": envelope.get("source_type")
         if envelope.get("source_type") in VALID_SOURCE_TYPES
         else "unknown",
