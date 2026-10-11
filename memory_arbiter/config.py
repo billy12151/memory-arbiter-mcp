@@ -60,14 +60,15 @@ class Settings:
     # wins); preload/resident are frozen true — a configured checkpoint loads
     # at startup and stays resident.
     semantic_conflict_enabled: bool = False
-    # 0.17.1: the mDeBERTa judge checkpoint (V4m). Configured → arbitration
-    # enabled; unset → arbitration disabled (fail-open, doctor reports).
+    # 0.17.1: the mDeBERTa judge checkpoint (v52_ep3_fp16 line). Configured →
+    # arbitration enabled; unset → arbitration disabled (fail-open, doctor reports).
     semantic_conflict_model_path: Path | None = None  # 0.17.1 vestigial: never populated from config (fixtures may set)
     semantic_conflict_mdeberta_ckpt: Path | None = None
     # config.json + tokenizer dir; default = <ckpt dir>/mdeberta-base (§3.6).
     semantic_conflict_mdeberta_model_dir: Path | None = None
     # 0.17.1 owner 拍板: P(conflict) ≥ this → normal notice; below → counted
-    # only. possible_conflict → info notice (no threshold — ~1% rate).
+    # only. possible_conflict 的门槛见下方 possible_min_susp（0.17.2 起有灰区门，
+    # 非无门直出）。
     # owner 2026-10-05 终拍 T=0.5（召回优先，阈值不抬高，后续靠模型提升）
     semantic_conflict_mdeberta_notice_min_prob: float = 0.5
     # 0.17.2 owner 拍板 2026-10-10: possible_conflict 灰区门——argmax=possible
@@ -576,9 +577,22 @@ def write_llm_config(
             continue
         raw = values[key]
         if key in {"max_context_tokens", "max_output_tokens", "timeout_seconds"}:
-            normalized[key] = parse_int(
-                raw, 0 if key == "max_context_tokens" else (8192 if key == "max_output_tokens" else 120),
-                name=f"llm.{key}", warnings=warnings,
+            # Same bounds as from_env's clamp_int: a value the write path
+            # accepts must behave identically after restart, not clamp then
+            # (the unbounded write path let a huge value work hot and clamp
+            # only on the next reload — two lifecycles, two answers).
+            bounds = {
+                "max_context_tokens": (0, 10_000_000),
+                "max_output_tokens": (1, 1_000_000),
+                "timeout_seconds": (1, 3600),
+            }
+            lo, hi = bounds[key]
+            normalized[key] = clamp_int(
+                parse_int(
+                    raw, 0 if key == "max_context_tokens" else (8192 if key == "max_output_tokens" else 120),
+                    name=f"llm.{key}", warnings=warnings,
+                ),
+                lo, hi, name=f"llm.{key}", warnings=warnings,
             )
         else:
             normalized[key] = str(raw or "").strip()
@@ -594,4 +608,11 @@ def write_llm_config(
         json.dump(cfg, fh, ensure_ascii=False, indent=2)
         fh.write("\n")
     os.replace(tmp_path, config_path)
+    # The config can carry an llm.api_key — enforce owner-only permissions
+    # instead of relying on the user's umask (plan §B.2.2 promised the 600
+    # guidance; this is the enforcement side).
+    try:
+        os.chmod(config_path, 0o600)
+    except OSError as exc:
+        warnings.append(f"could not chmod 600 the config file: {exc}")
     return sorted(normalized), config_path, normalized, warnings

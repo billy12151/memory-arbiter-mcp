@@ -980,3 +980,95 @@ def test_deep_json_body_gets_400_not_thread_death(tmp_path: Path) -> None:
     finally:
         server.shutdown()
         server.server_close()
+
+
+# ---- R3 盘点修复回归钉（2026-10-11 fix batch）--------------------------------
+
+
+def test_knowledge_edit_retire_strict_explicit_ws_not_settings_fallback(tmp_path: Path) -> None:
+    """P1 pin: with isolation=strict the inner memory_edit / memory_supersede
+    ACL must receive the console-selected workspace. Before the fix the
+    missing workspace fell back to settings.workspace, so an edit the shared
+    equality gate had already approved was rejected with
+    forbidden_strict_workspace whenever the settings bucket differed."""
+    settings = Settings(
+        db_path=tmp_path / "se.sqlite3", backup_jsonl=tmp_path / "se.jsonl",
+        client="t", agent_id="t", workspace="other-ws", isolation="strict",
+    )
+    tools = MemoryTools(settings)
+    api = ConsoleAPI(tools)
+    mine = _write(tools, "mine")
+    tools.memory_confirm_pending_workspace(
+        memory_id=mine, canonical="kb-ws", reason="t", authorized=True, workspace="kb-ws",
+    )
+    ok = api.knowledge_edit(mine, old_text="mine", new_text="ours", workspace="kb-ws")
+    assert ok["edited"] is True
+    # supersede requires authorized unconditionally (two-click confirm flow)
+    retired = api.knowledge_retire(mine, reason="done", workspace="kb-ws", authorized=True)
+    assert retired.get("retired") is True
+
+
+def test_knowledge_save_reports_membership_flip_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§B.1.4 branch pin: write success + flip failure must report
+    kb_member=false with a retry hint instead of a membership that is not
+    there (the old response hard-coded kb_member=True)."""
+    api = _kb_api(tmp_path)
+    from memory_arbiter.db.memories import MemoriesStore
+
+    monkeypatch.setattr(MemoriesStore, "set_kb_member", lambda self, mid, member, **kw: 0)
+    res = api.knowledge_save(subject="s", content="c", tags=None, workspace="kb-ws")
+    assert res["saved"] is True
+    assert res["kb_member"] is False
+    assert "knowledge base" in res["hint_en"]
+    assert "知识库" in res["hint_zh"]
+
+
+def test_write_llm_config_clamps_like_from_env_and_locks_file(tmp_path: Path) -> None:
+    """R3 盘点 P2 pin: the write path applies the same clamp bounds as
+    from_env (one config file, one answer across reloads) and enforces 0600
+    on a file that can carry an api_key."""
+    cfg_path = tmp_path / "cfg.json"
+    _applied, _path, normalized, warnings = write_llm_config(
+        {"max_context_tokens": 10**12, "max_output_tokens": 0, "timeout_seconds": 99999},
+        config_path=cfg_path,
+    )
+    assert normalized["max_context_tokens"] == 10_000_000
+    assert normalized["max_output_tokens"] == 1
+    assert normalized["timeout_seconds"] == 3600
+    assert sum("clamped" in w for w in warnings) == 3
+    assert (cfg_path.stat().st_mode & 0o777) == 0o600
+
+
+def test_timeline_content_full_datetime_not_fabricated() -> None:
+    """R3 盘点 P2 pin: a full ISO datetime inside content counts as its date —
+    _ISO_RE's trailing \\b stops before the 'T', so without the explicit
+    datetime pass a real date reads as fabricated and burns a retry."""
+    mats = [ContextMaterial(1, "s", "", "上线时间 2026-03-01T09:30:00 完成")]
+    assert validate_output("timeline", "- 2026-03-01 — 上线 [1]", mats) == []
+    # the year-month prefix claim still passes (either form is grounded)
+    assert validate_output("timeline", "- 2026-03 — 上线 [1]", mats) == []
+    assert validate_output("timeline", "- 2030-03 — 编造 [1]", mats)
+
+
+def test_console_i18n_literal_keys_all_defined() -> None:
+    """R3 盘点 P2 pin: every literal t('key') / t("key") / data-i18n="key" on
+    the console page must exist in the I18N dict — a missing key renders the
+    key name itself to the user (the saveBtn/llmSaved class of bug)."""
+    import re as _re
+
+    from memory_arbiter.console_static import INDEX_HTML
+
+    used = (
+        set(_re.findall(r"\bt\('([^']+)'\)", INDEX_HTML))
+        | set(_re.findall(r'\bt\("([^"]+)"\)', INDEX_HTML))
+        | set(_re.findall(r'data-i18n="([^"]+)"', INDEX_HTML))
+    )
+    block_m = _re.search(r"const I18N = \{(.*?)\n\};", INDEX_HTML, _re.S)
+    assert block_m, "I18N dict not found in INDEX_HTML"
+    defined = set(
+        _re.findall(r"(?:^|[{,\s])([A-Za-z_][A-Za-z0-9_]*)\s*:\s*'", block_m.group(1), _re.M)
+    )
+    missing = sorted(k for k in used if k not in defined)
+    assert not missing, f"i18n keys used but not defined: {missing}"

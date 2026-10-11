@@ -890,12 +890,16 @@ class ConsoleAPI:
         if data.get("duplicate_replay"):
             # dedup gate replayed an existing memory: honor the collection
             # intent on the existing row and tell the user which one it is.
-            self.tools.db.memories.set_kb_member(memory_id, True)
+            kb_member = self._kb_member_after_flip(memory_id)
+            if kb_member:
+                hint_en = f"Identical content already stored as memory {memory_id}; reused it and added it to the knowledge base."
+                hint_zh = f"内容与已有记忆 {memory_id} 相同：已复用该条并加入知识库。"
+            else:
+                hint_en = f"Identical content already stored as memory {memory_id}; reused it, but the knowledge-base add did not take effect — retry from the tree view."
+                hint_zh = f"内容与已有记忆 {memory_id} 相同：已复用该条，但加入知识库未生效——可稍后在知识库树中重试。"
             return {
-                "memory_id": memory_id, "saved": True, "kb_member": True,
-                "duplicate_replay": True,
-                "hint_en": f"Identical content already stored as memory {memory_id}; reused it and added it to the knowledge base.",
-                "hint_zh": f"内容与已有记忆 {memory_id} 相同：已复用该条并加入知识库。",
+                "memory_id": memory_id, "saved": True, "kb_member": kb_member,
+                "duplicate_replay": True, "hint_en": hint_en, "hint_zh": hint_zh,
             }
         if str((data.get("record") or {}).get("status") or "") == "pending":
             # strict + unconfirmed bucket: the memory landed as pending; the
@@ -908,13 +912,24 @@ class ConsoleAPI:
                 "hint_en": "Saved as pending: confirm the workspace in governance first, then add it to the knowledge base.",
                 "hint_zh": "已存为 pending：请先在治理面确认该工作区，再加入知识库。",
             }
-        changed = self.tools.db.memories.set_kb_member(memory_id, True)
-        return {
-            "memory_id": memory_id,
-            "saved": True,
-            "kb_member": True,
-            "kb_changed": bool(changed),
-        }
+        kb_member = self._kb_member_after_flip(memory_id)
+        result: dict[str, Any] = {"memory_id": memory_id, "saved": True, "kb_member": kb_member}
+        if not kb_member:
+            # Plan §B.1.4 branch: the write landed but the membership flip did
+            # not (row left active between write and flip, or the flip hit a
+            # db issue) — report the row's truth instead of a membership that
+            # is not there.
+            result["hint_en"] = "Saved, but adding to the knowledge base did not take effect (membership requires an active memory). Retry from the tree view."
+            result["hint_zh"] = "已保存，但加入知识库未生效（知识库仅收 active 记忆）。可稍后在知识库树中重试。"
+        return result
+
+    def _kb_member_after_flip(self, memory_id: int) -> bool:
+        """Membership truth after a flip attempt (plan §B.1.4): the flip can
+        legally no-op (row already a member) or fail (row left active between
+        write and flip) — read the row back, never assume the outcome."""
+        self.tools.db.memories.set_kb_member(memory_id, True)
+        row = self.tools.db.get_memory(memory_id)
+        return bool(row and row.get("kb_member"))
 
     # ---- console memory edit / retire (owner 2026-10-10: same-process
     # internal interfaces — never a second MCP service, no cross-process
@@ -978,6 +993,11 @@ class ConsoleAPI:
             remove_tags=[str(t) for t in (remove_tags or [])],
             reason=str(reason or "console knowledge workbench edit")[:500],
             authorized=bool(authorized),
+            # R3 盘点 P1: the inner edit ACL derives its caller workspace from
+            # this value — without it strict mode falls back to
+            # settings.workspace and rejects an edit the equality gate above
+            # already approved for the selected workspace.
+            workspace=workspace,
         )
         data = self._payload(response)
         if not response.get("ok"):
@@ -1009,6 +1029,8 @@ class ConsoleAPI:
             memory_id=mid,
             reason=str(reason or "console knowledge workbench retire")[:500],
             authorized=bool(authorized),
+            # R3 盘点 P1: same inner-ACL workspace derivation as edit above.
+            workspace=workspace,
         )
         data = self._payload(response)
         if not response.get("ok"):

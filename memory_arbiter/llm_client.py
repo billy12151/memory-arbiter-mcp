@@ -214,6 +214,11 @@ def load_skill(action: str) -> str:
 # "19"/"20" prefix a capturing group would yield.
 _YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
 _ISO_RE = re.compile(r"\b\d{4}-\d{2}(?:-\d{2})?\b")
+# Full ISO datetimes embedded in prose ("2026-03-01T09:30:00"): _ISO_RE's
+# trailing \b stops before the "T", so a bare pass only yields the year-month
+# prefix and a real date in the material reads as "fabricated". Same T-boundary
+# the event_time path handles — the content path needs the explicit form.
+_ISO_DT_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}")
 
 
 def validate_output(action: str, output: str, materials: list[ContextMaterial]) -> list[str]:
@@ -262,6 +267,9 @@ def validate_output(action: str, output: str, materials: list[ContextMaterial]) 
             material_times.update(_YEAR_RE.findall(m.event_time or ""))
             material_times.update(_YEAR_RE.findall(m.content))
             material_times.update(_ISO_RE.findall(m.content))
+            for dt in _ISO_DT_RE.findall(m.content):
+                material_times.add(dt[:10])
+                material_times.add(dt[:7])
         claimed = set(_YEAR_RE.findall(text)) | set(_ISO_RE.findall(text))
         fabricated = claimed - material_times
         if fabricated:
