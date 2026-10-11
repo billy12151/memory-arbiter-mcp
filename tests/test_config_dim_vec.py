@@ -12,8 +12,6 @@ from memory_arbiter.config import Settings, parse_bool
 from memory_arbiter.db import MemoryDB
 from memory_arbiter.models import SourceType
 from memory_arbiter.tools import MemoryTools
-from functools import partial
-from tests._helpers import make_tools as _base_make_tools
 
 @pytest.fixture(autouse=True)
 def _relevance_floor_off(monkeypatch: pytest.MonkeyPatch) -> None:

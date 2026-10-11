@@ -26,9 +26,16 @@ def make_tools(tmp_path: Path, **settings_overrides: Any) -> MemoryTools:
     # db_path/backup_jsonl defaults live in the merge dict (not the call) so
     # callers CAN override the filenames (e.g. claims_retirement legacy
     # fixtures hardcode tmp_path / "memory.sqlite3").
+    # client/agent_id/workspace pinned to today's Settings defaults on
+    # purpose: 15 consolidated files rely on them, and a future default flip
+    # upstream must not silently change the write identity these tests
+    # exercise. Override freely per call.
     return MemoryTools(Settings(**{
         "db_path": tmp_path / "m.db",
         "backup_jsonl": tmp_path / "b.jsonl",
+        "client": "",
+        "agent_id": "",
+        "workspace": "default",
         **settings_overrides,
     }))
 
