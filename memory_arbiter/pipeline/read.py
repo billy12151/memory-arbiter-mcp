@@ -649,14 +649,24 @@ class ReadPipeline(_ReadSearch):
                 span_entry["end"] = (
                     content_len if content_len > start_i else start_i + 1
                 )
+        # Reuse batch C1 (2026-10-11): unit_needed and the visible_records
+        # pairs overlap — one batched row-value IN query serves both maps.
+        # Downstream consumers treat both as read-only (rows are filtered or
+        # copied, never mutated), so sharing one dict is safe. outline_pairs
+        # stays empty outside preview/hits so the full-mode row set is
+        # byte-identical to the pre-merge behavior.
+        outline_pairs: list[tuple[int, int]] = (
+            [(mid, int(rec.get("version") or 1)) for mid, rec in visible_records.items()]
+            if content_mode in {"preview", "hits"} else []
+        )
         unit_rows_map: dict[int, list[dict[str, Any]]] = (
-            self.db.evidence.text_unit_rows_for_ids(unit_needed) if unit_needed else {}
+            self.db.evidence.text_unit_rows_for_ids(
+                list({*unit_needed, *outline_pairs}),
+            )
+            if unit_needed or outline_pairs
+            else {}
         )
-        outline_map: dict[int, list[dict[str, Any]]] = (
-            self.db.evidence.outline_rows_for_ids([
-                (mid, int(rec.get("version") or 1)) for mid, rec in visible_records.items()
-            ]) if content_mode in {"preview", "hits"} else {}
-        )
+        outline_map = unit_rows_map if content_mode in {"preview", "hits"} else {}
 
         results: list[dict[str, Any]] = []
         not_found: list[int] = []

@@ -193,36 +193,14 @@ class EvidenceStore:
         self, entries: "list[tuple[int, int]]",
     ) -> dict[int, list[dict[str, Any]]]:
         """Batch outline fetch (0.16.12 P1-T5): ALL heading/text rows for the
-        page's ids in ONE connection (row-value IN, chunked) — keeps P1-T4's
-        connection batching intact on preview paths. Per-id lists are ordered
-        by unit_index; the caller derives total (=len) and the head slice.
-        Ids with no current-version rows are absent from the map."""
-        if not entries:
-            return {}
-        pairs = sorted({(int(mid), int(version)) for mid, version in entries})
-        out: dict[int, list[dict[str, Any]]] = {}
-        try:
-            with self._db.connection() as conn:
-                for start in range(0, len(pairs), 200):
-                    chunk = pairs[start:start + 200]
-                    placeholders = ",".join("(?,?)" for _ in chunk)
-                    params = [value for pair in chunk for value in pair]
-                    rows = conn.execute(
-                        f"""SELECT memory_id, row_index AS unit_index, kind, text, start_offset, end_offset
-                            FROM memory_row
-                            WHERE (memory_id, memory_version) IN ({placeholders})
-                              AND kind != 'subject'
-                            ORDER BY memory_id, row_index""",
-                        params,
-                    ).fetchall()
-                    for row in rows:
-                        out.setdefault(int(row["memory_id"]), []).append(
-                            {key: row[key] for key in
-                             ("unit_index", "kind", "text", "start_offset", "end_offset")}
-                        )
-            return out
-        except sqlite3.Error:
-            return {}
+        page's ids in ONE connection. Per-id lists are ordered by unit_index;
+        the caller derives total (=len) and the head slice. Ids with no
+        current-version rows are absent from the map.
+
+        Reuse batch C1 (2026-10-11): P1-T4 and P1-T5 landed byte-identical
+        queries; this stays as the semantic name delegating to the single
+        implementation."""
+        return self.text_unit_rows_for_ids(entries)
 
     def row_spans_for_ids(
         self, entries: "list[tuple[int, int, int, int]]",
