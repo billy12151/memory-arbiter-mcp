@@ -17,6 +17,7 @@ from memory_arbiter.db import MemoryDB
 from memory_arbiter.models import ConflictMember
 from memory_arbiter.surfaces import ProductSurfaces
 from memory_arbiter.tools import MemoryTools
+from tests._helpers import make_tools
 
 
 
@@ -27,11 +28,6 @@ def _relevance_floor_off(monkeypatch: pytest.MonkeyPatch) -> None:
     # what they pin (its behavior lives in tests/test_recall_quality_0159.py).
     # Disable it here so weak fixtures stay recallable.
     monkeypatch.setattr("memory_arbiter.search.QUERY_RECALL_SCORE_FLOOR", -1.0)
-
-
-def make_tools(tmp_path: Path) -> MemoryTools:
-    settings = Settings(db_path=tmp_path / "m.sqlite3", backup_jsonl=tmp_path / "b.jsonl")
-    return MemoryTools(settings, MemoryDB(settings))
 
 
 def _memory(tools: MemoryTools, content: str, workspace: str = "w", **meta: object) -> int:

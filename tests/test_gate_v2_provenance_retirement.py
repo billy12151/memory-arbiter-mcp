@@ -12,16 +12,10 @@ import json
 import sqlite3
 from pathlib import Path
 
-from memory_arbiter.config import Settings
-from memory_arbiter.db import MemoryDB
 from memory_arbiter.db.additive import _purge_retired_metadata_keys
 from memory_arbiter.models import MemoryRecord
 from memory_arbiter.tools import MemoryTools
-
-
-def make_tools(tmp_path: Path) -> MemoryTools:
-    settings = Settings(db_path=tmp_path / "g3.sqlite3", backup_jsonl=tmp_path / "g3.jsonl")
-    return MemoryTools(settings, MemoryDB(settings))
+from tests._helpers import make_tools
 
 
 def _raw_metadata(tools: MemoryTools, memory_id: int) -> dict:

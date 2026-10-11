@@ -10,11 +10,7 @@ from pathlib import Path
 from memory_arbiter.config import Settings
 from memory_arbiter.db import MemoryDB
 from memory_arbiter.tools import MemoryTools
-
-
-def make_tools(tmp_path: Path) -> MemoryTools:
-    settings = Settings(db_path=tmp_path / "m.sqlite3", backup_jsonl=tmp_path / "b.jsonl")
-    return MemoryTools(settings, MemoryDB(settings))
+from tests._helpers import make_tools
 
 
 BODY_A = (

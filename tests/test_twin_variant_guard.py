@@ -21,17 +21,13 @@ from pathlib import Path
 
 import pytest
 
-from memory_arbiter.config import Settings
 from memory_arbiter.tools import MemoryTools
+from tests._helpers import make_tools
 from memory_arbiter.twin_redirect import (
     _mechanical_key,
     protected_bucket_variant,
     twin_redirect_target,
 )
-
-
-def make_tools(tmp_path: Path, **kw) -> MemoryTools:
-    return MemoryTools(Settings(db_path=tmp_path / "m.db", backup_jsonl=tmp_path / "b.jsonl", **kw))
 
 
 # ── 判定键 ──────────────────────────────────────────────────────────────────

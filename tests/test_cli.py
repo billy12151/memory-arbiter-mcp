@@ -1195,21 +1195,14 @@ import pytest
 from memory_arbiter.config import Settings
 from memory_arbiter.db import MemoryDB
 from memory_arbiter.tools import MemoryTools
+from functools import partial
+from tests._helpers import make_tools as _base_make_tools
 
 # Load the script as a module.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import backfill_subjects  # noqa: E402
 
-
-def _make_tools(tmp_path: Path) -> MemoryTools:
-    settings = Settings(
-        db_path=tmp_path / "backfill.sqlite3",
-        backup_jsonl=tmp_path / "backfill.jsonl",
-        client="pytest",
-        agent_id="backfill-test",
-        workspace="default",
-    )
-    return MemoryTools(settings=settings, db=MemoryDB(settings))
+_make_tools = partial(_base_make_tools, client="pytest", agent_id="backfill-test", workspace="default")
 
 
 def _insert_empty_subject_row(tools: MemoryTools, content: str) -> int:

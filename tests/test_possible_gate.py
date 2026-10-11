@@ -19,7 +19,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import tests.test_config as tc
 import tests.test_vnext_evidence as tv
 from memory_arbiter.pipeline._evidence_judge import _judge_outcome
 from memory_arbiter.semantic_judge import PairVerdict
@@ -110,8 +109,7 @@ def test_gate_zero_restores_pre_0172_behavior(tmp_path: Path, monkeypatch) -> No
 
 # ── 配置链 ─────────────────────────────────────────────────────────────────
 
-def test_config_default_file_key_and_clamp(tmp_path: Path, monkeypatch) -> None:
-    tc.clear_config_env(monkeypatch)
+def test_config_default_file_key_and_clamp(tmp_path: Path, monkeypatch, clear_config_env) -> None:
     ckpt = tmp_path / "mdeberta-v58_ep3_fp16.pt"
     ckpt.write_bytes(b"x")
 

@@ -17,18 +17,18 @@ from memory_arbiter.db import MemoryDB
 from memory_arbiter.models import ConflictMember, ConflictValueGroup, MemoryStatus
 from memory_arbiter.tools import MemoryTools
 from memory_arbiter.validation import validate_product_payload
+from tests._helpers import make_tools as _base_make_tools
+from tests._helpers import record_conflict
 
 
 def make_tools(
     tmp_path: Path, isolation: str = "none", *, workspace: str = "default",
 ) -> MemoryTools:
-    settings = Settings(
-        db_path=tmp_path / "move.sqlite3",
-        backup_jsonl=tmp_path / "move.jsonl",
-        client="codex", agent_id="agent-a", workspace=workspace,
-        isolation=isolation,
+    # Thin wrapper (not a partial): callers pass isolation positionally-or-keyword.
+    return _base_make_tools(
+        tmp_path, client="codex", agent_id="agent-a",
+        workspace=workspace, isolation=isolation,
     )
-    return MemoryTools(settings=settings, db=MemoryDB(settings))
 
 
 _fact_serial = 0
@@ -286,30 +286,6 @@ def test_move_is_idempotent(tmp_path: Path) -> None:
     assert second["data"]["moved_ids"] == [memory_id]
     assert row(tools, memory_id)["workspace"] == "proj-x"
     assert row(tools, memory_id)["workspace_canonical"] == "proj-x"
-
-
-def record_conflict(tools: MemoryTools, workspace: str, left: int, right: int) -> int:
-    members = [
-        ConflictMember(
-            memory_id=memory_id, version=1, attribute_raw="database", value_raw=value,
-            normalized_attribute="database", normalized_value=value,
-            evidence_quote=value, evidence_span=(0, len(value)), content_hash=char * 64,
-            direction="a_to_b", prompt_version="p1", detector_version="d1",
-        )
-        for memory_id, value, char in ((left, "mysql", "a"), (right, "sqlite", "b"))
-    ]
-    outcome = tools.db.record_conflict_group(
-        workspace_canonical=workspace,
-        slot_key={"entity": "svc", "attribute": "database", "scope": "production"},
-        members=members,
-        value_groups=[
-            ConflictValueGroup("mysql", "MySQL", (f"{left}@1",)),
-            ConflictValueGroup("sqlite", "SQLite", (f"{right}@1",)),
-        ],
-        detection_reason="different", source="scan", detector_version="d1",
-    )
-    assert outcome["outcome"] == "inserted"
-    return int(outcome["conflict_id"])
 
 
 def test_strict_settings_fallback_caller(tmp_path: Path) -> None:

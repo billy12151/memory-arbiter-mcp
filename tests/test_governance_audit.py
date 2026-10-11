@@ -8,15 +8,10 @@ from pathlib import Path
 from memory_arbiter.config import Settings
 from memory_arbiter.db import MemoryDB
 from memory_arbiter.tools import MemoryTools
+from functools import partial
+from tests._helpers import make_tools as _base_make_tools
 
-
-def make_tools(tmp_path: Path) -> MemoryTools:
-    settings = Settings(
-        db_path=tmp_path / "gov.sqlite3",
-        backup_jsonl=tmp_path / "gov.jsonl",
-        client="codex", agent_id="agent-a", workspace="default",
-    )
-    return MemoryTools(settings=settings, db=MemoryDB(settings))
+make_tools = partial(_base_make_tools, client="codex", agent_id="agent-a", workspace="default")
 
 
 def _write(tools: MemoryTools, subject: str, workspace: str, content: str | None = None) -> int:

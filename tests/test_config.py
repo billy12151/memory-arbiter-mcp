@@ -17,6 +17,9 @@ from memory_arbiter.config import Settings, parse_bool
 from memory_arbiter.db import MemoryDB
 from memory_arbiter.models import SourceType
 from memory_arbiter.tools import MemoryTools
+from functools import partial
+
+from tests._helpers import make_tools as _base_make_tools
 
 
 def _sc(result):
@@ -37,44 +40,7 @@ def _relevance_floor_off(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("memory_arbiter.search.QUERY_RECALL_SCORE_FLOOR", -1.0)
 
 
-def make_tools(tmp_path: Path) -> MemoryTools:
-    settings = Settings(
-        db_path=tmp_path / "memory.sqlite3",
-        backup_jsonl=tmp_path / "backup.jsonl",
-        client="codex",
-        agent_id="agent-a",
-        workspace="repo-a",
-    )
-    return MemoryTools(settings=settings, db=MemoryDB(settings))
-
-
-def clear_config_env(monkeypatch) -> None:
-    for key in (
-        "MEMORY_ARBITER_CONFIG",
-        "MEMORY_ARBITER_DB_PATH",
-        "MEMORY_ARBITER_BACKUP_JSONL",
-        "MEMORY_ARBITER_POLICY",
-        "MEMORY_ARBITER_CLIENT",
-        "MEMORY_ARBITER_AGENT_ID",
-        "MEMORY_ARBITER_WORKSPACE",
-        "MEMORY_ARBITER_ENABLE_SQLITE_VEC",
-        "MEMORY_ARBITER_VEC_DIM",
-        "MEMORY_ARBITER_WORKSPACE_RECALL_ADMISSION",
-        "MEMORY_ARBITER_WORKSPACE_RECALL_CUTOFF",
-        "MEMORY_ARBITER_WORKSPACE_WEAK_VECTOR_WEIGHT",
-        "MEMORY_ARBITER_WORKSPACE_MIN_NAME_LEN",
-        "MEMORY_ARBITER_RECALL_POOL_CAP",
-        "MEMORY_ARBITER_CONTENT_LIKE_CAP",
-        "MEMORY_ARBITER_EMBEDDING_PROVIDER",
-        "MEMORY_ARBITER_EMBEDDING_MODEL_PATH",
-        "MEMORY_ARBITER_EMBEDDING_AUTO_QUERY",
-        "MEMORY_ARBITER_EMBEDDING_AUTO_WRITE",
-        "MEMORY_ARBITER_GGUF",
-        "MEMORY_ARBITER_TOOL_PROFILE",
-    ):
-        monkeypatch.delenv(key, raising=False)
-
-
+make_tools = partial(_base_make_tools, client="codex", agent_id="agent-a", workspace="repo-a")
 
 
 def _sc(result):
@@ -666,10 +632,9 @@ def test_product_memory_write_rejects_non_list_tags(tmp_path: Path) -> None:
 
 
 
-def test_tool_profile_env_is_no_longer_read(tmp_path: Path, monkeypatch) -> None:
+def test_tool_profile_env_is_no_longer_read(tmp_path: Path, monkeypatch, clear_config_env) -> None:
     # 0.15.0: tool_profile was dead configuration (the product surface is the
     # only surface); a stale env export must warn instead of silently nothing.
-    clear_config_env(monkeypatch)
     monkeypatch.setenv("MEMORY_ARBITER_TOOL_PROFILE", "legacy_full")
     settings = Settings.from_env()
     assert not hasattr(settings, "tool_profile")
@@ -680,8 +645,7 @@ def test_tool_profile_env_is_no_longer_read(tmp_path: Path, monkeypatch) -> None
 
 
 
-def test_config_file_overrides_env(tmp_path: Path, monkeypatch) -> None:
-    clear_config_env(monkeypatch)
+def test_config_file_overrides_env(tmp_path: Path, monkeypatch, clear_config_env) -> None:
     cfg_path = tmp_path / "config.json"
     cfg_db = tmp_path / "from-config.sqlite3"
     env_db = tmp_path / "from-env.sqlite3"
@@ -725,8 +689,7 @@ def test_config_file_overrides_env(tmp_path: Path, monkeypatch) -> None:
     assert "MEMORY_ARBITER_VEC_DIM" in joined and "no longer read" in joined
 
 
-def test_update_check_config_switch(tmp_path: Path, monkeypatch) -> None:
-    clear_config_env(monkeypatch)
+def test_update_check_config_switch(tmp_path: Path, monkeypatch, clear_config_env) -> None:
     cfg_path = tmp_path / "config.json"
     cfg_path.write_text(json.dumps({"update_check": {"enabled": False}}), encoding="utf-8")
     monkeypatch.setenv("MEMORY_ARBITER_CONFIG", str(cfg_path))
@@ -736,8 +699,7 @@ def test_update_check_config_switch(tmp_path: Path, monkeypatch) -> None:
     assert settings.update_check_enabled is False
 
 
-def test_update_check_bad_config_defaults_enabled(tmp_path: Path, monkeypatch) -> None:
-    clear_config_env(monkeypatch)
+def test_update_check_bad_config_defaults_enabled(tmp_path: Path, monkeypatch, clear_config_env) -> None:
     cfg_path = tmp_path / "config.json"
     cfg_path.write_text(json.dumps({"update_check": {"enabled": "maybe"}}), encoding="utf-8")
     monkeypatch.setenv("MEMORY_ARBITER_CONFIG", str(cfg_path))
@@ -748,13 +710,18 @@ def test_update_check_bad_config_defaults_enabled(tmp_path: Path, monkeypatch) -
     assert any("update_check.enabled" in warning for warning in settings.config_warnings)
 
 
-def test_notice_sync_wait_ms_parse_int_edges(tmp_path: Path, monkeypatch) -> None:
+def test_notice_sync_wait_ms_parse_int_edges(tmp_path: Path, monkeypatch, clear_config_env) -> None:
     """Adversarial round 2: semantic_conflict.notice_sync_wait_ms must never
     crash startup or silently mis-parse. bools are rejected (bool is an int
     subclass — True would become a 1 ms wait), Infinity (1e999) overflows
     int() and must fall back to the default instead of raising
     OverflowError, out-of-range ints clamp with a warning, and garbage
-    strings fall back to the default."""
+    strings fall back to the default.
+
+    (clear_config_env used to be re-invoked inside the case loop; the fixture
+    now clears once up front — equivalent here because cfg_path is loop-
+    invariant, each iteration rewrites the same file, and setenv overwrites
+    the same keys.)"""
     from memory_arbiter.constants import NOTICE_SYNC_WAIT_MS
 
     cases = [
@@ -770,7 +737,6 @@ def test_notice_sync_wait_ms_parse_int_edges(tmp_path: Path, monkeypatch) -> Non
         ("1500.7", 1500, False),
     ]
     for raw, expected, expect_warning in cases:
-        clear_config_env(monkeypatch)
         cfg_path = tmp_path / "config.json"
         cfg_path.write_text(
             '{"semantic_conflict": {"notice_sync_wait_ms": %s}}' % raw,
@@ -788,8 +754,7 @@ def test_notice_sync_wait_ms_parse_int_edges(tmp_path: Path, monkeypatch) -> Non
         assert warned is expect_warning, (raw, settings.config_warnings)
 
 
-def test_env_fallback_when_config_absent(tmp_path: Path, monkeypatch) -> None:
-    clear_config_env(monkeypatch)
+def test_env_fallback_when_config_absent(tmp_path: Path, monkeypatch, clear_config_env) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("MEMORY_ARBITER_DB_PATH", str(tmp_path / "env.sqlite3"))
     # 0.15.0: only launch-context env remains. The former vec/GGUF env knobs
@@ -813,10 +778,9 @@ def test_env_fallback_when_config_absent(tmp_path: Path, monkeypatch) -> None:
 
 def test_workspace_recall_cutoff_env_is_no_longer_read(
     tmp_path: Path, monkeypatch,
+    clear_config_env,
 ) -> None:
     # 0.15.0 froze workspace_recall_cutoff at its former default; the env knob
-    # is scanned and warned about instead of parsed.
-    clear_config_env(monkeypatch)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("MEMORY_ARBITER_WORKSPACE_RECALL_CUTOFF", "nan")
     settings = Settings.from_env()
@@ -827,8 +791,7 @@ def test_workspace_recall_cutoff_env_is_no_longer_read(
     )
 
 
-def test_config_file_parse_error_graceful(tmp_path: Path, monkeypatch) -> None:
-    clear_config_env(monkeypatch)
+def test_config_file_parse_error_graceful(tmp_path: Path, monkeypatch, clear_config_env) -> None:
     bad_cfg = tmp_path / "bad.json"
     bad_cfg.write_text("{ not json", encoding="utf-8")
     monkeypatch.setenv("MEMORY_ARBITER_CONFIG", str(bad_cfg))
@@ -840,8 +803,7 @@ def test_config_file_parse_error_graceful(tmp_path: Path, monkeypatch) -> None:
     assert any("JSON parse failed" in warning for warning in settings.config_warnings)
 
 
-def test_config_env_path_not_exist_fallback_xdg(tmp_path: Path, monkeypatch) -> None:
-    clear_config_env(monkeypatch)
+def test_config_env_path_not_exist_fallback_xdg(tmp_path: Path, monkeypatch, clear_config_env) -> None:
     home = tmp_path / "home"
     xdg_cfg = home / ".config" / "memory-arbiter" / "config.json"
     xdg_cfg.parent.mkdir(parents=True)
@@ -855,8 +817,7 @@ def test_config_env_path_not_exist_fallback_xdg(tmp_path: Path, monkeypatch) -> 
     assert any("does not exist" in warning for warning in settings.config_warnings)
 
 
-def test_bad_field_value_degrades_with_warning(tmp_path: Path, monkeypatch) -> None:
-    clear_config_env(monkeypatch)
+def test_bad_field_value_degrades_with_warning(tmp_path: Path, monkeypatch, clear_config_env) -> None:
     cfg_path = tmp_path / "config.json"
     cfg_path.write_text(
         json.dumps({"vec": {"enabled": "maybe", "dim": "abc"}, "embedding": {"auto_write": "??"}}),
@@ -888,9 +849,8 @@ def test_parse_bool_false_string_is_false() -> None:
 
 
 def test_embedding_model_path_without_provider_enables_embedding(
-    tmp_path: Path, monkeypatch,
+    tmp_path: Path, monkeypatch, clear_config_env,
 ) -> None:
-    clear_config_env(monkeypatch)
     cfg_path = tmp_path / "config.json"
     cfg_path.write_text(
         json.dumps({

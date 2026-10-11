@@ -17,12 +17,10 @@ from pathlib import Path
 from memory_arbiter.config import Settings, load_config_file
 from memory_arbiter.update_monitor import MAX_FETCH_BYTES, _default_fetcher
 
-from tests.test_config import clear_config_env
 
 
 class TestConfigRootTypeValidation:
-    def test_array_root_degrades_to_env_with_warning(self, tmp_path: Path, monkeypatch) -> None:
-        clear_config_env(monkeypatch)
+    def test_array_root_degrades_to_env_with_warning(self, tmp_path: Path, monkeypatch, clear_config_env) -> None:
         cfg = tmp_path / "config.json"
         cfg.write_text(json.dumps(["not", "an", "object"]), encoding="utf-8")
         monkeypatch.setenv("MEMORY_ARBITER_CONFIG", str(cfg))
@@ -36,8 +34,7 @@ class TestConfigRootTypeValidation:
             for warning in settings.config_warnings
         )
 
-    def test_string_root_degrades_to_env_with_warning(self, tmp_path: Path, monkeypatch) -> None:
-        clear_config_env(monkeypatch)
+    def test_string_root_degrades_to_env_with_warning(self, tmp_path: Path, monkeypatch, clear_config_env) -> None:
         cfg = tmp_path / "config.json"
         cfg.write_text('"oops"', encoding="utf-8")
         monkeypatch.setenv("MEMORY_ARBITER_CONFIG", str(cfg))

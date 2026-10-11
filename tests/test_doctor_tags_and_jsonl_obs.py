@@ -19,12 +19,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from memory_arbiter.config import Settings
 from memory_arbiter.tools import MemoryTools
-
-
-def make_tools(tmp_path: Path) -> MemoryTools:
-    return MemoryTools(Settings(db_path=tmp_path / "m.db", backup_jsonl=tmp_path / "b.jsonl"))
+from tests._helpers import make_tools
 
 
 def _find(doc: dict, check_id: str) -> dict | None:

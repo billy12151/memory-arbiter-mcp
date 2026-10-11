@@ -1,9 +1,8 @@
 import math
 from pathlib import Path
 
-from memory_arbiter.config import Settings
-from memory_arbiter.db import MemoryDB
 from memory_arbiter.tools import MemoryTools
+from tests._helpers import make_tools
 from memory_arbiter.validation import (
     MAX_APPLY_PLAN_ITEMS,
     MAX_CONTENT_BYTES,
@@ -14,11 +13,6 @@ from memory_arbiter.validation import (
     PRODUCT_FIELD_REGISTRY,
     validate_product_payload,
 )
-
-
-def make_tools(tmp_path: Path) -> MemoryTools:
-    settings = Settings(db_path=tmp_path / "m.sqlite3", backup_jsonl=tmp_path / "b.jsonl")
-    return MemoryTools(settings, MemoryDB(settings))
 
 
 def test_remember_requires_content_and_subject(tmp_path: Path) -> None:

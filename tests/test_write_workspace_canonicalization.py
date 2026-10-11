@@ -22,11 +22,7 @@ sys.path.insert(0, str(REPO))
 from memory_arbiter.config import Settings  # noqa: E402
 from memory_arbiter.db import MemoryDB  # noqa: E402
 from memory_arbiter.tools import MemoryTools  # noqa: E402
-
-
-def make_tools(tmp_path: Path) -> MemoryTools:
-    settings = Settings(db_path=tmp_path / "m.sqlite3", backup_jsonl=tmp_path / "b.jsonl")
-    return MemoryTools(settings, db=MemoryDB(settings))
+from tests._helpers import make_tools  # noqa: E402
 
 
 def _rows(tools: MemoryTools) -> list[tuple]:

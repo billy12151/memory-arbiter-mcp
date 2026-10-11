@@ -52,6 +52,7 @@ from memory_arbiter.config import Settings
 from memory_arbiter.db import MemoryDB, _normalize_alias_key
 from memory_arbiter.models import ConflictMember, ConflictValueGroup, MemoryStatus
 from memory_arbiter.tools import MemoryTools
+from tests._helpers import record_conflict
 
 NOW = "2026-01-01T00:00:00+00:00"
 
@@ -129,30 +130,6 @@ def write(tools: MemoryTools, workspace: str, content: str | None = None) -> int
         content=content, subject="workspace", workspace=workspace,
         source_type="agent_generated",
     )["data"]["id"])
-
-
-def record_conflict(tools: MemoryTools, workspace: str, left: int, right: int) -> int:
-    members = [
-        ConflictMember(
-            memory_id=memory_id, version=1, attribute_raw="database", value_raw=value,
-            normalized_attribute="database", normalized_value=value,
-            evidence_quote=value, evidence_span=(0, len(value)), content_hash=char * 64,
-            direction="a_to_b", prompt_version="p1", detector_version="d1",
-        )
-        for memory_id, value, char in ((left, "mysql", "a"), (right, "sqlite", "b"))
-    ]
-    outcome = tools.db.record_conflict_group(
-        workspace_canonical=workspace,
-        slot_key={"entity": "svc", "attribute": "database", "scope": "production"},
-        members=members,
-        value_groups=[
-            ConflictValueGroup("mysql", "MySQL", (f"{left}@1",)),
-            ConflictValueGroup("sqlite", "SQLite", (f"{right}@1",)),
-        ],
-        detection_reason="different", source="scan", detector_version="d1",
-    )
-    assert outcome["outcome"] == "inserted"
-    return int(outcome["conflict_id"])
 
 
 def memory_canonicals(tools: MemoryTools) -> dict[int, str]:

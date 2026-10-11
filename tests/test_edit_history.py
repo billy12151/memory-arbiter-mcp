@@ -16,41 +16,10 @@ from memory_arbiter.db import MemoryDB
 from memory_arbiter.embedder import EmbedResult
 from memory_arbiter.models import SourceType
 from memory_arbiter.tools import MemoryTools
+from functools import partial
+from tests._helpers import make_tools as _base_make_tools
 
-
-def make_tools(tmp_path: Path) -> MemoryTools:
-    settings = Settings(
-        db_path=tmp_path / "memory.sqlite3",
-        backup_jsonl=tmp_path / "backup.jsonl",
-        client="codex",
-        agent_id="agent-a",
-        workspace="repo-a",
-    )
-    return MemoryTools(settings=settings, db=MemoryDB(settings))
-
-
-def clear_config_env(monkeypatch) -> None:
-    for key in (
-        "MEMORY_ARBITER_CONFIG",
-        "MEMORY_ARBITER_DB_PATH",
-        "MEMORY_ARBITER_BACKUP_JSONL",
-        "MEMORY_ARBITER_POLICY",
-        "MEMORY_ARBITER_CLIENT",
-        "MEMORY_ARBITER_AGENT_ID",
-        "MEMORY_ARBITER_WORKSPACE",
-        "MEMORY_ARBITER_ENABLE_SQLITE_VEC",
-        "MEMORY_ARBITER_VEC_DIM",
-        "MEMORY_ARBITER_RECALL_POOL_CAP",
-        "MEMORY_ARBITER_CONTENT_LIKE_CAP",
-        "MEMORY_ARBITER_EMBEDDING_PROVIDER",
-        "MEMORY_ARBITER_EMBEDDING_MODEL_PATH",
-        "MEMORY_ARBITER_EMBEDDING_AUTO_QUERY",
-        "MEMORY_ARBITER_EMBEDDING_AUTO_WRITE",
-        "MEMORY_ARBITER_GGUF",
-        "MEMORY_ARBITER_TOOL_PROFILE",
-    ):
-        monkeypatch.delenv(key, raising=False)
-
+make_tools = partial(_base_make_tools, client="codex", agent_id="agent-a", workspace="repo-a")
 
 
 def test_edit_full_replacement_stores_history_and_updates_fts(tmp_path: Path) -> None:

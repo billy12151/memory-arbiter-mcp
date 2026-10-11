@@ -12,9 +12,10 @@ from pathlib import Path
 
 from memory_arbiter.config import Settings
 from memory_arbiter.config_registry import CONFIG_DESCRIPTORS, grouped_descriptors
-from memory_arbiter.db import MemoryDB
 from memory_arbiter.tokens import estimate_tokens, meter_payloads
 from memory_arbiter.tools import MemoryTools
+from functools import partial
+from tests._helpers import make_tools as _base_make_tools
 
 
 
@@ -26,14 +27,7 @@ def _relevance_floor_off(monkeypatch: pytest.MonkeyPatch) -> None:
     # Disable it here so weak fixtures stay recallable.
     monkeypatch.setattr("memory_arbiter.search.QUERY_RECALL_SCORE_FLOOR", -1.0)
 
-
-def make_tools(tmp_path: Path, *, include_size: bool = True) -> MemoryTools:
-    settings = Settings(
-        db_path=tmp_path / "m.sqlite3",
-        backup_jsonl=tmp_path / "b.jsonl",
-        include_size=include_size,
-    )
-    return MemoryTools(settings, MemoryDB(settings))
+make_tools = partial(_base_make_tools, include_size=True)
 
 
 def _write_memory(tools: MemoryTools, content: str, *, subject: str = "s") -> int:

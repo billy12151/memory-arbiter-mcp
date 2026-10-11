@@ -20,11 +20,10 @@ from pathlib import Path
 
 from memory_arbiter.config import Settings
 from memory_arbiter.tools import MemoryTools
+from functools import partial
+from tests._helpers import make_tools as _base_make_tools
 
-
-def make_tools(tmp_path: Path, workspace: str = "Old") -> MemoryTools:
-    return MemoryTools(Settings(db_path=tmp_path / "m.db", backup_jsonl=tmp_path / "b.jsonl",
-                                workspace=workspace))
+make_tools = partial(_base_make_tools, workspace="Old")
 
 
 def _audit_rows(tools: MemoryTools, action: str) -> list[dict]:

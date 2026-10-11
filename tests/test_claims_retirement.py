@@ -18,6 +18,16 @@ import pytest
 from memory_arbiter.config import Settings
 from memory_arbiter.db import MemoryDB
 from memory_arbiter.tools import MemoryTools
+from tests._helpers import make_tools as _base_make_tools
+
+
+def _make_tools(tmp_path: Path) -> MemoryTools:
+    # Thin def, not a partial: these tests hardcode the db filename
+    # tmp_path / "memory.sqlite3" for their legacy-schema fixtures.
+    return _base_make_tools(
+        tmp_path, client="codex", agent_id="agent-a", workspace="repo-a",
+        db_path=tmp_path / "memory.sqlite3",
+    )
 
 
 def _table_exists(db_path: Path, table: str) -> bool:
@@ -29,18 +39,6 @@ def _table_exists(db_path: Path, table: str) -> bool:
         return row is not None
     finally:
         conn.close()
-
-
-def _make_tools(tmp_path: Path) -> MemoryTools:
-    settings = Settings(
-        db_path=tmp_path / "memory.sqlite3",
-        backup_jsonl=tmp_path / "backup.jsonl",
-        client="codex",
-        agent_id="agent-a",
-        workspace="repo-a",
-    )
-    return MemoryTools(settings=settings, db=MemoryDB(settings))
-
 
 def test_fresh_db_has_no_claims_tables(tmp_path: Path) -> None:
     tools = _make_tools(tmp_path)

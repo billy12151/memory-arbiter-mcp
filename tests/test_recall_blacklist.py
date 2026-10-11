@@ -24,17 +24,10 @@ from memory_arbiter.recall_blacklist import (
 )
 from memory_arbiter.search import search_memories
 from memory_arbiter.tools import MemoryTools
+from functools import partial
+from tests._helpers import make_tools as _base_make_tools
 
-
-def make_tools(tmp_path: Path) -> MemoryTools:
-    settings = Settings(
-        db_path=tmp_path / "bl.sqlite3",
-        backup_jsonl=tmp_path / "bl.jsonl",
-        client="zcode",
-        agent_id="agent-a",
-        workspace="default",
-    )
-    return MemoryTools(settings=settings, db=MemoryDB(settings))
+make_tools = partial(_base_make_tools, client="zcode", agent_id="agent-a", workspace="default")
 
 
 def _write(tools: MemoryTools, content: str, workspace: str, subject: str,
