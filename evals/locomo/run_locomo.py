@@ -30,7 +30,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
 import sys
 import time
 from pathlib import Path
@@ -409,7 +408,13 @@ def drop_superseded(tools, hits: list[dict], groups: dict[int, list[int]]) -> li
         for m in members:
             if m in ids:
                 info[m] = hits[[h.get("id") for h in hits].index(m)]
-            elif m not in additions:
+            elif m in additions:
+                # R3 盘点 P2: a member already fetched for an earlier group
+                # must still join THIS group's newest race — the bare
+                # "elif m not in additions" dropped cached members from the
+                # competition and left group 2 ranking a stale version.
+                info[m] = additions[m]
+            else:
                 full = tools.memory(action="read", data={"memory_id": m})
                 if full.get("ok"):
                     d = full.get("data", {})

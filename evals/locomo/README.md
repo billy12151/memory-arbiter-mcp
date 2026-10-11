@@ -50,6 +50,11 @@ source evals/locomo/env.local.sh
 .venv/bin/python evals/locomo/run_locomo.py --conv 0 --limit 5
 # full run
 .venv/bin/python evals/locomo/run_locomo.py --conv all
+# detector replay arms: fresh dir suffix + optional checkpoint override
+#   --v58t2  = v58_ep3_fp16 @0.80 + possible gate 0.70 (the 0.17.2 production pair)
+#   --v3det  = v60b_ep4_fp16 (third-generation detector comparison)
+#   MEMA_EVAL_MDEBERTA_CKPT=/path/to/ckpt.pt overrides semantic_conflict.mdeberta_ckpt
+.venv/bin/python evals/locomo/run_locomo.py --conv all --v58t2
 ```
 
 Results land in `evals/locomo/run/summary.json`.

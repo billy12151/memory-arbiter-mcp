@@ -646,6 +646,7 @@ def run_conflict_suite(
                     "judge_budget",
                     "model_clear",
                     "model_conflict_below_threshold",
+                    "model_possible_below_gate",
                     "model_possible_count",
                     "direct_verdicts",
                 )

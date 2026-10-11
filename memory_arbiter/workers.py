@@ -165,6 +165,9 @@ class SemanticConflictWorker:
                 "dropped_queue_full": self._dropped_queue_full,
                 "shutdown": self._shutdown,
                 "last_error": self._last_error,
+                # 0.17.2 门在 idle drain 通道的观测计数（R3 盘点 P2）——
+                # 键固定预置，无运行期 resize，跨线程快照安全。
+                "backlog_drain": dict(self._tools._evidence.drain_stats),
             }
 
     def pending_job_deadline(self, timeout_seconds: float) -> float | None:

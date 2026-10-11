@@ -54,6 +54,14 @@ class EvidencePipeline(_EvidencePhases, _EvidenceLand):
         self._tools = tools
         self.db = tools.db
         self.settings = tools.settings
+        # 0.17.2 门在 drain 通道的观测计数（R3 盘点 P2）：被门拦下的对
+        # complete 出队后不留痕，此处累计供 worker status 上报。键固定
+        # 预置——status() 从其他线程 dict() 快照，避免运行期 resize。
+        self.drain_stats: "dict[str, int]" = {
+            "model_clear": 0,
+            "model_conflict_below_threshold": 0,
+            "model_possible_below_gate": 0,
+        }
 
 
     @property
@@ -196,6 +204,15 @@ class EvidencePipeline(_EvidencePhases, _EvidenceLand):
                     # 留队重试（owner A-5）：下个 backend-bearing pass 再来
                     # （留队靠「不调 complete」实现——entry 不出队即重试）
                     continue
+                # 0.17.2 门 drain 观测（与写时 cross 腿 ctx 同名同义，回执/
+                # status 两侧可比）：clear/被门拦下的对 complete 后无处可见，
+                # 只能在此计数。
+                if outcome == "clear":
+                    self.drain_stats["model_clear"] += 1
+                elif outcome == "below_threshold":
+                    self.drain_stats["model_conflict_below_threshold"] += 1
+                elif outcome == "possible_below_gate":
+                    self.drain_stats["model_possible_below_gate"] += 1
                 left, right = entry["left"], entry["right"]
                 left_text, right_text = entry["left_text"], entry["right_text"]
                 decision = entry["decision"]

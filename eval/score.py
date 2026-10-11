@@ -490,6 +490,9 @@ def score_conflict_attribution(raw: dict) -> dict[str, Any] | None:
                 total += int(block.get(key) or 0)
         return total
 
+    def _receipt_top_sum(rows: list[dict], key: str) -> int:
+        return sum(int((r.get("_receipt") or {}).get(key) or 0) for r in rows)
+
     return {
         "a_channel_identified": sum(1 for r in sent if r["sync"] or r["async"]),
         "a_direct_verdicts_total": _receipt_sum(sent, "direct_verdicts"),
@@ -502,6 +505,10 @@ def score_conflict_attribution(raw: dict) -> dict[str, Any] | None:
             1 for r in clm if r.get("channel") == "C" and (r["sync"] or r["async"])
         ),
         "channel_c_qwen_total": _receipt_sum(clm, "channel_c"),
+        # 0.17.2 possible 灰区门（R3 盘点 P2）：门后重跑时 no_conflict 未命中
+        # 须能区分「模型 clear」与「被门拦下」，否则归因断层。旧存档 raw 无
+        # 该回执键 → 按 0 计（纯函数兼容）。
+        "model_possible_below_gate_total": _receipt_top_sum(sent, "model_possible_below_gate"),
     }
 
 
