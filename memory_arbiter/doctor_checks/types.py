@@ -2,7 +2,6 @@
 from __future__ import annotations
 import json
 import sqlite3
-from collections import deque
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -12,6 +11,7 @@ from ..config import Settings
 from ..constants import (
     is_default_workspace_term,
 )
+from ..db.audit import last_completed_scan_entry
 from ..degrade import DegradeState
 
 
@@ -129,32 +129,9 @@ def _safe_count(conn: sqlite3.Connection, source: str, where: str | None = None)
 def _last_completed_scan(settings: Settings) -> dict[str, Any] | None:
     """Newest completed entry of scan_log.jsonl (file-level, doctor-local).
 
-    Mirrors AuditStore.scan_log_last_completed's tail-read selection so the
-    notice trigger and the doctor finding agree on what counts as scan activity.
-    """
-    path = Path(settings.db_path).parent / "scan_log.jsonl"
-    if not path.exists():
-        return None
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            # Tail-read the last one or two lines so a trailing newline does
-            # not hide the final record.
-            last_lines = deque(fh, maxlen=2)
-        for line in reversed(last_lines):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                record = json.loads(line)
-            except (TypeError, ValueError):
-                # A torn trailing line (crash mid-append) must not hide
-                # the valid completed record before it.
-                continue
-            if isinstance(record, dict) and record.get("status") == "completed":
-                return record
-    except OSError:
-        return None
-    return None
+    Delegates to db.audit.last_completed_scan_entry so the notice trigger and
+    the doctor finding share one tail-read implementation (reuse batch C3)."""
+    return last_completed_scan_entry(Path(settings.db_path).parent / "scan_log.jsonl")
 
 
 @dataclass

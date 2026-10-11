@@ -14,6 +14,34 @@ if TYPE_CHECKING:
     from .core import MemoryDB
 
 
+def last_completed_scan_entry(path: Path) -> dict[str, Any] | None:
+    """Newest completed entry of a scan_log.jsonl (reuse batch C3, 2026-10-11).
+
+    Single source shared by the notice trigger (AuditStore) and doctor's
+    finding (doctor_checks.types) so both agree on what counts as scan
+    activity. Tail-reads the last one or two lines so a trailing newline does
+    not hide the final record; a torn trailing line (crash mid-append) must
+    not hide the valid completed record before it."""
+    if not path.exists():
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            last_lines = deque(fh, maxlen=2)
+        for line in reversed(last_lines):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except (ValueError, TypeError):
+                continue
+            if isinstance(rec, dict) and rec.get("status") == "completed":
+                return rec
+    except OSError:
+        return None
+    return None
+
+
 def _row_to_dict(row: Any) -> dict[str, Any]:
     data = dict(row)
     for key in ("tags", "metadata", "structured_details"):
@@ -225,29 +253,7 @@ class AuditStore:
             pass
 
     def scan_log_last_completed(self) -> dict[str, Any] | None:
-        path = self.scan_log_path
-        if not path.exists():
-            return None
-        try:
-            with open(path, "r", encoding="utf-8") as fh:
-                # Tail-read the last one or two lines so a trailing newline does
-                # not hide the final record.
-                last_lines = deque(fh, maxlen=2)
-            for line in reversed(last_lines):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except (ValueError, TypeError):
-                    # A torn trailing line (crash mid-append) must not hide
-                    # the valid completed record before it.
-                    continue
-                if isinstance(rec, dict) and rec.get("status") == "completed":
-                    return rec
-        except OSError:
-            return None
-        return None
+        return last_completed_scan_entry(self.scan_log_path)
 
     def audit_summary(self) -> dict[str, Any]:
         db = self._db

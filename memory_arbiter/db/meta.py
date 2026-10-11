@@ -116,6 +116,41 @@ class MetaStore:
     SCAN_PIPELINE_STATE_KEY = "scan_pipeline_state"
     SCAN_EPOCH_ARM_KEY = "scan_epoch_armed"
 
+    def _json_state(self, key: str) -> dict[str, Any] | None:
+        """Shared getter body for the scan_*_state family (reuse batch C2,
+        2026-10-11): read one migration_state row and json-decode to a dict."""
+        if not self._db._db_available:
+            return None
+        with self._db.connection() as conn:
+            raw = conn.execute(
+                "SELECT value FROM migration_state WHERE key=?",
+                (key,),
+            ).fetchone()
+        if raw is None:
+            return None
+        try:
+            state = json.loads(str(raw[0]))
+        except (TypeError, ValueError):
+            return None
+        return state if isinstance(state, dict) else None
+
+    def _record_json_state(self, key: str, payload: dict[str, Any]) -> bool:
+        """Shared UPSERT body for the record_scan_* family (reuse batch C2).
+
+        Self-transactional: NOT usable for read-modify-write flows that must
+        stay inside one transaction (record_scan_page_progress keeps its own
+        write_transaction)."""
+        if not self._db._db_available or not self._db.state.sqlite_writable:
+            return False
+        with self._db.write_transaction() as conn:
+            conn.execute(
+                """INSERT INTO migration_state(key,value,updated_at)
+                   VALUES(?,?,CURRENT_TIMESTAMP)
+                   ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP""",
+                (key, json.dumps(payload, ensure_ascii=False)),
+            )
+        return True
+
     def scan_epoch_arm(self) -> dict[str, Any] | None:
         """0.16.0 detector-epoch arm record (plan §6⑪/commit 8).
 
@@ -124,34 +159,12 @@ class MetaStore:
         one; consumed by doctor (finding with reason) and the first-call
         side-channel notice (one-shot until the full round completes).
         """
-        if not self._db._db_available:
-            return None
-        with self._db.connection() as conn:
-            raw = conn.execute(
-                "SELECT value FROM migration_state WHERE key=?",
-                (self.SCAN_EPOCH_ARM_KEY,),
-            ).fetchone()
-        if raw is None:
-            return None
-        try:
-            state = json.loads(str(raw[0]))
-        except (TypeError, ValueError):
-            return None
-        return state if isinstance(state, dict) else None
+        return self._json_state(self.SCAN_EPOCH_ARM_KEY)
 
     def record_scan_epoch_arm(self, *, previous: str | None, current: str, reason: str) -> bool:
-        if not self._db._db_available or not self._db.state.sqlite_writable:
-            return False
-        with self._db.write_transaction() as conn:
-            conn.execute(
-                """INSERT INTO migration_state(key,value,updated_at)
-                   VALUES(?,?,CURRENT_TIMESTAMP)
-                   ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP""",
-                (self.SCAN_EPOCH_ARM_KEY, json.dumps({
-                    "from": previous, "to": current, "at": utc_now_iso(), "reason": reason,
-                }, ensure_ascii=False)),
-            )
-        return True
+        return self._record_json_state(self.SCAN_EPOCH_ARM_KEY, {
+            "from": previous, "to": current, "at": utc_now_iso(), "reason": reason,
+        })
 
     def scan_pipeline_state(self) -> dict[str, Any] | None:
         """0.16.0 conflict-scan pipeline round state (breakpoint resume).
@@ -160,33 +173,10 @@ class MetaStore:
         started_at, updated_at}. A kick resumes from ``last_id``; a detector
         mismatch restarts the round (suppression/identity semantics changed).
         """
-        if not self._db._db_available:
-            return None
-        with self._db.connection() as conn:
-            raw = conn.execute(
-                "SELECT value FROM migration_state WHERE key=?",
-                (self.SCAN_PIPELINE_STATE_KEY,),
-            ).fetchone()
-        if raw is None:
-            return None
-        try:
-            state = json.loads(str(raw[0]))
-        except (TypeError, ValueError):
-            return None
-        return state if isinstance(state, dict) else None
+        return self._json_state(self.SCAN_PIPELINE_STATE_KEY)
 
     def record_scan_pipeline_state(self, payload: dict[str, Any]) -> bool:
-        if not self._db._db_available or not self._db.state.sqlite_writable:
-            return False
-        with self._db.write_transaction() as conn:
-            conn.execute(
-                """INSERT INTO migration_state(key,value,updated_at)
-                   VALUES(?,?,CURRENT_TIMESTAMP)
-                   ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP""",
-                (self.SCAN_PIPELINE_STATE_KEY, json.dumps(payload, ensure_ascii=False)),
-            )
-        return True
-
+        return self._record_json_state(self.SCAN_PIPELINE_STATE_KEY, payload)
 
     def scan_page_progress_state(self) -> dict[str, Any] | None:
         """C5 routine-scan pacing record (per-workspace accounting).
@@ -197,20 +187,7 @@ class MetaStore:
         this kv is written per successful page of the SCHEDULED scan and
         read by doctor's broken-chain alarm.
         """
-        if not self._db._db_available:
-            return None
-        with self._db.connection() as conn:
-            raw = conn.execute(
-                "SELECT value FROM migration_state WHERE key=?",
-                (self.SCAN_PAGE_PROGRESS_KEY,),
-            ).fetchone()
-        if raw is None:
-            return None
-        try:
-            state = json.loads(str(raw[0]))
-        except (TypeError, ValueError):
-            return None
-        return state if isinstance(state, dict) else None
+        return self._json_state(self.SCAN_PAGE_PROGRESS_KEY)
 
     def record_scan_page_progress(
         self,
@@ -225,7 +202,10 @@ class MetaStore:
         A new round (after=0) resets the group tallies; otherwise the page's
         per-bucket counts merge into the running record. Terminal pages
         (next_anchor null) flip complete=true.
-        """
+
+        Note: the getter side is consolidated into _json_state; this writer
+        deliberately does NOT use _record_json_state — it is a same-transaction
+        read-modify-write (merge into running tallies)."""
         if not self._db._db_available or not self._db.state.sqlite_writable:
             return False
         now = utc_now_iso()
