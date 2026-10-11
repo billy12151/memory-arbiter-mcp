@@ -455,10 +455,14 @@ class _CoreDelegatesMixin:
         remove_tags: list[str] | None = None,
         authorized: bool = False,
         *,
+        expected_version: int | None = None,
+        expected_content_hash: str | None = None,
         conn: sqlite3.Connection | None = None,
     ) -> dict[str, Any]:
         return self.memories.update_tags_low_side_effect(
-            memory_id, add_tags, remove_tags, authorized, conn=conn,
+            memory_id, add_tags, remove_tags, authorized,
+            expected_version=expected_version,
+            expected_content_hash=expected_content_hash, conn=conn,
         )
 
     def update_metadata_fields_low_side_effect(

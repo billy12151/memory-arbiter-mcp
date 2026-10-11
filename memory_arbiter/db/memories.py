@@ -466,15 +466,15 @@ class MemoriesStore(_MemVectorsMixin, _MemEditMixin):
         memory_id = int(memory_id)
         if not self._db_available:
             return 0
+        target = 1 if member else 0
         with self.write_transaction() as conn:
-            row = conn.execute(
-                "SELECT status FROM memories WHERE id = ?", (memory_id,)
-            ).fetchone()
-            if row is None or str(row["status"]) != "active":
-                return 0
+            # Single guarded UPDATE (#1051 单查询纪律)：行不存在/非 active/
+            # 已是目标值三种情形 rowcount 同为 0——与旧两语句形态语义逐项
+            # 等价（含 no-op 不审计）。
             cur = conn.execute(
-                "UPDATE memories SET kb_member = ? WHERE id = ? AND kb_member != ?",
-                (1 if member else 0, memory_id, 1 if member else 0),
+                "UPDATE memories SET kb_member = ? "
+                "WHERE id = ? AND status = 'active' AND kb_member != ?",
+                (target, memory_id, target),
             )
             if cur.rowcount:
                 # no-op flips (same value again) are not governance events —

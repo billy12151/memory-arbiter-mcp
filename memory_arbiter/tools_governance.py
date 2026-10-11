@@ -146,6 +146,7 @@ class _ToolsGovern:
                     "WHERE kind='workspace' AND status='pending'"
                 ).fetchall()
                 stale_ids: list[int] = []
+                probes: list[tuple[int, int, str]] = []  # (queue row id, memory_id, pinned ws)
                 for row in rows:
                     try:
                         memory_id = int(
@@ -159,13 +160,25 @@ class _ToolsGovern:
                         continue
                     if not pinned:
                         continue
-                    current = conn.execute(
-                        "SELECT COALESCE(NULLIF(workspace_canonical,''),workspace) AS ws "
-                        "FROM memories WHERE id=? AND status='active'",
-                        (memory_id,),
-                    ).fetchone()
+                    probes.append((int(row["id"]), memory_id, pinned))
+                # One IN fetch instead of a per-row EXISTS probe (#1051 单查询
+                # 纪律，反模式#5)；active 过滤保留在 SQL。
+                probe_rows: dict[int, Any] = {}
+                if probes:
+                    ids = sorted({mid for _, mid, _ in probes})
+                    placeholders = ",".join("?" for _ in ids)
+                    probe_rows = {
+                        int(r["id"]): r
+                        for r in conn.execute(
+                            "SELECT id,COALESCE(NULLIF(workspace_canonical,''),workspace) AS ws "
+                            f"FROM memories WHERE id IN ({placeholders}) AND status='active'",
+                            ids,
+                        ).fetchall()
+                    }
+                for row_id, memory_id, pinned in probes:
+                    current = probe_rows.get(memory_id)
                     if current is None or str(current["ws"] or "").strip() != pinned:
-                        stale_ids.append(int(row["id"]))
+                        stale_ids.append(row_id)
             if not stale_ids:
                 return
             now = utc_now_iso()

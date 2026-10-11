@@ -212,12 +212,21 @@ class SemanticNoticeStore:
         checks: list[dict[str, Any]] = []
         fresh = True
         expected_workspace = str(notice.get("workspace_canonical") or "").strip()
-        for member in notice.get("member_versions") or []:
-            row = conn.execute(
-                "SELECT version,status,COALESCE(NULLIF(workspace_canonical,''),workspace) AS workspace "
-                "FROM memories WHERE id=?",
-                (int(member["memory_id"]),),
-            ).fetchone()
+        members = notice.get("member_versions") or []
+        member_ids = [int(member["memory_id"]) for member in members]
+        member_rows: dict[int, Any] = {}
+        if member_ids:
+            placeholders = ",".join("?" for _ in member_ids)
+            member_rows = {
+                int(row["id"]): row
+                for row in conn.execute(
+                    "SELECT id,version,status,COALESCE(NULLIF(workspace_canonical,''),workspace) AS workspace "
+                    f"FROM memories WHERE id IN ({placeholders})",
+                    member_ids,
+                ).fetchall()
+            }
+        for member in members:
+            row = member_rows.get(int(member["memory_id"]))
             actual_workspace = str(row["workspace"] or "").strip() if row else None
             ok = bool(
                 row and row["status"] == "active"
@@ -270,12 +279,20 @@ class SemanticNoticeStore:
         members = notice.get("member_versions") or []
         if not allowed or not members:
             return False
+        member_ids = [int(member["memory_id"]) for member in members]
+        member_rows: dict[int, Any] = {}
+        if member_ids:
+            placeholders = ",".join("?" for _ in member_ids)
+            member_rows = {
+                int(row["id"]): row
+                for row in conn.execute(
+                    "SELECT id,COALESCE(NULLIF(workspace_canonical,''),workspace) AS workspace "
+                    f"FROM memories WHERE id IN ({placeholders})",
+                    member_ids,
+                ).fetchall()
+            }
         for member in members:
-            row = conn.execute(
-                "SELECT COALESCE(NULLIF(workspace_canonical,''),workspace) AS workspace "
-                "FROM memories WHERE id=?",
-                (int(member["memory_id"]),),
-            ).fetchone()
+            row = member_rows.get(int(member["memory_id"]))
             if row is None or str(row["workspace"] or "").strip() not in allowed:
                 return False
         return True

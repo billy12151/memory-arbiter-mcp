@@ -159,25 +159,23 @@ class _WsVectorsMixin:
                 vectors[name] = embedding
             with self.write_transaction() as conn:
                 current = [
-                    str(row["name"])
+                    (int(row["id"]), str(row["name"]))
                     for row in conn.execute(
-                        "SELECT name FROM workspace_canonicals ORDER BY id"
+                        "SELECT id,name FROM workspace_canonicals ORDER BY id"
                     )
                     if not is_default_workspace_term(str(row["name"] or ""))
                 ]
-                if current != names:
+                if [name for _, name in current] != names:
                     return {"ok": False, "error": "workspace_registry_changed"}
                 conn.execute("DELETE FROM workspace_canonicals_vec")
-                for name in names:
-                    row = conn.execute(
-                        "SELECT id FROM workspace_canonicals WHERE name=?", (name,),
-                    ).fetchone()
-                    if row is None:
-                        raise sqlite3.IntegrityError("workspace canonical disappeared")
-                    conn.execute(
-                        "INSERT INTO workspace_canonicals_vec(id,embedding) VALUES(?,?)",
-                        (int(row["id"]), json.dumps(vectors[name])),
-                    )
+                # Registry unchanged within this transaction ⇒ every name has
+                # its id from the read above — one executemany instead of a
+                # SELECT+INSERT per name (#1051 单查询纪律)。
+                ids_by_name = {name: row_id for row_id, name in current}
+                conn.executemany(
+                    "INSERT INTO workspace_canonicals_vec(id,embedding) VALUES(?,?)",
+                    [(ids_by_name[name], json.dumps(vectors[name])) for name in names],
+                )
                 conn.execute(
                     "INSERT INTO _vec_index_meta(key,value) VALUES("
                     "'workspace_rebuild_space_id',?) ON CONFLICT(key) DO UPDATE "

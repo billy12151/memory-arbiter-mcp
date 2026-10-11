@@ -172,6 +172,8 @@ class _MemEditMixin:
         remove_tags: list[str] | None = None,
         authorized: bool = False,
         *,
+        expected_version: int | None = None,
+        expected_content_hash: str | None = None,
         conn: sqlite3.Connection | None = None,
     ) -> dict[str, Any]:
         """v0.7.6: low-side-effect tag-only update.
@@ -184,12 +186,19 @@ class _MemEditMixin:
         Uses ``write_transaction()`` (BEGIN IMMEDIATE) so the re-read +
         protection check + writes share the write lock (TOCTOU-safe).
 
+        Optional CAS pins (same semantics as the content path): the row is
+        re-read inside the transaction and a version/hash mismatch refuses
+        the edit — a pin the caller attached is honored, never dropped
+        (R3 盘点 P2: the old fast path silently ignored both).
+
         Returns an outcome dict:
           ``updated``       — tags changed, FTS re-synced.
           ``no_change``     — add/remove yielded no difference; zero writes.
           ``not_found``     — memory_id absent.
           ``not_active``    — superseded/deleted.
           ``forbidden``     — protected and not authorized.
+          ``stale_edit``    — CAS pin mismatch (reason: version_mismatch /
+                              content_hash_mismatch); zero writes.
           ``unavailable``   — DB not writable.
           ``error``         — sqlite3.Error mid-transaction; fully rolled back.
         """
@@ -197,6 +206,8 @@ class _MemEditMixin:
             return self.update_tags_low_side_effect_on_conn(
                 conn, memory_id, add_tags=add_tags,
                 remove_tags=remove_tags, authorized=authorized,
+                expected_version=expected_version,
+                expected_content_hash=expected_content_hash,
             )
         if not self._db_available or not self.state.sqlite_writable:
             return {"outcome": "unavailable", "memory_id": memory_id}
@@ -205,6 +216,8 @@ class _MemEditMixin:
                 return self.update_tags_low_side_effect_on_conn(
                     conn, memory_id, add_tags=add_tags,
                     remove_tags=remove_tags, authorized=authorized,
+                    expected_version=expected_version,
+                    expected_content_hash=expected_content_hash,
                 )
         except sqlite3.Error:
             return {"outcome": "error", "memory_id": memory_id}
@@ -216,6 +229,9 @@ class _MemEditMixin:
         add_tags: list[str] | None = None,
         remove_tags: list[str] | None = None,
         authorized: bool = False,
+        *,
+        expected_version: int | None = None,
+        expected_content_hash: str | None = None,
     ) -> dict[str, Any]:
         """Update tags using a caller-owned write transaction."""
         current = self._fetch_memory(conn, memory_id)
@@ -242,6 +258,23 @@ class _MemEditMixin:
             return {
                 "outcome": "forbidden", "memory_id": memory_id,
                 "protection_level": protection, "source_type": source_type,
+            }
+        # CAS pins validated against the re-read row, before any write —
+        # same order as edit_memory_intent (forbidden → version → hash).
+        old_version = int(current.get("version") or 1)
+        if expected_version is not None and old_version != int(expected_version):
+            return {
+                "outcome": "stale_edit", "memory_id": memory_id,
+                "reason": "version_mismatch", "current_version": old_version,
+                "expected_version": int(expected_version),
+            }
+        current_hash = current.get("content_sha") or hashlib.sha256(
+            (current.get("content") or "").encode("utf-8")
+        ).hexdigest()
+        if expected_content_hash is not None and current_hash != str(expected_content_hash):
+            return {
+                "outcome": "stale_edit", "memory_id": memory_id,
+                "reason": "content_hash_mismatch", "current_version": old_version,
             }
         current_set: set[str] = set(old_tags)
         new_tags_list = list(old_tags)
@@ -396,7 +429,13 @@ class _MemEditMixin:
                 "expected_version": int(expected_version),
             }
         old_content = current.get("content") or ""
-        current_hash = hashlib.sha256(old_content.encode("utf-8")).hexdigest()
+        # content_sha is maintained by every write path (and backfilled by
+        # its migration) — reuse the column instead of re-hashing the full
+        # body inside the transaction (#1051 反模式#4); recompute only when
+        # a pre-migration row carries no value.
+        current_hash = current.get("content_sha") or hashlib.sha256(
+            old_content.encode("utf-8")
+        ).hexdigest()
         if expected_content_hash is not None and current_hash != str(expected_content_hash):
             return {
                 "outcome": "stale_edit",

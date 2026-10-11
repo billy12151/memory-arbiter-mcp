@@ -156,8 +156,12 @@ class _OpsContent:
                 # above); a no-op merge does not stale any pin.
                 if merged_content is not None:
                     attention_groups = conflict_membership.get(survivor_id_int, [])
+                # One chunked IN fetch instead of a PK SELECT per loser
+                # inside the write transaction (#1051 单查询纪律); per-loser
+                # error attribution below is unchanged.
+                loser_rows = self.db.get_memories_by_ids(loser_ints, conn=conn)
                 for loser_id in loser_ints:
-                    loser = self.db.get_memory_on_conn(conn, loser_id)
+                    loser = loser_rows.get(loser_id)
                     if caller.isolation == "strict":
                         if not loser or raw_workspace(loser) not in set(caller.scope_canonicals()):
                             failed_ids.append({
@@ -560,6 +564,20 @@ class _OpsContent:
             )
         if tags_only:
             tag_result: dict[str, Any]
+            # CAS pins ride the same kwargs as the content path (R3 盘点 P2:
+            # the old fast path silently dropped both, landing the tag edit
+            # on whatever version was current — exactly the intent-eating the
+            # refusal set above exists to prevent). Honored in-transaction.
+            expected_version_raw = _.get("expected_version")
+            expected_hash = _.get("expected_content_hash") or _.get("content_hash")
+            try:
+                tags_expected_version = (
+                    int(expected_version_raw) if expected_version_raw is not None else None
+                )
+            except (TypeError, ValueError):
+                return self.db.state.response(
+                    {"error": "expected_version must be an integer", "edited": False}, ok=False,
+                )
             try:
                 with self.db.write_transaction() as conn:
                     current = self.db.get_memory_on_conn(conn, memory_id_int)
@@ -573,6 +591,8 @@ class _OpsContent:
                             add_tags=add_tags or [],
                             remove_tags=remove_tags or [],
                             authorized=authorized,
+                            expected_version=tags_expected_version,
+                            expected_content_hash=str(expected_hash) if expected_hash is not None else None,
                             conn=conn,
                         )
             except sqlite3.Error:
@@ -582,6 +602,16 @@ class _OpsContent:
                 return self.db.state.response(
                     forbidden_payload("memory", workspace=caller), ok=False,
                     extra_warnings=list(caller.warnings),
+                )
+            if outcome == "stale_edit":
+                # Same shape as the content path's stale_edit refusal.
+                return self.db.state.response(
+                    {
+                        "error": f"stale_edit: {tag_result.get('reason') or 'current memory changed'}",
+                        "edited": False,
+                        **tag_result,
+                    },
+                    ok=False,
                 )
             if outcome == "updated":
                 updated_mem = self.db.get_memory(memory_id_int)
@@ -597,7 +627,9 @@ class _OpsContent:
                     "tags": tag_result.get("tags"),
                     "record": updated_mem,
                 }
-                return self.db.state.response(data)
+                if caller.isolation == "strict":
+                    data.update(caller.response_fields())
+                return self.db.state.response(data, extra_warnings=list(caller.warnings))
             if outcome == "no_change":
                 return self.db.state.response({
                     "edited": False,
@@ -762,7 +794,9 @@ class _OpsContent:
                 "memory_review(view='conflict_detail') and judge / replan / "
                 "resolve as appropriate"
             )
-        return self.db.state.response(data)
+        if caller.isolation == "strict":
+            data.update(caller.response_fields())
+        return self.db.state.response(data, extra_warnings=list(caller.warnings))
 
     def memory_history(self, memory_id: int, **_: Any) -> dict[str, Any]:
         """View the version-chain (historical snapshots) of a memory, newest

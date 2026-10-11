@@ -104,12 +104,21 @@ class ConflictStore(_ConflictsNormMixin, _ConflictsReadMixin):
         with self.write_transaction() as conn:
             # Derive the workspace from current pinned member rows inside the
             # same transaction; caller labels cannot create cross-workspace groups.
+            member_ids = [int(member["memory_id"]) for member in normalized_members]
+            member_rows: dict[int, Any] = {}
+            if member_ids:
+                placeholders = ",".join("?" for _ in member_ids)
+                member_rows = {
+                    int(row["id"]): row
+                    for row in conn.execute(
+                        "SELECT id,version,COALESCE(NULLIF(workspace_canonical,''),workspace) AS workspace "
+                        f"FROM memories WHERE id IN ({placeholders})",
+                        member_ids,
+                    ).fetchall()
+                }
             member_workspaces: set[str] = set()
             for member in normalized_members:
-                memory = conn.execute(
-                    "SELECT version,COALESCE(NULLIF(workspace_canonical,''),workspace) AS workspace "
-                    "FROM memories WHERE id=?", (int(member["memory_id"]),),
-                ).fetchone()
+                memory = member_rows.get(int(member["memory_id"]))
                 if memory is None or int(memory["version"] or 0) != int(member["version"]):
                     return {"outcome": "stale_snapshot"}
                 member_workspaces.add(str(memory["workspace"] or "").strip())
@@ -391,12 +400,20 @@ class ConflictStore(_ConflictsNormMixin, _ConflictsReadMixin):
                 return {"outcome": "structured_group_required", "error": str(exc)}
             checks: list[dict[str, Any]] = []
             notice_workspace = str(notice.get("workspace_canonical") or "").strip()
+            member_ids = [int(member["memory_id"]) for member in members]
+            member_rows: dict[int, Any] = {}
+            if member_ids:
+                placeholders = ",".join("?" for _ in member_ids)
+                member_rows = {
+                    int(row["id"]): row
+                    for row in conn.execute(
+                        "SELECT id,version,status,COALESCE(NULLIF(workspace_canonical,''),workspace) AS workspace "
+                        f"FROM memories WHERE id IN ({placeholders})",
+                        member_ids,
+                    ).fetchall()
+                }
             for member in members:
-                current = conn.execute(
-                    "SELECT version,status,COALESCE(NULLIF(workspace_canonical,''),workspace) AS workspace "
-                    "FROM memories WHERE id=?",
-                    (member["memory_id"],),
-                ).fetchone()
+                current = member_rows.get(int(member["memory_id"]))
                 member_workspace = str(current["workspace"] or "").strip() if current else None
                 fresh = bool(
                     current and current["status"] == "active"
@@ -532,6 +549,20 @@ class ConflictStore(_ConflictsNormMixin, _ConflictsReadMixin):
             member_versions = {_member_ref(member): member for member in conflict["member_versions"]}
             plan: list[dict[str, Any]] = []
             seen: set[int] = set()
+            plan_targets = sorted({int(dict(raw).get("memory_id", 0)) for raw in apply_plan})
+            plan_rows: dict[int, Any] = {}
+            if plan_targets:
+                placeholders = ",".join("?" for _ in plan_targets)
+                # Same active-only filter as the former per-row probe: a
+                # non-active target stays absent from the map → stale_member.
+                plan_rows = {
+                    int(row["id"]): row
+                    for row in conn.execute(
+                        "SELECT id,version,COALESCE(NULLIF(workspace_canonical,''),workspace) AS workspace "
+                        f"FROM memories WHERE id IN ({placeholders}) AND status='active'",
+                        plan_targets,
+                    ).fetchall()
+                }
             for raw in apply_plan:
                 item = dict(raw)
                 target = int(item.get("memory_id", 0))
@@ -539,10 +570,7 @@ class ConflictStore(_ConflictsNormMixin, _ConflictsReadMixin):
                 matches = [member for member in member_versions.values() if int(member["memory_id"]) == target]
                 if action not in _ALLOWED_ACTIONS or not matches or target in seen:
                     return {"outcome": "invalid_plan"}
-                current = conn.execute(
-                    "SELECT version,COALESCE(NULLIF(workspace_canonical,''),workspace) AS workspace "
-                    "FROM memories WHERE id=? AND status='active'", (target,),
-                ).fetchone()
+                current = plan_rows.get(target)
                 current_version = int(current["version"] or 0) if current else 0
                 # An open group may legitimately hold several versions of one
                 # memory (append after an external edit). Pin the stored member
@@ -647,14 +675,23 @@ class ConflictStore(_ConflictsNormMixin, _ConflictsReadMixin):
             members = {int(member["memory_id"]): member for member in conflict["member_versions"]}
             plan: list[dict[str, Any]] = []
             seen: set[int] = set()
+            plan_targets = sorted({int(dict(raw).get("memory_id", 0)) for raw in apply_plan})
+            plan_rows: dict[int, Any] = {}
+            if plan_targets:
+                placeholders = ",".join("?" for _ in plan_targets)
+                plan_rows = {
+                    int(row["id"]): row
+                    for row in conn.execute(
+                        "SELECT id,version,status,COALESCE(NULLIF(workspace_canonical,''),workspace) AS workspace "
+                        f"FROM memories WHERE id IN ({placeholders})",
+                        plan_targets,
+                    ).fetchall()
+                }
             for raw in apply_plan:
                 target = int(dict(raw).get("memory_id", 0))
                 action = str(dict(raw).get("action", ""))
                 member = members.get(target)
-                current = conn.execute(
-                    "SELECT version,status,COALESCE(NULLIF(workspace_canonical,''),workspace) AS workspace "
-                    "FROM memories WHERE id=?", (target,),
-                ).fetchone()
+                current = plan_rows.get(target)
                 if (
                     action not in _ALLOWED_ACTIONS or member is None or target in seen
                     or current is None or current["status"] != "active"

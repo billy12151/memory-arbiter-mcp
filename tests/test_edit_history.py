@@ -482,3 +482,42 @@ def test_tags_only_edit_unaffected_by_subject_rule(tmp_path: Path) -> None:
     assert "backfill" in got["tags"]
     # subject 未被改动（仍为空，待回填脚本处理）
     assert got["subject"] in (None, "")
+
+
+def test_tags_only_edit_honors_cas_pins(tmp_path: Path) -> None:
+    """R3 盘点 P2 pin: tags_only + expected_version/expected_content_hash
+    must be honored in-transaction — the old fast path silently dropped
+    both, landing the tag edit on whatever version happened to be current
+    (exactly the intent-eating the content-path refusal set exists to
+    prevent)."""
+    tools = make_tools(tmp_path)
+    resp = tools.memory_write(
+        content="pin me v1", subject="pins", workspace="repo-a",
+    )
+    mid = int(resp["data"]["id"])
+
+    # pin 匹配 → 正常更新（tags 不 bump version，仍是 v1）
+    ok = tools.memory_edit(memory_id=mid, tags_only=True, add_tags=["a"], expected_version=1)
+    assert ok["ok"] is True and ok["data"]["edited"] is True
+
+    # 内容编辑 bump 到 v2
+    bumped = tools.memory_edit(memory_id=mid, old_text="v1", new_text="v2")
+    assert bumped["ok"] is True
+    assert int(bumped["data"]["new_version"]) == 2
+
+    # 过期 pin → stale_edit 拒绝（旧行为=静默忽略 pin 落在新版本上）
+    stale = tools.memory_edit(memory_id=mid, tags_only=True, add_tags=["b"], expected_version=1)
+    assert stale["ok"] is False
+    assert "stale_edit" in str(stale["data"].get("error"))
+
+    # hash 钉：错 hash 拒绝、对 hash 放行
+    content = tools.memory_get(memory_id=mid)["data"]["memory"]["content"]
+    good_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    bad = tools.memory_edit(
+        memory_id=mid, tags_only=True, add_tags=["c"], expected_content_hash="0" * 64,
+    )
+    assert bad["ok"] is False
+    good = tools.memory_edit(
+        memory_id=mid, tags_only=True, add_tags=["c"], expected_content_hash=good_hash,
+    )
+    assert good["ok"] is True and good["data"]["edited"] is True
