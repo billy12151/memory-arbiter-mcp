@@ -1,12 +1,15 @@
-"""memories 共享 helper 叶子（拆分批 ②b：memories 与 _mem_edit 共用，避免环）。
+"""memories 共享 helper（拆分批 ②b：memories 与 _mem_edit 共用）。
 
 从 memories.py 原样搬出；memories.py re-export 保活（tests/scripts 直取不变）。
+C4 批（2026-10-11）起 content_sha 委托 evidence.evidence_content_hash——
+不再是纯叶子，方向与 db 包其余模块（meta/_mem_vectors）一致。
 """
 from __future__ import annotations
 
-import hashlib
 import json
 from typing import Any
+
+from ..evidence import evidence_content_hash
 
 
 _RETIRED_METADATA_KEYS = ("entity", "scope")
@@ -21,8 +24,9 @@ def content_sha(text: str) -> str:
     """sha256 over the raw UTF-8 content bytes — the dedup identity.
 
     Never normalised: any normalisation folds distinct memories onto one
-    hash. Mirrors additive._add_content_sha_dedupe's backfill."""
-    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+    hash. Delegates to evidence.evidence_content_hash (reuse batch C4:
+    single source for the content-hash convention)."""
+    return evidence_content_hash(text)
 
 
 def _row_to_dict(row: Any) -> dict[str, Any]:

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 
-import hashlib
 import json
 import sqlite3
 import time
@@ -262,6 +261,8 @@ class _OpsConflicts:
                     updated = dict(cast(Mapping[str, Any], updated))
                 chosen = str(conflict.get("chosen_value") or "")
                 updated_content = str(updated.get("content") or "")
+                from ..evidence import evidence_content_hash  # C4: single content-hash entry
+                result_hash = evidence_content_hash(updated_content)
                 if edited.get("outcome") == "blocked":
                     # needs_authorization: recorded blocked so guidance routes to
                     # replan; no edit happened.
@@ -281,7 +282,7 @@ class _OpsConflicts:
                     # structurally impossible.
                     edit_committed = edited.get("outcome") == "edited"
                     step.update(status="failed", result_version=int(updated.get("version") or 0),
-                                result_hash=hashlib.sha256(updated_content.encode("utf-8")).hexdigest(),
+                                result_hash=result_hash,
                                 error="chosen_value_not_grounded", orphaned_edit=edit_committed)
                 elif action == "use_as_resolution" and chosen and self._member_value_mismatches(
                     conn, conflict, target_id, chosen,
@@ -296,11 +297,11 @@ class _OpsConflicts:
                     # satisfiable — unlike the removed grounding check it
                     # cannot recreate the #970 deadlock.
                     step.update(status="failed", result_version=int(updated.get("version") or 0),
-                                result_hash=hashlib.sha256(updated_content.encode("utf-8")).hexdigest(),
+                                result_hash=result_hash,
                                 error="resolution_member_value_mismatch", orphaned_edit=False)
                 else:
                     step.update(status="completed", result_version=int(updated.get("version") or step["expected_version"]),
-                                result_hash=hashlib.sha256(updated_content.encode("utf-8")).hexdigest(), error=None)
+                                result_hash=result_hash, error=None)
                 summary: dict[str, Any] = {"plan": plan}
                 prior_history = (conflict.get("apply_summary") or {}).get("history")
                 if prior_history:

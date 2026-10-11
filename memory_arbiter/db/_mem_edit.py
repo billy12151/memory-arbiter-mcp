@@ -1,7 +1,6 @@
 """Memory row CRUD, filters, edit/history operations for MemoryDB (Phase 3 extraction)."""
 from __future__ import annotations
 
-import hashlib
 import json
 import sqlite3
 
@@ -268,9 +267,10 @@ class _MemEditMixin:
                 "reason": "version_mismatch", "current_version": old_version,
                 "expected_version": int(expected_version),
             }
-        current_hash = current.get("content_sha") or hashlib.sha256(
-            (current.get("content") or "").encode("utf-8")
-        ).hexdigest()
+        from ..evidence import evidence_content_hash  # C4: single content-hash entry
+        current_hash = current.get("content_sha") or evidence_content_hash(
+            str(current.get("content") or "")
+        )
         if expected_content_hash is not None and current_hash != str(expected_content_hash):
             return {
                 "outcome": "stale_edit", "memory_id": memory_id,
@@ -433,9 +433,8 @@ class _MemEditMixin:
         # its migration) — reuse the column instead of re-hashing the full
         # body inside the transaction (#1051 反模式#4); recompute only when
         # a pre-migration row carries no value.
-        current_hash = current.get("content_sha") or hashlib.sha256(
-            old_content.encode("utf-8")
-        ).hexdigest()
+        from ..evidence import evidence_content_hash  # C4: single content-hash entry
+        current_hash = current.get("content_sha") or evidence_content_hash(old_content)
         if expected_content_hash is not None and current_hash != str(expected_content_hash):
             return {
                 "outcome": "stale_edit",

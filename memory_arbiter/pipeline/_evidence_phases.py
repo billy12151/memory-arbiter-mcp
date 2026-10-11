@@ -81,7 +81,8 @@ class _EvidencePhases:
         # instead of re-hashing the content again (legacy NULL falls back).
         row_sha = str(record.get("content_sha") or "")
         if not row_sha:
-            row_sha = hashlib.sha256(content.encode()).hexdigest()
+            from ..evidence import evidence_content_hash  # C4: single content-hash entry
+            row_sha = evidence_content_hash(content)
         if row_sha != snapshot.get("content_hash"):
             ctx["terminal"] = {"status": "incomplete", "reason": "stale_snapshot", "notices_created": 0}
             return ctx

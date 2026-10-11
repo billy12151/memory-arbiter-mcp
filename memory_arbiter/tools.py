@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import threading
 import time
 from collections import OrderedDict, deque
@@ -258,9 +257,10 @@ class MemoryTools(_ToolsForwards, _ToolsLifecycle, _ToolsSemantic, _ToolsNotices
             else f"semantic:{int(memory_id)}@{version}"
         )
         content = str(current.get("content") or "")
+        from .evidence import evidence_content_hash  # C4: single content-hash entry
         content_hash = (
             str(current.get("content_sha") or "")
-            or hashlib.sha256(content.encode("utf-8")).hexdigest()
+            or evidence_content_hash(content)
         )
         snapshot: dict[str, Any] = {
             "memory_id": int(memory_id),
