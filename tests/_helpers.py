@@ -17,7 +17,8 @@ from typing import Any
 
 from memory_arbiter.config import Settings
 from memory_arbiter.db import MemoryDB
-from memory_arbiter.models import ConflictMember, ConflictValueGroup
+from memory_arbiter.models import ConflictMember, ConflictValueGroup, MemoryRecord
+from memory_arbiter.semantic_conflict import normalize_value
 from memory_arbiter.tools import MemoryTools
 
 
@@ -104,3 +105,41 @@ def alias_governance_make_tools(
         model.write_bytes(b"fake")
         assert db.ensure_vec_tables(2) == []
     return tools
+
+# ── moved from test_conflict_lifecycle.py (commit 9 split) ──
+
+def _db(tmp_path: Path) -> MemoryDB:
+    return MemoryDB(Settings(db_path=tmp_path / "memory.db", backup_jsonl=tmp_path / "backup.jsonl"))
+
+
+def _memory(db: MemoryDB, content: str, workspace: str = "w") -> int:
+    memory_id, _ = db.insert_memory(MemoryRecord(content=content, subject="database", agent_id="a", workspace=workspace), workspace)
+    assert memory_id is not None
+    return memory_id
+
+
+def _member(memory_id: int, value: str, version: int = 1) -> ConflictMember:
+    quote = f"database is {value}"
+    return ConflictMember(
+        memory_id=memory_id, version=version, attribute_raw="database", value_raw=value,
+        normalized_attribute="database", normalized_value=normalize_value(value), evidence_quote=quote,
+        evidence_span=(0, len(quote)), content_hash=(str(memory_id) * 64)[:64], direction="a_to_b",
+        prompt_version="p1", detector_version="d1",
+    )
+
+
+def _groups(*members: ConflictMember) -> list[ConflictValueGroup]:
+    by_value: dict[str, list[str]] = {}
+    for member in members:
+        by_value.setdefault(member.normalized_value, []).append(f"{member.memory_id}@{member.version}")
+    return [ConflictValueGroup(value, value.title(), tuple(refs)) for value, refs in by_value.items()]
+
+
+def _record(db: MemoryDB, members: list[ConflictMember], *, expected_revision=None, status="open", slot=True):
+    return db.record_conflict_group(
+        workspace_canonical="w",
+        slot_key={"entity": "project", "attribute": "database", "scope": "global"} if slot else None,
+        members=members, value_groups=_groups(*members), detection_reason="different database",
+        source="scan", detector_version="d1", prompt_version="p1", conflict_point="database",
+        status=status, expected_revision=expected_revision,
+    )
