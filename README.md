@@ -1,6 +1,10 @@
 <!-- mcp-name: io.github.billy12151/memory-arbiter-mcp -->
 # Memory Arbiter MCP
 
+[![PyPI](https://img.shields.io/pypi/v/memory-arbiter-mcp)](https://pypi.org/project/memory-arbiter-mcp/)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue)](pyproject.toml)
+
 **English | [中文](README.zh-CN.md)**
 
 Give your AI agents a local fact layer they can actually trust. Memory Arbiter (迷码) is a local-first memory and fact service exposed over MCP: agents remember reusable facts once, recall them with evidence, get told when facts collide, and can never silently overwrite what you've locked. One SQLite file on your machine holds every fact in full; every model — embeddings, conflict judge — runs locally.
