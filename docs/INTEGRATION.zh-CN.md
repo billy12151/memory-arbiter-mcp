@@ -72,7 +72,7 @@ stdio 是默认传输。要让多个本地客户端共享一个社区版进程�
 
 配置 sqlite-vec 和本地 embedding 模型后，写入会异步发布从已存原文派生的句子/段落级证据。字面和证据通道独立召回，按记忆用倒数排名融合合并，再经过信任、时间、过滤和 workspace 调整。证据偏移量定位相关原文。
 
-`memory(action="find")` 是索引页：默认结果只带元数据、`content_chars`（全文长度，即 read 成本）和有界 `outline`（至多 8 段 `{head, offset}`，取自证据管线的 heading/text 单元），不返回全文。0.15.10 起内容深度改为单选枚举 `content_mode`：`"hits"` 给每条附 `hit_spans`——向量命中的原文单元 `{text, start_offset, end_offset}`（text 直接从原文切片，`read span=[start_offset, end_offset]` 取回的就是这段文字）。命中片段永不截断：合并后命中覆盖全文 ≥50% 的条目自动升级为全文、`hit_spans` 保留作标注（服务端绝不替你挑「重要的命中」）；没有向量命中的条目（纯字面召回或向量服务不可用）保持纯预览形态。`"full"` 返回整篇全文。旧布尔参数 `include_content=true` 已移除（破坏性变更）：调用会在校验层被拒并给出迁移提示——改用 `content_mode="full"`。页内 score 只做相对比较；top 页未命中时应换词或加 `tags_filter`，而不是深翻页——无过滤的 query 召回报 `total_estimate=null`/`has_more=false`，有过滤时仍是精确 SQL 计数。`unresolved_conflict_count` 只在本页条目直接命中 open/applying 冲突组时出现，值为命中的本页条目数。0.15.9 起 find 对"没有"是老实的：一个 query 什么都召回不了就返回 `retrieval_mode="empty"` 加一句"换措辞或加 tags_filter"的提示（旧的"返回最近记忆"兜底和它的 `recent_fallback` 模式值都已移除）；同时综合打分低于标定及格线（8.1）的候选不再进入 query 召回结果页——空结果的含义是"这个库里没有"，不是"翻下一页试试"。
+`memory(action="find")` 是索引页：默认结果只带元数据、`content_chars`（全文长度，即 read 成本）和有界 `outline`（至多 8 段 `{head, offset}`，取自证据管线的 heading/text 单元），不返回全文。0.15.10 起内容深度改为单选枚举 `content_mode`：`"hits"` 给每条附 `hit_spans`——向量命中的原文单元 `{text, start_offset, end_offset}`（text 直接从原文切片，`read span=[start_offset, end_offset]` 取回的就是这段文字）。命中片段永不截断：合并后命中覆盖全文 ≥50% 的条目自动升级为全文、`hit_spans` 保留作标注（服务端绝不替你挑「重要的命中」）；没有向量命中的条目（纯字面召回或向量服务不可用）保持纯预览形态。`"full"` 返回整篇全文。旧布尔参数 `include_content=true` 已移除（破坏性变更）：调用会在校验层被拒并给出迁移提示——改用 `content_mode="full"`。页内 score 只做相对比较；top 页未命中时应换词或加 `tags_filter`，而不是深翻页——无过滤的 query 召回报 `total_estimate=null`/`has_more=false`，有过滤时仍是精确 SQL 计数。`unresolved_conflict_count` 只在本页条目直接命中 open/applying 冲突组时出现，值为命中的本页条目数。0.15.9 起 find 对"没有"是老实的：一个 query 什么都召回不了就返回 `retrieval_mode="empty"` 加一句"换措辞或加 tags_filter"的提示（旧的"返回最近记忆"兜底和它的 `recent_fallback` 模式值都已移除）；同时综合打分低于标定及格线（8.25，0.16.11 重标定）的候选不再进入 query 召回结果页——空结果的含义是"这个库里没有"，不是"翻下一页试试"。
 
 `memory(action="batch_find", data={"queries":[{"id":"催收","query":"催收 辱骂 侮辱"},{"id":"债务转移","query":"债务转移 债权人同意"}], "limit_per_query":3})` 一次调用跑最多 8 个 query，返回一页合并结果——多主题任务（比如 5 个法律问题一起问）用它替代 5~10 次串行 find。每个 query 走的是与 find 完全相同的管线（同一条及格线、同样的诚实报空），先各自取前 `limit_per_query` 条（默认 3、上限 20）再合并；共享过滤参数（`workspace`/`tags_filter`/`source_type`/时间窗）对全部 query 生效。`deduplicate=true`（默认）按 `memory_id` 去重：每条带 `matched_query_ids`（被哪些 query 命中）和 `best_query_id`，整页按最佳分排序。`per_query` 逐题报 `{id, count, has_more, retrieval_mode}`。整批请求写错（超 8 条、id 重复——`id` 不传时默认用 query 原文、query 重复、超 64KB）会整体拒绝，没有"部分成功"。
 
@@ -198,3 +198,36 @@ JSONL 回放无需授权即可预览。应用回放需要显式用户授权，�
 side-by-side 拷贝保留记忆内容/历史、备份回放回执、workspace canonical 和当前 redirect/负决策状态及审计。已废弃的 workspace 决策事件账本被刻意省略。每个结构迁移显式声明 `vector_effect=preserve|rebuild`：preserve 原样复制 FTS/证据/向量 payload，只替换冲突域，再独立判断空间兼容性；不兼容时写入 `mismatch` 并禁用向量读取，等待后续重建，不阻断结构迁移。它刻意以空的冲突/notice 状态开始：旧 `conflicts`、`conflict_judgments` 和 `semantic_notices` 历史不迁移。目标发布要求指纹稳定、破坏性表为空、generation 与完成时间在同一事务提交，并在移除 WAL/SHM、切换配置前完成 `wal_checkpoint(TRUNCATE)`；rebuild 路径额外要求合格证据全覆盖且目标向量状态在预期空间为 `ready`。
 
 成功时记录 `conflict_scan_required=true` 和一个持久 epoch。只有覆盖升级时活跃集且 detector 匹配的完整扫描才能 CAS 清除它。部分页、失败扫描或旧 detector 都不能。`--yes` 只跳过"确认写入方已停止、冲突/裁决/notice 历史永久丢失"的提示；它不会停止进程、checkpoint/备份源库，也不放松验证。`--no-switch` 不动配置。被环境变量覆盖/不匹配的配置路径需要按打印的手动步骤切换。
+
+
+## 完整配置键参考（28 键）
+
+2026-10-11 从重写的 README 迁出（门面保持精简）；数值为出厂默认，逐键语义不变。
+
+| 配置项 | 白话说明 | 默认值 |
+| --- | --- | --- |
+| `client` / `agent_id` | 调用身份（"是谁在写"），必填：没有内建默认值，缺失或为空时服务拒绝启动。stdio 下这组配置身份即进程级调用身份（归因、策略判定都用它）；HTTP 模式以请求头为准 | 无（必填） |
+| `db_path` | 数据库文件放哪 | 安装时生成 |
+| `backup_jsonl` | 数据库写不进去时的兜底备份文件（只追加） | 安装时生成 |
+| `workspace` | 写入时不带 workspace 用的默认工作区 | `default` |
+| `isolation` | workspace 隔离档：`none` / `weak` / `strict` | `none` |
+| `llm.base_url` / `llm.model` / `llm.api_key` | Console LLM 学习工作台自己的 OpenAI 兼容端点（0.18.0，全部可选——不填=工作台不可用）。本地明文存储，写入时强制 `0600` 权限；Key 只由 Console 后端代为调用，页面拿不到 | 无 |
+| `llm.max_context_tokens` | 工作台单次调用的材料预算（默认 `0`=自动，范围 0–10,000,000） | `0` |
+| `llm.max_output_tokens` | 输出上限（默认 `8192`，范围 1–1,000,000）——防思考型模型烧光输出预算 | `8192` |
+| `llm.timeout_seconds` | 单请求超时（默认 `120`，范围 1–3600）；写入与重载两侧同一套钳制 | `120` |
+| `mcp.transport` | `stdio`（默认，一对一）或 `streamable-http`（多个客户端共享一个本地服务） | `stdio` |
+| `mcp.http.host` / `mcp.http.port` | HTTP 模式的监听地址（只允许本机）和端口；地址路径固定是 `/mcp`，不用配 | `127.0.0.1:8000` |
+| `update_check.enabled` | 唯一会联网的功能：偶尔查一下 PyPI 有没有新版本。关掉就完全不联网 | `true` |
+| `embedding.model_path` | 本地 embedding 模型（GGUF 文件）路径——**填了就是"我要用按意思搜"**，不用再开别的开关；向量维度自动跟着模型走，换不同维度的模型会在启动时自动按新维度重建向量表 | 无 |
+| `embedding.auto_query` / `embedding.auto_write` | 查询/写入时自动算向量 | `true` |
+| `semantic_conflict.mdeberta_ckpt` | 本地 mDeBERTa 判定模型权重（v58_ep3_fp16，0.17.2 换装后现役，约 531MB，单独下载），用于写入时的冲突判定。填了就自动启用、启动时加载、常驻内存（CPU）。先装 `mdeberta` extra，再下载 ckpt，详见 README「冲突判定模型」一节 | 无 |
+| `semantic_conflict.enabled` | 显式关掉语义冲突的逃生口；不填时指向模型即启用，显式 `false` 优先 | 自动 |
+| `semantic_conflict.on_write` | 写入时的冲突检测：`async`（异步提醒）或 `off`（关闭） | `async` |
+| `semantic_conflict.notice_sync_wait_ms` | 写入响应愿意等多久，好让写时检查结果直接挂在本次响应上（0.15.8 恢复的配置键，默认 `3000`，范围 `0–5000`）；填 `0` = 完全不阻塞写入响应——批量导入就用这个，检查照常后台跑，提醒照样在之后的响应里带出来 | `3000` |
+| `semantic_conflict.mdeberta_model_dir` | 判定模型的 config+tokenizer 目录；缺省=ckpt 同目录的 `mdeberta-base/` | 无 |
+| `semantic_conflict.mdeberta_notice_min_prob` | 判定置信度阈值：低于它的"真冲突"只计数不打扰（现 0.8——0.17.2 换装 v58_ep3_fp16 定稿；v52 时代 0.5 召回优先口径随 ckpt 退役） | `0.8` |
+| `semantic_conflict.mdeberta_possible_min_susp` | 疑似（possible）灰区门（0.17.2 起）：P(冲突)+P(疑似) ≥ 它才出 `info` 灰区提醒，低于只计数（`model_possible_below_gate`）不打扰；填 `0` 回退无门旧行为。按考卷+LoCoMo 金标定标 | `0.7` |
+| `semantic_conflict.mdeberta_batch` | 判定批大小（0=自动按设备分档：Apple Silicon/NVIDIA 16、其余 8） | `0` |
+| `include_size` | 召回复量总开关（0.15.6）：开着，`find` / `read` / 过期审计 / 历史版本四个召回面都带 `size` 块（返回字符数 + 条数 + **token 预估**），agent 汇报成本用同一把尺子；关了就全都不带 | `true` |
+
+另见 [`examples/memory-arbiter.config.example.json`](../examples/memory-arbiter.config.example.json)。

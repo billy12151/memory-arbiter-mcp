@@ -300,7 +300,7 @@ def test_config_surface_examples_and_registry_aligned() -> None:
     and the surface count is pinned — 0.17.1 aligned them by hand and 0.17.2
     drifted again (mdeberta_possible_min_susp missing from five prose spots
     and the example); a test is cheaper than a third realignment. Bump the
-    count together with the README key tables and prose when adding a key."""
+    count together with the INTEGRATION prose and the example config and prose when adding a key."""
     from memory_arbiter.config_registry import CONFIG_DESCRIPTORS
 
     assert len(CONFIG_DESCRIPTORS) == 28

@@ -57,7 +57,8 @@ memory(action="find", data={"query": "", "tags_filter": ["mema-first-run-demo-st
 
 ```
 memory(action="remember", data={"content": "用户拒绝了首次功能演示（<日期>，agent=<宿主名>）。",
-  "subject": "mema 首次演示状态：已拒绝", "tags": ["mema-first-run-demo-status"]})
+  "subject": "mema 首次演示状态：已拒绝", "workspace": "default",
+  "tags": ["mema-first-run-demo-status"]})
 ```
 
 写标记失败不得重试提示（宁可漏演示不再骚扰）：标记写入失败时同样跳过演示，
@@ -210,7 +211,8 @@ open 列表零残留（真机实测），无需向用户说明残留。
 
 ```
 memory(action="remember", data={"content": "首次功能演示已完成（<日期>，run_id=<run_id>，agent=<宿主名>）。",
-  "subject": "mema 首次演示状态：已完成", "tags": ["mema-first-run-demo-status"]})
+  "subject": "mema 首次演示状态：已完成", "workspace": "default",
+  "tags": ["mema-first-run-demo-status"]})
 ```
 
 标记与演示数据不同标签（`mema-first-run-demo-status` ≠ `mema-demo`），**不参与

@@ -2,366 +2,160 @@
 
 **[English](README.md) | 中文**
 
-> 这份文档写给所有人，不需要你是专业研发。精确的字段级契约见[集成指南](docs/INTEGRATION.zh-CN.md)。
-> 当前正式版本 `0.17.2`（判定引擎换 mDeBERTa 三分类、claims 通道退役 + workspace 必传 + workspaces 选桶视图 + 升级后语句向量自动回填 + 全量修复批）。
+<!-- mcp-name: io.github.billy12151/memory-arbiter-mcp -->
 
 ## 一句话说明白
 
-**迷码是你所有 AI 工具共用的"记事本"。**
+**迷码是你所有 AI 工具共用的事实底座——今天 Claude 聊的决策，明天 Cursor 写代码要用，后天换别的 Agent 接着干，大家读到的都是同一份"现行、可信、有出处、改不坏"的事实。**
 
-你今天用 Claude 聊了一个决策，明天换 Cursor 写代码，后天用别的 Agent 干活——每个工具都各自记事，互相不知道对方记了什么，时间一长：记重的、记错的、互相打架的、过时没说清的，越攒越多。
+它跑在你自己电脑上（SQLite 一个文件，不联网、不上传），通过 MCP 标准接口接入所有工具。当前正式版本 `0.17.2`；`0.18.0`（已在 main）带浏览器知识库工作台。
 
-迷码把这些事记在**你自己电脑上的一个数据库文件**里（SQLite，不联网、不上传），并且帮你管起来：哪些是新的、哪些是旧结论、哪些互相矛盾、哪些是用户亲口确认过的，全都标得清清楚楚。
+## 一分钟看懂迷码给你带来什么
 
-## 一分钟看懂它怎么工作
+- **召回是真的准。** 词法和"按句找证据"两条路一起搜、按排名融合，发版考试自召回 **65/65**。不够格的候选根本不进查询结果页——返回的都是你能直接引用的；每条命中带原文偏移，`read span=[start,end]` 按字符偏移精确切出原文。
+- **冲突藏不住。** 两条事实打架时，自训练的本地 mDeBERTa 小模型来判定——它只会给三种回答：冲突 / 没冲突 / 拿不准，不听任何暗示词，也绝不替你决定留哪条删哪条。高置信的冲突才来打扰你，拿不准的只作灰区参考，其余默默落进定时扫描——**门再严也漏不掉**。公开评测 LoCoMo-Refined 回放里这套管线在 20 段对话中报出 **552 对"刚写入就发现打架"**（评测时为 0.17.1 生产配置原样运行；0.17.2 换装的判定更保守，见 RESULTS.md 附录）。
+- **事实是你的，而且改不坏。** 完整原文存在你机器上的一个 SQLite 文件里，每条带出处、每次修改有版本，信任级别锁住你确认过的东西。向量、索引都是"目录"，原文才是"正文"，丢了随时重建。平时不联网——唯一可选的主动外联是一次 PyPI 版本检查（控制台学习工作台走你自己填的 LLM 端点）。
+- **知识库由你策展。** 本地浏览器控制台里圈定哪些记忆算"知识"（`kb_member` 独立治理位，Agent 重写标签也冲不掉），按 工作区 → 标签 浏览、markdown 渲染、一跳关系图；还带自带 LLM 的学习工作台——总结、梳理、出题、费曼讲解、时间线，产物存回记忆库。
 
-```text
-  Claude Code   Cursor    ZCode     其他 Agent
-      │           │         │           │
-      └───────────┴────┬────┴───────────┘
-                       │  都通过同一个标准接口（MCP）读写
-                       ▼
-              ┌─────────────────┐
-              │   迷码 (mema)    │   跑在你本机的一个小程序
-              └─────────────────┘
-                       │
-                       ▼
-              ┌─────────────────┐
-              │  memory.sqlite3 │   就这一个文件，在你自己电脑上
-              │  （事实的原文）   │   原文只有一份，永不悄悄覆盖
-              └─────────────────┘
-```
+## 评测
 
-几个关键设计，用白话说：
+### 公开评测：LoCoMo-Refined
 
-- **原文只有一份，索引随时可以重建。** 就像一本书：正文是宝贝，目录和索引丢了重印一份就行。迷码里搜索用的向量、全文索引全是"目录"，原文才是"正文"。
-- **每条记忆都带来源。** 谁写的、什么时候写的、说的是什么时候的事，都有记录。"用户亲口确认过"的事实会被锁住，AI 不能悄悄改。
-- **AI 只负责发现矛盾，没权力改。** 发现两条记忆打架时，AI（本地 mDeBERTa 小模型）只能"举手报告"，选哪个、改哪个，必须你点头。
-- **改任何东西都留痕。** 每次修改都有历史版本，可以查到谁、什么时候、把什么改成了什么。
-
-## 公开评测：LoCoMo-Refined
-
-在 [LoCoMo-Refined](https://github.com/mem-eval-suite/LoCoMo_refined) 上全量评测
-（1,382 题，官方判分 Qwen3-14B）：
+在 [LoCoMo-Refined](https://github.com/mem-eval-suite/LoCoMo_refined) 上全量评测（1,382 题，官方判分 Qwen3-14B）：
 
 | 配置 | 总体 | 文本类 |
 |---|---:|---:|
 | **mema + 写入代理**（deepseek-v4.1-flash + 公开规则） | **61.00%** | **65.62%** |
 | **mema 零抽取**（写入端无 LLM，原话照存 + `event_time`） | 43.13% | **49.48%** |
 
-对照：Mem0 完整管线 48.91%（组委会重判）——**写入端不带任何 LLM 的裸 mema
-与之打平**；带写入代理后为文本类口径榜眼。写入路径同时检出 **552 对语义冲突**
-（自训练 mDeBERTa 判定，生产配置原样运行）。
+对照：Mem0 完整管线 48.91%（文本类口径，组委会重判）——**写入端不带任何 LLM 的裸 mema 与之打平**；带写入代理后，文本类口径成绩仅次于 MemoraX。完整方法论与复现：[`evals/locomo/RESULTS.md`](./evals/locomo/RESULTS.md)。
 
-完整方法论、消融实验（含答题器无关性、82% 信息天花板）、复现步骤与提交文件：
-[`evals/locomo/RESULTS.md`](./evals/locomo/RESULTS.md)。
+### 内部发版考试（出厂配置实测）
+
+每次发版必须过内部考试台——固定考卷：42 道召回题覆盖五种题型（改述/查细节/法条/远因/关键词）、108 对冲突考题（四个标签族、其中 36 条真冲突）、四组相似度考题（口径：`0.17.2` 出厂判定模型与阈值；`eval/runner.py --suite all` 可复现）：
+
+| 考试门 | 成绩 |
+|---|---|
+| 自召回（65 个检索目标，top-10） | **65/65** |
+| 冲突仲裁（D4 综合） | **召回 55.56%（20/36）· 精确 90.91%（20/22）** |
+| batch_find 跨查询一致性 | **0 处不一致**（42 题 × 6 批） |
+| 冲突窗完成率 | **51/51** |
+
+考卷刻意偏向精确：判定门拦下的不会丢——定时扫描还会用宽门把全库重走一遍，可疑的进只有 Agent 能看到的裁决队列，**漏报有兜底、不等于丢失**。这就是每次发版都重考一遍的质量底线。
 
 ## 交给 AI Agent 安装
 
-把下面这段话直接发给 Codex、Claude Code、Cursor，或其他能操作终端的编程 Agent：
+把下面这段话原样粘给 Codex / Claude Code / Cursor 等有终端权限的编码 Agent：
 
 ```text
-请阅读 https://github.com/billy12151/memory-arbiter-mcp 的最新 README，
-根据我的操作系统和当前 AI 客户端安装并配置最新版 mema。
-请保留已有配置和数据库，不要覆盖或删除现有数据；
-需要我选择不同安装模式、修改已有配置，或执行任何破坏性、提权操作时先询问我。
-完成后运行 mema doctor，并向我报告安装方式、配置路径、数据库路径、客户端接入方式和验收结果。
+Read the latest README at https://github.com/billy12151/memory-arbiter-mcp.
+Install and configure the latest mema release for my operating system and current AI client.
+Preserve any existing config and database; do not overwrite or delete existing data.
+Ask me before choosing between materially different install modes, changing existing config,
+or performing any destructive or privileged action. When finished, run mema doctor and report
+the install method, config path, database path, client integration, and verification result.
 ```
 
-Agent 应以这份 README 为事实来源，先检查本机环境，再判断使用 `uvx`、核心版、`vec` 或 `semantic-local`。无法安全判断时必须询问用户；没有运行 `mema doctor` 并报告所有警告，就不算安装完成。
+Agent 会以本 README 为准、按本地环境在 `uvx`/core/`vec`/`semantic-local` 里选安装方式，拿不准就停下来问你。装完必须跑 `mema doctor` 并如实汇报每条警告——没过体检的安装不算装完。
 
-**安装完成后的首次演示**（宿主 Agent 执行）：**先查全局标记**——
-`memory(action="find", data={"query": "", "tags_filter": ["mema-first-run-demo-status"]})`
-命中即说明用户已拒绝或已看过，**不得再提演示**（跨 Agent 全局一次）；未命中才
-向用户说明可以做一次可回滚的功能验证演示（约一分钟，演示后自动清理测试数据），
-用户同意后按 `memory_arbiter/FIRST_RUN_DEMO.zh-CN.md` 规程执行（随发行包一起
-安装）；演示尾声按规程提示用户授权创建两个兜底扫描任务。未经同意不得写入任何
-测试数据。
+**装完先查一次演示标记**：`memory(action="find", data={"query": "", "tags_filter": ["mema-first-run-demo-status"]})`——命中说明演示已做过或已拒绝（全局只此一次），别再提；没命中，征得同意后可按随包的 `FIRST_RUN_DEMO.zh-CN.md` 规程做一次约一分钟、可回滚的产品演示。
 
 ## 手动安装（备用）
-
-前提：电脑上装了 Python 3.11+。
 
 ```bash
 # 一条命令全搞定：装包 + 装依赖 + 下 embedding 模型（约 330MB，断点续传/国内镜像）+ 写配置
 curl -fsSL https://memarbiter.cn/install.sh | bash
 ```
 
-或者分步来：
+或者分步（需要 Python 3.11+）：
 
 ```bash
-# 1. 安装（含向量召回和 embedding 运行时）
-pip install "memory-arbiter-mcp[vec,semantic-local]"
-
-# 2. 完整安装：自动下载 embedding 模型并写好配置（判定模型 mDeBERTa 需另行手动安装）
-mema setup --install
-
-# 3. 验证
-mema doctor
+pip install "memory-arbiter-mcp[vec,semantic-local]"  # core + sqlite-vec + 本地 GGUF 运行时
+mema setup --install   # 下载 embedding 模型并写好配置（判定模型需另行手动安装）
+mema doctor            # 体检验证
 ```
 
-`mema setup`（不带 `--install`）仍是"只指导不执行"：写 `~/.config/memory-arbiter/config.json` 并自检环境，不动 pip、不联网；`--install` 才是执行模式。模型没装全时，每次工具响应都会带一条降级提示（附 `mema setup --install` 补齐命令），每个 Agent 的第一次调用也会收到能力健康卡——残缺安装不会静悄悄地被当成完整版用。
+然后从 [`examples/`](examples/) 挑 `.mcp.json` 接入客户端，用 `mema` 启动。能力缺失会以持续降级横幅 + 补救指引出现——**装一半不会冒充装好了**。
 
-```bash
-# 4. 在你的 AI 客户端里接入（照抄示例改一下就行）
-#    示例文件：examples/ 目录下的 *.mcp.json
-```
+**上手前只知道两件事：** ① `client`/`agent_id` 必须在 config.json 里显式配置（无内置默认，留空拒绝启动）；② `remember` 必须带 `workspace`——先 `memory_review(view="workspaces")` 列出桶，再传一个已存在的桶名（`default` 是全局池）。
 
-日常就 4 个动作，AI 工具会自动调用，你只需要知道概念：
+## 四个工具
 
-| 动作 | 白话解释 |
-| --- | --- |
-| `remember` | 记一条新事实（"项目数据库选了 PostgreSQL"） |
-| `find` | 用的时候搜一下，默认返回索引页（元数据 + 各条长度 + 目录），看中哪条再 read 原文，不用整本翻；也可选「只给命中处的原文片段」（0.15.10 起）或整篇全文 |
-| `batch_find` | 一次带最多 8 个问题搜（比如 5 个法律问题一起问），结果合并成一页、重复的法规只出现一次并标明被哪几个问题命中，省掉来回 5~10 次调用 |
-| `read` | 按编号看某条的完整原文 |
-| `update` | 同一个事实有新说法时，更新原记录，**不是**再记一条新的 |
+| 工具 | 能做什么 |
+|---|---|
+| `memory` | `remember` 存、`find`/`batch_find` 找、`read`/`batch_read` 读、`update` 更新、`judge` 裁决、`status` 体检、`help` 指南 |
+| `memory_review` | 只读体检：健康、冲突组/详情、历史、过期审计、工作区视图 |
+| `memory_govern` | 需显式授权的治理：废弃、冲突方案执行/解决、各类确认 |
+| `memory_repair` | 维修：证据重建、广域冲突扫描、历史清理、备份回放 |
 
-**记住一条新规矩（0.17.1 起，重要）**：记东西（`remember`）必须写明放进哪个抽屉（workspace）。会话开始先查一次桶列表：`memory_review(view="workspaces")`，照抄已有桶名；`"default"` 是全局公共池；确实要开新抽屉才起新名字。查一次就行，不用每次写前重查。五个改桶治理动作同样必传。
+每次调用返回 `{ok, mode, warnings, degraded, data}`；要你处理的事在 `notices` 或 `data.action_required` 里。让 Agent 记住打包好的规矩：`memory(action="help", data={"topic":"agent_onboarding"})`。
 
-> 为什么要强调"更新而不是再记一条"？因为同一件事记两条，迟早打架。迷码会帮你发现打架（见下文），但最好别制造打架。
+日常就四个动作：`remember` 存一条可复用的事实、`find` 召回、`read` 精确读、`update` 用新来源替换旧结论（**同一事实永远只有一份现行版本**）。`find` 是索引页（元数据 + 字符数 + 带原文偏移的目录）；`batch_find` 一次合并 8 个查询；`read span=[start,end]` 按字符位置精确引用；搜不到就明说，不硬塞近期记忆。
 
-**find 的关键词问法（0.17.0 起）**：查询写成「空格分开的中文短词」（每个词 ≤4 字，比如 `向量 唯一键 冲突`）时，迷码把它们当关键词理解——语义相近、且正文或标题里真的含有某个词的记忆会排到前面。两个边界：太通用的词（在候选池里命中一大片的，比如「做法」「预算」）不参与抬升；某个词全文找不到就不硬匹配——查不到说明该换词，而不是机制替你猜。
+## 里面有什么
 
-## 多条记忆打架了怎么办？
+**冲突仲裁，装好就有。** 候选对先过几道不花模型的粗筛（句级预筛 → 记忆级筛查 → 相似度带 → 规则证据），然后交给本地 mDeBERTa——两句裸文本进、校准概率出。高置信的才报警，拿不准的只作参考，其余一律落回定时扫描：服务端自己走全库，可疑项进仅 Agent 可见的裁决队列，绝不进用户可见列表。判定模型永不选边、永不改记忆——发现的事进一张可审计的 `conflicts` 表（`open → applying → resolved`），由你的 Agent 在你逐次授权下走 `judge → apply_conflict_action → resolve_conflict` 解决。
 
-这是迷码最核心的本事。先看图：
+**知识库工作台，装好就有。** `memory-arbiter console` 打开本地控制台：一键策展知识库（`kb_member` 独立数据列）、按 工作区 → 标签 浏览（markdown 渲染 + 一跳关系图）、对任意记忆跑六个一键学习动作（快速总结/知识点梳理/生成考题/费曼讲解/反过来考我/时间线梳理）——用你自己的 OpenAI 兼容端点，产物走标准写管道存回，归因给控制台（Key 只存本地配置文件，后端强制 `0600` 权限并代理调用，页面拿不到；策展由你决定——写入侧不会来问"这条算不算知识"）。
 
-```text
-  写入"数据库用 PostgreSQL"
-        │
-        ▼
-  系统发现已有一条"数据库用 MySQL"  ← 本地判定模型（mDeBERTa）整对核对，
-        │                            三选一判决：真冲突/不是/拿不准，
-        ▼                            只有"真冲突"且置信度过线才提醒你
-  给你发一条"提醒"（notice）
-        │
-        ├── 你看了觉得是误报 → dismiss（这条提醒关掉，记为"不是冲突"）
-        ├── 你已经自己处理好了 → resolve（提醒关闭，不变成正式冲突）
-        └── 确实是矛盾 → 升级成"正式冲突单"（conflict）
-                          │
-                          ▼
-                  ┌──────────────────────────┐
-                  │ 冲突单生命周期：            │
-                  │ open（待裁决）              │
-                  │   → applying（正在按方案改） │
-                  │   → resolved（改完复查通过） │
-                  └──────────────────────────┘
-                          │
-        处理顺序固定三步：judge（选定哪个对）
-          → apply_conflict_action（一条一条改，每步都要你授权）
-          → resolve_conflict（全部改完才关闭）
-```
+**信任是 enforced 的。** 每条写带出处、每次改有版本、`normal`/`protected`/`locked` 信任级别 + `user_confirmed` 标记，所有改状态的治理动作都要逐次 `authorized=true`。工作区像抽屉：`none` 不设防、`weak` 轻轻把你往自己的抽屉引、`strict` 下新抽屉要先经你确认才能用，而且在项目抽屉里干活也看不到公共抽屉（default）的内容。写进 `recall_blacklist.jsonl`（数据库文件旁边）的工作区会从无范围召回里消失，`mema doctor` 报告生效清单。
 
-几个让人安心的点：
+## 配置
 
-- **宁可漏报，不乱报。** 写入时的提醒门槛很高：先过确定性漏斗（余弦带、规则证据），再由判定模型给出"真冲突"判决且置信度 ≥ 阈值（`mdeberta_notice_min_prob`，现 0.8——0.17.2 起随 v58_ep3_fp16 换装定稿）。判定为"可能冲突"的灰区提醒同样有门（0.17.2 起）：组合置信 P(冲突)+P(疑似) ≥ `mdeberta_possible_min_susp`（默认 0.7）才发 info 级提示。不满足就静默转入后台扫描，不拿不确定的东西打扰你。
-- **后台还有一道兜底扫描。** 定时扫描（`scan_candidates`）门槛宽、保召回，模型不在线也能跑出确定性候选。两道门配合：宽门保证不漏，严门保证不吵。
-- **想清一遍全库的重复记忆？** 用 `memory_repair(task="scan_duplicates")` 一次拿全：服务端把所有页的近重复对聚合成一份有界结果（最多 200 对，默认只给 id/主题/workspace/原因/距离这类轻量字段，`include_quotes=true` 再附上证据引文），不会把 agent 会话撑爆。分诊后该合并的走 `merge_memories`，误报的照旧用 `record_conflict` 压掉。
-- **装完记得设定时任务。** 迷码自己不带定时器（扫描的价值闭环在 agent 判流，得靠外部调度器到点唤醒 agent）。0.16.0 规格升到 v2：①每小时先反复踢一脚 `memory_repair(task="scan_pipeline", data={"action": "kick"})` 直到返回 `complete=true`（服务端自己走库：全量还是增量、断点在哪全由水位线自判；扫出的疑似项进独立的判断队列，不进通知、也不进用户面冲突列表），再按页清队列 `memory_repair(task="scan_queue", data={"action": "page"}` / `action="submit"`——服务端代行落库：驳回即抑制源，确证时 agent 只需给 slot 和各组显示值）；②每天跑一次 `doctor` 做治理提醒。`scan_candidates` 降级为手动/排查通道；老版「分页+分诊」任务会被 doctor 的 `conflicts.spec_drift` 点名重建。完整规格：`memory(action="help", data={"topic": "scheduled_tasks"})`。
-- **改坏了能查。** 冲突单里钉死了当时的记忆版本和证据原文位置，每一步修改都有记录，改错了能追回来。
-- **裁决默认改数据，卡住能救。** 裁决的默认动作是修正记忆里错的数据（`update_current_claim` 改写正文 / `append_superseded_context` 补充取代说明）；只有你明确说"保留历史记录"才走 `preserve_historical_record`。0.15.15 之前，选中的值如果是长短语（比如"上传要用显式文件名"），`use_as_resolution` 会被一个结构性不可能通过的正文校验卡死，整个冲突单进退不得；现在这个校验只留给 `update_current_claim`（你可以把选定值写进正文来自证），`replan_conflict` 还支持直接换 `chosen_value`，改错值也能救回来。
-
-## 多个项目怎么隔开？
-
-迷码用 workspace（工作区）区分项目，就像给每个项目一个抽屉：
-
-```text
-  isolation=none              isolation=weak               isolation=strict
-  ┌───────────────────┐       ┌───────────────────┐        ┌───────────────────┐
-  │ 所有抽屉全打通，      │       │ 都能翻到，但同抽屉的   │        │ 只给你看当前抽屉，     │
-  │ 谁都能翻            │       │ 排在前面            │        │ 新抽屉要先经你确认     │
-  └───────────────────┘       └───────────────────┘        └───────────────────┘
-   适合自己一个人随便用          适合多项目日常                适合项目间不能串的场景
-```
-
-细节（名字相近的项目怎么合并、`default` 全局池为什么特殊等）见[集成指南](docs/INTEGRATION.zh-CN.md#workspace-归一与-acl)。
-
-### 召回黑名单（0.15.5）
-
-有些抽屉的内容不该混进日常搜索——比如 mema-twin（迷码分身）存的工作偏好：它们已经通过"编译成 persona prompt"这条正式通道注入，再被普通搜索翻出来就是重复打扰，还挤占搜索结果名额。
-
-在数据库文件旁边放一个 `recall_blacklist.jsonl`（每行一个 workspace 名，空行和 `#` 注释随意），列进去的抽屉就从**不带 workspace 参数的普通 find 召回**里消失：
-
-```text
-  find（不指定 workspace）      find（显式指定 workspace）      治理视图 / 精确过滤 / 按 id 读
-  ┌───────────────────┐       ┌───────────────────┐        ┌───────────────────┐
-  │ 黑名单抽屉不出现      │       │ 指到哪个抽屉就看哪个，  │        │ 一切照旧，不受影响     │
-  │                    │       │ 黑名单抽屉也一样     │        │                    │
-  └───────────────────┘       └───────────────────┘        └───────────────────┘
-```
-
-不用重启，改完下次 find 就生效。没有这个文件时用内置默认（`mema-twin`）；文件建出来就完全以文件为准，清空文件=全部放行。`doctor` 会报告当前生效的黑名单。
-
-### 搜不到就明说，不够格就不返回（0.15.9 起）
-
-两件事让 find 的结果更干净，都是拿真库 340 条人工标注数据标定出来的（`docs/eval-relevance-floor-2026-09-08.md`）：
-
-- **没有相关记忆时老实报空**，不再塞"最近记的几条"垫场——以前问一个库里没有的问题，会返回几条按时间排的无关记忆，agent 一不留神就当答案引用了。现在返回空 + 一句"换措辞或加 tags_filter 再试"。
-- **打分不过线的候选不进结果页**：每条召回结果都有个综合分（标题/标签/正文的字面证据 + 语义通道一起算），低于 8.1 分的直接不返回。实测能切掉 73% 标注为无关的候选、清掉 91% 的域外噪音（比如在个人笔记库里搜法条），误伤的 4/45 条相关记录每一条都有更强的同类结果顶着。翻最近的记忆用空 query 搜（那是浏览，不是兜底）。
-
-## 浏览器控制台：治理审计 + 知识库工作台（0.18.0）
-
-`memory-arbiter console` 打开本地浏览器控制台（仅监听 127.0.0.1）。
-
-```text
-┌ 顶栏：全局桶选择器（strict 必选单桶）──────────────────┐
-│ 总览 │ 冲突审计 │ 记忆 │ 知识库 │ 体检 │ 设置          │
-└──────────────────────────────────────────────────────┘
-```
-
-- **治理审计**：总览、冲突左右对照、体检、配置查看——这些仍然是只读的。
-- **知识库页**：哪些记忆算"知识"由你自己策展——一键加入/移出；从文档
-  提取的记忆会进"候选池"批量勾选；也能搜索后逐条加入。成员标记是
-  独立的 `kb_member` 数据列，agent 重写标签也冲不掉。左侧按
-  工作区→标签两层树浏览，正文渲染 markdown，详情页带一跳关系图。
-- **LLM 学习工作台**：在设置页填你自己的 OpenAI 兼容 API（地址 / Key /
-  模型 / 上下文预算——仅存本地、由后端代为调用，页面拿不到 Key）。
-  勾选记忆后一键：快速总结、知识点梳理、生成考试题、费曼讲解、
-  反过来考我、时间线梳理，或输入自定义指令。思考过程灰色小字可折叠。
-  结果可"保存为记忆"，走标准写入管道（作者标记 console），自动进
-  知识库。Key 为明文本地存储，建议 config.json 文件权限设为 600。
-
-写入侧不打扰：agent 写记忆时不会问你"这条算不算知识"——不确定就不
-标记，知识库由你在控制台自己策展。
-
-## 出问题了怎么办？
-
-```bash
-mema doctor          # 体检：配置、索引、冲突积压……有毛病会告诉你怎么修
-mema doctor --deep   # 连模型也一起检查
-mema console         # 打开本地网页控制台（只读，看看库里都有啥）
-```
-
-常见情况：
-
-- **没装向量组件**：照样能用，只是"按意思搜"降级为"按字面搜"。
-- **本地小模型没配**：冲突发现不会停，只是写入时的即时提醒会关掉，由后台扫描兜底。
-- **数据库文件坏了或没法写**：写入会改走一个只追加的备份文件（JSONL），不会假装存上了。
-- **崩溃/强制关机后**：先跑 `memory(action="status")` 看索引覆盖率，再按提示重建索引、跑一遍扫描。索引是"目录"，重建它是安全无害的。
-
-## 从旧版本升级（重要，先看再动）
-
-> ⚠️ **0.14.8 升级警告：** 当前 schema generation 仍为 `workspace_state_v1`；更早的数据库**直接启动会被拒绝**，必须走迁移命令。迁移会**丢弃旧的冲突/裁决/提醒历史**（记忆原文和历史都保留），升级完成后需要跑一遍全库扫描重新发现冲突。结构迁移与向量兼容现在独立判断：空间不一致会禁用向量并等待显式重建，不再阻断结构升级。
-
-```bash
-# 1. 先预览，看看会动什么（不动真格）
-mema upgrade --dry-run
-
-# 2. 停掉所有连着迷码的 AI 客户端，然后做备份：
-sqlite3 /绝对路径/memory.sqlite3 "PRAGMA wal_checkpoint(TRUNCATE);"
-cp /绝对路径/memory.sqlite3 /绝对路径/memory.pre-0.14.sqlite3
-
-# 3. 正式迁移（会自动切换配置；旧数据库文件永远不会被删）
-mema upgrade
-
-# 4. 重启客户端，验证
-mema doctor --json
-```
-
-为什么要先跑那条 `sqlite3` 命令？因为数据库的"最新流水"可能还在 WAL 暂存文件里，只拷主文件会拷丢。这条命令先把流水并入主文件，再拷贝才是完整的。
-
-**升级后要做点什么吗？** 不用。第一次启动迷码会自己开个后台线程把语句向量补齐（记忆的"每句话向量"，冲突检测用）。进度看 `mema doctor` 的 `rows.coverage`；没装向量模型时它会先挂起，装好后自动继续，全程不用手动跑脚本。
-
-## 配置（进阶）
-
-配置文件在 `~/.config/memory-arbiter/config.json`（`mema setup` 会帮你生成）。0.15.0 起**配置只认文件**：所有可调项就是下面这 28 个键（0.17.1：退役 `claims.required`、`semantic_conflict.model_path` 和 `n_gpu_layers`，新增四个 `mdeberta_*` 键；0.17.2：新增 `semantic_conflict.mdeberta_possible_min_susp`；0.18.0：新增六个 `llm.*` 键——Console LLM 学习工作台的自有端点），引擎参数、超时、阈值、上限全部冻结为内置常量，不用再操心。
-
-| 配置项 | 白话说明 | 默认值 |
-| --- | --- | --- |
-| `client` / `agent_id` | 调用身份（"是谁在写"），必填：没有内建默认值，缺失或为空时服务拒绝启动。stdio 下这组配置身份即进程级调用身份（归因、策略判定都用它）；HTTP 模式以请求头为准 | 无（必填） |
-| `db_path` | 数据库文件放哪 | 安装时生成 |
-| `backup_jsonl` | 数据库写不进去时的兜底备份文件（只追加） | 安装时生成 |
-| `workspace` | 写入时不带 workspace 用的默认工作区 | `default` |
-| `isolation` | workspace 隔离档：`none` / `weak` / `strict` | `none` |
-| `llm.base_url` / `llm.model` / `llm.api_key` | Console LLM 学习工作台自己的 OpenAI 兼容端点（0.18.0，全部可选——不填=工作台不可用）。本地明文存储，写入时强制 `0600` 权限；Key 只由 Console 后端代为调用，页面拿不到 | 无 |
-| `llm.max_context_tokens` | 工作台单次调用的材料预算（默认 `0`=自动，范围 0–10,000,000） | `0` |
-| `llm.max_output_tokens` | 输出上限（默认 `8192`，范围 1–1,000,000）——防思考型模型烧光输出预算 | `8192` |
-| `llm.timeout_seconds` | 单请求超时（默认 `120`，范围 1–3600）；写入与重载两侧同一套钳制 | `120` |
-| `mcp.transport` | `stdio`（默认，一对一）或 `streamable-http`（多个客户端共享一个本地服务） | `stdio` |
-| `mcp.http.host` / `mcp.http.port` | HTTP 模式的监听地址（只允许本机）和端口；地址路径固定是 `/mcp`，不用配 | `127.0.0.1:8000` |
-| `update_check.enabled` | 唯一会联网的功能：偶尔查一下 PyPI 有没有新版本。关掉就完全不联网 | `true` |
-| `embedding.model_path` | 本地 embedding 模型（GGUF 文件）路径——**填了就是"我要用按意思搜"**，不用再开别的开关；向量维度自动跟着模型走，换不同维度的模型会在启动时自动按新维度重建向量表 | 无 |
-| `embedding.auto_query` / `embedding.auto_write` | 查询/写入时自动算向量 | `true` |
-| `semantic_conflict.mdeberta_ckpt` | 本地 mDeBERTa 判定模型权重（v58_ep3_fp16，0.17.2 换装后现役，约 531MB，单独下载），用于写入时的冲突判定。填了就自动启用、启动时加载、常驻内存（CPU）。先装 `mdeberta` extra，再下载 ckpt，详见 README「冲突判定模型」一节 | 无 |
-| `semantic_conflict.enabled` | 显式关掉语义冲突的逃生口；不填时指向模型即启用，显式 `false` 优先 | 自动 |
-| `semantic_conflict.on_write` | 写入时的冲突检测：`async`（异步提醒）或 `off`（关闭） | `async` |
-| `semantic_conflict.notice_sync_wait_ms` | 写入响应愿意等多久，好让写时检查结果直接挂在本次响应上（0.15.8 恢复的配置键，默认 `3000`，范围 `0–5000`）；填 `0` = 完全不阻塞写入响应——批量导入就用这个，检查照常后台跑，提醒照样在之后的响应里带出来 | `3000` |
-| `semantic_conflict.mdeberta_model_dir` | 判定模型的 config+tokenizer 目录；缺省=ckpt 同目录的 `mdeberta-base/` | 无 |
-| `semantic_conflict.mdeberta_notice_min_prob` | 判定置信度阈值：低于它的"真冲突"只计数不打扰（现 0.8——0.17.2 换装 v58_ep3_fp16 定稿；v52 时代 0.5 召回优先口径随 ckpt 退役） | `0.8` |
-| `semantic_conflict.mdeberta_possible_min_susp` | 疑似（possible）灰区门（0.17.2 起）：P(冲突)+P(疑似) ≥ 它才出 `info` 灰区提醒，低于只计数（`model_possible_below_gate`）不打扰；填 `0` 回退无门旧行为。按考卷+LoCoMo 金标定标 | `0.7` |
-| `semantic_conflict.mdeberta_batch` | 判定批大小（0=自动按设备分档：Apple Silicon/NVIDIA 16、其余 8） | `0` |
-| `include_size` | 召回复量总开关（0.15.6）：开着，`find` / `read` / 过期审计 / 历史版本四个召回面都带 `size` 块（返回字符数 + 条数 + **token 预估**），agent 汇报成本用同一把尺子；关了就全都不带 | `true` |
-
-关于"指向模型就是意图"再说两句：以前要 `vec.enabled`、`embedding.provider`、`vec.dim` 三个开关凑齐才算开了向量，现在**只看 `embedding.model_path` 填没填**；mdeberta 判定模型同理，配了 ckpt 就启动即加载、常驻不卸载。
-
-环境变量只留 6 个"启动上下文"：`MEMORY_ARBITER_CONFIG` / `DB_PATH` / `BACKUP_JSONL` / `MCP_TRANSPORT` / `CLIENT` / `AGENT_ID`，用来告诉进程用哪个配置文件、哪个库、哪种传输、什么身份（launchd 等场景需要），同名时以配置文件为准。**其余旧环境变量全部失效**，设置了会在 `mema doctor`、控制台设置页和 `memory(action="status")` 里收到 "no longer read" 警告；被删的旧文件键会被忽略并提示 "no longer configurable"。旧键怎么迁移见[集成指南](docs/INTEGRATION.zh-CN.md)。
-
-注意：`mema setup` 生成的模板里 `client`/`agent_id` **留空待填**——在 config.json 里填上，或在客户端接入配置里用环境变量 `MEMORY_ARBITER_CLIENT`/`MEMORY_ARBITER_AGENT_ID` 提供（`examples/` 下的 stdio 示例就是这么做的）。写入时不要在 `remember` 的 `data` 里传 `agent_id`/`client`，这些字段会被当未知字段剔除，归因只来自上述可信身份。
-
-完整的配置示例：[`examples/memory-arbiter.config.example.json`](examples/memory-arbiter.config.example.json)。
-
-多客户端共享一个本地服务（HTTP 模式）时，每个客户端要在配置里写死两个请求头 `X-Mema-Client` 和 `X-Mema-Agent-Id`，客户端会自动带上。注意：这只用于区分"是谁在写"，**不是密码**——服务只监听本机，请勿暴露到网络。示例：[`examples/streamable-http.mcp.json`](examples/streamable-http.mcp.json)。
-
-## HTTP 模式：让多个客户端共用一个迷码
-
-默认的 stdio 模式不用你操心进程：每个 AI 客户端自己把 `mema` 当子进程拉起来，用完关掉。但如果你想让**多个客户端共用同一个本地迷码服务**，就开 HTTP 模式。先看两者区别：
-
-| | stdio（默认） | streamable-http |
-| --- | --- | --- |
-| 谁启动迷码 | 每个客户端各自拉子进程 | 你自己起一个常驻进程，多个客户端连过来 |
-| 要不要常驻后台 | **不要** | **要**，否则关终端就没了 |
-| 客户端怎么配 | 写命令和参数 | 写 url + 两个固定请求头 |
-| 适合 | 一个人、一个客户端 | 一台机器上多个客户端共享同一份记忆 |
-
-开 HTTP 分三步：
-
-1. **配置**：`~/.config/memory-arbiter/config.json` 里 `mcp.transport` 改成 `"streamable-http"`（或设环境变量 `MEMORY_ARBITER_MCP_TRANSPORT=streamable-http`）。
-2. **常驻**：迷码**不自带守护进程功能**，得用进程管理器让它一直在后台跑。macOS 用 launchd，模板见 [`examples/com.memory-arbiter.mema.plist`](examples/com.memory-arbiter.mema.plist)（把里面的 `__MEMA_BIN__` 换成 `which mema` 的绝对路径，丢进 `~/Library/LaunchAgents/` 后 `launchctl load`）。临时试水也可以 `tmux new -d -s mema 'mema'`。
-3. **客户端**：照抄 [`examples/streamable-http.mcp.json`](examples/streamable-http.mcp.json)，填上 `X-Mema-Client` 和 `X-Mema-Agent-Id` 两个请求头。
-
-几个关键提醒：
-
-- **HTTP 固定无状态**：迷码的记忆和 semantic notice 状态在 SQLite，不在 MCP session，所以请求按无状态处理（0.15.0 起固定如此，不再可配）。服务重启后，客户端不会因为旧 session ID 卡住；异步生成并已落库的 notice 仍会附在后续成功的工具响应里。只有尚未落库、仍停留在进程内 worker 队列中的任务可能被进程重启中断。
-- **请求头客户端写死一次**，每次请求自动带，别让 agent 在单次工具调用里动态加身份，那样会被拒。任一头缺失/为空/重复/冲突 → 直接 400 拒绝，不回退默认身份。
-- **只监听 127.0.0.1**，迷码不会绑公网。这两个头只是"是谁在写"的来源标记，**不是密码**。要给远程机器用，自己在前面加带认证的反代，别让迷码直接暴露。
-- **launchd 跑的时候 PATH 和工作目录跟你终端不一样**：`ProgramArguments` 里直接写 `mema` 的**绝对路径**；GGUF 模型路径在 config.json 里也写绝对路径，别用 `~`。
-
-在 `none` / `weak` 模式下，首次成功注册一个 canonical workspace 时，写入响应会返回非阻断的顶层 `workspace_review` notice，并保留 `data.write_hints.new_workspace_detected`。先检查是否与已有 workspace 重复，再由用户授权执行 `confirm_workspaces`；重复写入已有 workspace 不会重复提醒。`strict` 模式继续使用阻断式 `action_required=confirm_new_workspace`，不会再叠加这条非阻断 notice。
-
-### Claude Desktop / Claude Code 连接本机 HTTP
-
-Claude 的本地 MCP 配置入口启动的是 stdio 命令。要复用已经常驻的 mema HTTP 服务、避免再启动第二份 mema，可在 `~/.claude.json` 的 `mcpServers` 下保留这一条配置（当前 Claude Desktop/Cowork 与 Claude Code 可能共用这个用户级文件）：
+只认文件，在 `~/.config/memory-arbiter/config.json`。全部可调的就 28 个键——完整模板在 [`examples/memory-arbiter.config.example.json`](examples/memory-arbiter.config.example.json)，逐键说明与迁移表见 [`docs/INTEGRATION.zh-CN.md`](docs/INTEGRATION.zh-CN.md)。第一天要关心的：
 
 ```json
 {
-  "mcpServers": {
-    "memory-arbiter": {
-      "command": "/opt/homebrew/bin/npx",
-      "args": [
-        "-y",
-        "mcp-remote@0.1.43",
-        "http://127.0.0.1:8000/mcp",
-        "--allow-http",
-        "--transport", "http-only",
-        "--header", "X-Mema-Client:claude",
-        "--header", "X-Mema-Agent-Id:claude",
-        "--silent"
-      ],
-      "env": {
-        "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-        "NO_PROXY": "127.0.0.1,localhost"
-      }
-    }
-  }
+  "client": "your-client",
+  "agent_id": "your-agent-id",
+  "workspace": "default",
+  "isolation": "none",
+  "embedding": { "model_path": ".../embedding.gguf", "auto_query": true, "auto_write": true },
+  "semantic_conflict": {
+    "mdeberta_ckpt": ".../mdeberta-v58_ep3_fp16.pt"
+  },
+  "mcp": { "transport": "stdio" }
 }
 ```
 
-`command` 要换成你机器上 `which npx` 返回的绝对路径。删除原来直接启动 `mema` / `memory-arbiter-mcp` 的同名配置，否则 Claude 可能再拉起第二个服务进程。修改后完全退出并重开 Claude Desktop，Claude Code 会话也要重启。`mcp-remote` 是第三方桥接器，上面固定的是已与 mema 实测通过的版本。若你的 Claude 安装明确使用独立的 Desktop MCP 配置文件，就把同一条配置放在那里，但不要两边重复注册。
+- `embedding.model_path` —— 指向本地 GGUF 模型 = 启用证据召回的唯一意图。
+- `semantic_conflict.mdeberta_ckpt` —— 指向判定模型 = 启用写入时仲裁（见下）。
+- `mcp.transport` —— `stdio`（默认）或多客户端共享时的 `streamable-http`。
+- 启动环境变量只剩 6 个（`MEMORY_ARBITER_CONFIG`/`DB_PATH`/`BACKUP_JSONL`/`MCP_TRANSPORT`/`CLIENT`/`AGENT_ID`）；配置文件优先，其余 `MEMORY_ARBITER_*` 导出会警告"不再读取"。
 
-## 想深入了解
+## HTTP 模式（多个客户端共用一个迷码）
 
-- [INTRO.md](INTRO.md)——架构和设计动机（中文）
-- [docs/INTEGRATION.zh-CN.md](docs/INTEGRATION.zh-CN.md)——精确的工具契约、冲突协议、升级矩阵
-- [CHANGELOG.md](CHANGELOG.md)——版本历史
-- 给 Agent 看的内置规则：`memory(action="help", data={"topic":"agent_onboarding"})`
+stdio（默认）不需要后台进程。要多客户端共用：配置里切 `mcp.transport` 为 `"streamable-http"` → 让进程常驻（迷码不带守护进程，macOS 用 [`examples/`](examples/com.memory-arbiter.mema.plist) 里的 launchd 模板）→ 客户端指向 `http://127.0.0.1:8000/mcp`，带 [`examples/streamable-http.mcp.json`](examples/streamable-http.mcp.json) 里那两个固定身份头（`X-Mema-Client`/`X-Mema-Agent-Id`）。只绑环回；头是来源归因，不是鉴权。Claude Desktop / Claude Code 走一行 `mcp-remote` 桥接条目——照抄同一个示例文件。
+
+## 判定模型（mDeBERTa，可选）
+
+一次性手动安装（约 531MB 的 fp16 checkpoint 不随 PyPI 分发）：
+
+1. `pip install memory-arbiter-mcp[mdeberta]`；
+2. 从 mini-clash release 制品下载 `mdeberta-v58_ep3_fp16.pt`（+ `mdeberta-base` tokenizer 目录）；离线安装包（`memarbiter.cn` 的 bundle）里已包含，装离线包可跳过这步；
+3. config.json 里把 `semantic_conflict.mdeberta_ckpt` 指过去——自动启用、启动预载；`mema doctor` 核验摘要与标签契约。
+
+不配置 = 写入时仲裁停用；定时扫描和 Agent 兜底不受影响。
+
+## 降级说明
+
+- 没有 sqlite-vec / embedding 模型：词法召回和治理照常，证据索引不可用。
+- 没有判定模型：写入时仲裁暂停；定时扫描继续返回确定性候选。
+- SQLite 不可用：写入落追加式 JSONL 兜底；工作区决策状态依赖数据库。
+
+## 从旧版本升级
+
+schema 世代早于 `workspace_state_v1` 的数据库启动时直接拒绝——走并排迁移 `mema upgrade`（先 `--dry-run` 预览；源库永不删除）。完整操作指南（WAL 安全备份、哪些会带走哪些刻意丢弃、升级后的扫描纪元）在 [`docs/UPGRADE.zh-CN.md`](docs/UPGRADE.zh-CN.md)（英文 [`docs/UPGRADE.md`](docs/UPGRADE.md)）。
+
+## 开发
+
+```bash
+uv run pytest -q
+python scripts/sync_version.py --check
+```
+
+开发期 package/docs 可能描述未发布 dev 版本，而 `server.json`（MCP Registry 清单）保持最后发布版；`scripts/sync_version.py` 发版时推进，`--check` 防漂移。中文文档的白话基调是硬约定：重写不得丢失中文叙述。更多背景见 [INTRO.md](INTRO.md) 与 [docs/INTEGRATION.zh-CN.md](docs/INTEGRATION.zh-CN.md)。
+
+## 许可证
+
+Apache-2.0，见 [LICENSE](LICENSE)。

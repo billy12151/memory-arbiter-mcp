@@ -7,6 +7,27 @@
         "X-Mema-Client": "your-client",
         "X-Mema-Agent-Id": "your-agent"
       }
+    },
+    "claude-desktop-bridge": {
+      "_comment": "Claude Desktop / Claude Code through localhost HTTP: one mcp-remote bridge entry under mcpServers in ~/.claude.json. Use the absolute npx path from `which npx`. Remove any older memory-arbiter entry that launches mema directly, or Claude will start a second process. mcp-remote is a third-party bridge; 0.1.43 is the version tested with mema. After changing the file, fully quit and reopen Claude Desktop and restart Claude Code sessions.",
+      "command": "/opt/homebrew/bin/npx",
+      "args": [
+        "-y",
+        "mcp-remote@0.1.43",
+        "http://127.0.0.1:8000/mcp",
+        "--allow-http",
+        "--transport",
+        "http-only",
+        "--header",
+        "X-Mema-Client:claude",
+        "--header",
+        "X-Mema-Agent-Id:claude",
+        "--silent"
+      ],
+      "env": {
+        "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+        "NO_PROXY": "127.0.0.1,localhost"
+      }
     }
   }
 }
