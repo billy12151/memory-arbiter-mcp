@@ -7,7 +7,7 @@
 
 **English | [中文](README.zh-CN.md)**
 
-Give your AI agents a local fact layer they can actually trust. Memory Arbiter (迷码) is a local-first memory and fact service exposed over MCP: agents remember reusable facts once, recall them with evidence, get told when facts collide, and can never silently overwrite what you've locked. One SQLite file on your machine holds every fact in full; every model — embeddings, conflict judge — runs locally.
+Memory Arbiter (迷码) is a capability amplifier for your AI agents: plug it in over MCP and every agent you use — Claude Code, Cursor, Codex, ZCode — becomes one assistant with a running memory. Decisions made in Claude today are usable in Cursor tomorrow; every fact carries its provenance, collisions get surfaced before they bite, and what you've locked cannot be silently overwritten. One SQLite file on your machine holds every fact in full; every model — embeddings, conflict judge — runs locally.
 
 > **Current release: `0.17.2`** · local-first · MCP-native · 4 tools · knowledge workbench in `0.18.0` (on main now)
 
