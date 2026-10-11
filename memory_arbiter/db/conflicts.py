@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from typing import Any, Iterator, TYPE_CHECKING
 from ..degrade import DegradeState
 
+from ..validation import MAX_SQLITE_INTEGER
 from ..acl import WorkspaceScope, workspace_scope_sql
 from ..models import ConflictMember, ConflictValueGroup, utc_now_iso
 from ..semantic_conflict import normalize_value
@@ -550,6 +551,12 @@ class ConflictStore(_ConflictsNormMixin, _ConflictsReadMixin):
             plan: list[dict[str, Any]] = []
             seen: set[int] = set()
             plan_targets = sorted({int(dict(raw).get("memory_id", 0)) for raw in apply_plan})
+            # R2 对抗轮: apply_plan item ids bypass the top-level
+            # MAX_SQLITE_INTEGER validation — binding one into the IN fetch
+            # below raises a raw OverflowError through the MCP surface. Refuse
+            # structurally; unknown ids still reject via the matches check.
+            if any(t > MAX_SQLITE_INTEGER for t in plan_targets):
+                return {"outcome": "invalid_plan"}
             plan_rows: dict[int, Any] = {}
             if plan_targets:
                 placeholders = ",".join("?" for _ in plan_targets)
@@ -676,6 +683,12 @@ class ConflictStore(_ConflictsNormMixin, _ConflictsReadMixin):
             plan: list[dict[str, Any]] = []
             seen: set[int] = set()
             plan_targets = sorted({int(dict(raw).get("memory_id", 0)) for raw in apply_plan})
+            # R2 对抗轮: apply_plan item ids bypass the top-level
+            # MAX_SQLITE_INTEGER validation — binding one into the IN fetch
+            # below raises a raw OverflowError through the MCP surface. Refuse
+            # structurally; unknown ids still reject via the matches check.
+            if any(t > MAX_SQLITE_INTEGER for t in plan_targets):
+                return {"outcome": "invalid_plan"}
             plan_rows: dict[int, Any] = {}
             if plan_targets:
                 placeholders = ",".join("?" for _ in plan_targets)

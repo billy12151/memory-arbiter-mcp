@@ -1072,3 +1072,13 @@ def test_console_i18n_literal_keys_all_defined() -> None:
     )
     missing = sorted(k for k in used if k not in defined)
     assert not missing, f"i18n keys used but not defined: {missing}"
+
+
+def test_timeline_claim_side_full_datetime_day_checked() -> None:
+    """R2 对抗轮 pin: the claim side must mirror the material side's full
+    datetime pass — a fabricated DAY inside a T-form datetime must be caught
+    (the bare-ISO form already was; without this the T-form day forgery
+    passed validation unseen)."""
+    mats = [ContextMaterial(1, "s", "", "上线时间 2026-03-01T09:30:00 完成")]
+    assert validate_output("timeline", "- 2026-03-15T09:30:00 — 伪 [1]", mats)
+    assert validate_output("timeline", "- 2026-03-01T09:30:00 — 上线 [1]", mats) == []

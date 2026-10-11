@@ -112,7 +112,7 @@ stdio 是默认传输。要让多个本地客户端共享一个社区版进程�
 
 ### 写入时 notice
 
-一条用户可见 notice 要求：判定模型给出 `conflict` 且 P ≥ `semantic_conflict.mdeberta_notice_min_prob`（默认 `0.5`）——或确定性直出判定（同键归一值不同、有 grounding）——且无共存 veto、槽位来源完整；`possible_conflict` 落 info 灰区通知。internal（同记忆）发现写时不判死：一律以 pending 落库并附模型意见，终裁归扫描侧强模型。Notice 快照冻结成员版本、值分组、槽位来源、detector/模型版本、任务 id 和去重键。
+一条用户可见 notice 要求：判定模型给出 `conflict` 且 P ≥ `semantic_conflict.mdeberta_notice_min_prob`（默认 `0.5`）——或确定性直出判定（同键归一值不同、有 grounding）——且无共存 veto、槽位来源完整；`possible_conflict` 过 `mdeberta_possible_min_susp` 灰区门（0.17.2 起默认 0.7）才落 info 灰区通知，低于只计数（`model_possible_below_gate`）。internal（同记忆）发现写时不判死：一律以 pending 落库并附模型意见，终裁归扫描侧强模型。Notice 快照冻结成员版本、值分组、槽位来源、detector/模型版本、任务 id 和去重键。
 
 写入成功后，服务器最多等待 `semantic_conflict.notice_sync_wait_ms`（0.15.8 起为活配置键，默认 `3000`，范围 `0–5000`）以完成有界的 notice 任务。等待超时后写入照常成功返回，同一个已接受任务继续异步执行——不会被取消或重算。队列满/入队被拒是另一回事：那时根本没有可等待任务。`checked_no_notice` 只表示该有界写入时任务内的每个候选都走完了漏斗，**不是**全库无冲突的声明。定时扫描仍是持久的召回兜底。
 

@@ -607,6 +607,13 @@ def write_llm_config(
     with tmp_path.open("w", encoding="utf-8") as fh:
         json.dump(cfg, fh, ensure_ascii=False, indent=2)
         fh.write("\n")
+    # The tmp carries the same secrets as the final file — lock it before the
+    # swap so there is no plaintext window at the default umask (R1 review).
+    # If this fails the post-replace chmod below still enforces 0600.
+    try:
+        os.chmod(tmp_path, 0o600)
+    except OSError:
+        pass
     os.replace(tmp_path, config_path)
     # The config can carry an llm.api_key — enforce owner-only permissions
     # instead of relying on the user's umask (plan §B.2.2 promised the 600

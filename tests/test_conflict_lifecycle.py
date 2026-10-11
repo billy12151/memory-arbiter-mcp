@@ -1920,3 +1920,35 @@ def test_lineage_version_evolution_veto_e1() -> None:
     ).reason == "lineage_version_evolution"
 
 
+
+
+def test_judge_and_replan_reject_out_of_range_plan_ids(tmp_path: Path) -> None:
+    """R2 对抗轮 pin: apply_plan item ids bypass the top-level id-range
+    validation, and the R3 IN-ized member fetch binds them directly — an
+    out-of-range id must come back as a structured invalid_plan, not a raw
+    OverflowError through the MCP surface (the old per-row order rejected it
+    via the empty-matches check before binding)."""
+    db = _db(tmp_path)
+    left, right = _memory(db, "mysql"), _memory(db, "sqlite")
+    created = _record(db, [_member(left, "mysql"), _member(right, "sqlite")])
+    huge = 10**30
+
+    judged = db.judge_conflict(
+        created["conflict_id"], expected_revision=1, chosen_value="sqlite",
+        decided_by="user", decided_ref="chat", decision_reason="confirmed",
+        apply_plan=[{"memory_id": huge, "action": "preserve_historical_record"}],
+    )
+    assert judged["outcome"] == "invalid_plan"
+
+    applying = db.judge_conflict(
+        created["conflict_id"], expected_revision=1, chosen_value="sqlite",
+        decided_by="user", decided_ref="chat", decision_reason="confirmed",
+        apply_plan=[{"memory_id": left, "action": "preserve_historical_record"}],
+    )
+    assert applying["outcome"] == "applying"
+
+    replanned = db.conflicts.replan_conflict(
+        created["conflict_id"], expected_revision=applying["revision"],
+        apply_plan=[{"memory_id": huge, "action": "preserve_historical_record"}],
+    )
+    assert replanned["outcome"] == "invalid_plan"

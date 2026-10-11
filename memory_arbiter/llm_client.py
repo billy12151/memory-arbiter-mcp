@@ -271,6 +271,13 @@ def validate_output(action: str, output: str, materials: list[ContextMaterial]) 
                 material_times.add(dt[:10])
                 material_times.add(dt[:7])
         claimed = set(_YEAR_RE.findall(text)) | set(_ISO_RE.findall(text))
+        # Claim side mirrors the material side: _ISO_RE's trailing \b stops
+        # before the "T", so without the explicit pass a fabricated full
+        # datetime would only ever claim its year-month prefix and its DAY
+        # would pass validation unseen (R2 对抗轮).
+        for dt in _ISO_DT_RE.findall(text):
+            claimed.add(dt[:10])
+            claimed.add(dt[:7])
         fabricated = claimed - material_times
         if fabricated:
             errors.append(
