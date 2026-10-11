@@ -157,38 +157,3 @@ class _ConflictsReadMixin:
         memory = self._db.get_memory(int(memory_id))
         return int(memory["version"]) if memory else None
 
-    def is_pair_dismissed(self, left_id: int, right_id: int) -> bool:
-        pair = sorted({int(left_id), int(right_id)})
-        if len(pair) != 2 or not self._db_available:
-            return False
-        with self.connection() as conn:
-            row = conn.execute(
-                "SELECT 1 FROM conflicts AS c WHERE c.status='not_a_conflict' "
-                "AND json_array_length(c.member_versions)=2 "
-                "AND EXISTS (SELECT 1 FROM json_each(c.member_versions) WHERE json_extract(value,'$.memory_id')=?) "
-                "AND EXISTS (SELECT 1 FROM json_each(c.member_versions) WHERE json_extract(value,'$.memory_id')=?) LIMIT 1",
-                (pair[0], pair[1]),
-            ).fetchone()
-        return row is not None
-
-    def dismissed_pairs_for(self, memory_ids: list[int]) -> set[tuple[int, int]]:
-        wanted = sorted({int(value) for value in memory_ids})
-        if not wanted or not self._db_available:
-            return set()
-        with self.connection() as conn:
-            rows = conn.execute(
-                "SELECT c.id,CAST(json_extract(member.value,'$.memory_id') AS INTEGER) AS memory_id "
-                "FROM conflicts AS c JOIN json_each(c.member_versions) AS member "
-                "WHERE c.status='not_a_conflict' AND json_array_length(c.member_versions)=2 "
-                "AND EXISTS (SELECT 1 FROM json_each(c.member_versions) AS linked "
-                "JOIN json_each(?) AS wanted ON json_extract(linked.value,'$.memory_id')=wanted.value) "
-                "ORDER BY c.id,memory_id",
-                (_canonical_json(wanted),),
-            ).fetchall()
-        by_conflict: dict[int, set[int]] = {}
-        for row in rows:
-            by_conflict.setdefault(int(row["id"]), set()).add(int(row["memory_id"]))
-        return {
-            tuple(sorted(ids))  # type: ignore[misc]
-            for ids in by_conflict.values() if len(ids) == 2
-        }

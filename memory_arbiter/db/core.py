@@ -46,7 +46,6 @@ __all__ = [
     "_CJK_CHAR_RE",
     "_canon_entity",
     "_canon_scope",
-    "_coerce_tags_db",
     "_coerce_ws",
     "_normalize_alias_key",
     "_subject_tokens",
@@ -465,16 +464,6 @@ def _canon_scope(value: Any) -> str:
     """Same lexical normalisation as entity; kept separate for API clarity."""
     from ..text import canon_scope
     return canon_scope(value)
-
-
-def _coerce_tags_db(raw: Any) -> list[str]:
-    """Normalise a ``tags`` value into a deduped ``list[str]``.
-
-    Implementation lives in text.coerce_tags (Phase 1 single source); thin re-export
-    here so db.py scan logic and existing imports keep working.
-    """
-    from ..text import coerce_tags
-    return coerce_tags(raw)
 
 
 # CJK Unicode range for subject tokenisation (write_hints candidate recall).

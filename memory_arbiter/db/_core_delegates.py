@@ -325,14 +325,8 @@ class _CoreDelegatesMixin:
             conflict_id, reason=reason, status=status, expected_revision=expected_revision,
         )
 
-    def is_pair_dismissed(self, left_id: int, right_id: int) -> bool:
-        return self.conflicts.is_pair_dismissed(left_id, right_id)
-
     def get_memory_version(self, memory_id: int) -> int | None:
         return self.conflicts.get_memory_version(memory_id)
-
-    def dismissed_pairs_for(self, memory_ids: list[int]) -> set[tuple[int, int]]:
-        return self.conflicts.dismissed_pairs_for(memory_ids)
 
     # ------------------------------------------------------------------
     #  Semantic write-time notices

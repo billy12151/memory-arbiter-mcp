@@ -484,8 +484,19 @@ def test_conflict_scope_note_lists_foreign_scoped_conflicts(tmp_path: Path) -> N
     moved_ticket = tools.db.get_conflict(conflict_id)
     assert moved_ticket["status"] == "resolved"
     assert str(moved_ticket["decision_reason"] or "").startswith("voided:")
-    # "released, not suppressed": no not_a_conflict suppression source exists
-    assert not tools.db.is_pair_dismissed(left, right)
+    # "released, not suppressed": no not_a_conflict suppression source exists.
+    # (is_pair_dismissed API was retired 2026-10-11 dead-code batch; the
+    # contract is now asserted with its very own readonly SELECT.)
+    pair = sorted({left, right})
+    with tools.db.connection() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM conflicts AS c WHERE c.status='not_a_conflict' "
+            "AND json_array_length(c.member_versions)=2 "
+            "AND EXISTS (SELECT 1 FROM json_each(c.member_versions) WHERE json_extract(value,'$.memory_id')=?) "
+            "AND EXISTS (SELECT 1 FROM json_each(c.member_versions) WHERE json_extract(value,'$.memory_id')=?) LIMIT 1",
+            (pair[0], pair[1]),
+        ).fetchone()
+    assert row is None
 
 
 def test_governance_impact_and_help_disclosures(tmp_path: Path) -> None:

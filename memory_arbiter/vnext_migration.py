@@ -50,7 +50,6 @@ from .vnext_probe import (  # noqa: F401
     _configured_embedding_space_id as _configured_embedding_space_id,
     _source_vec_state as _source_vec_state,
     _source_active_dim as _source_active_dim,
-    _counts_on_connection as _counts_on_connection,
     _counts as _counts,
     _destructive_counts as _destructive_counts,
     _fingerprint_on_connection as _fingerprint_on_connection,
