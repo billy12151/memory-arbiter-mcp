@@ -28,6 +28,16 @@ Versions follow semantic versioning.
 - **LLM 学习工作台**：用户自带 OpenAI 兼容 API（`llm.*` 六键：base_url/api_key/model/max_context_tokens/max_output_tokens/timeout_seconds；Settings 页可写、key 打码、热加载）；六个学习动作（快速总结/知识点梳理/生成考试题/费曼讲解/反过来考我/时间线梳理）+ 自定义指令；skill 式提示词文件 + 薄结构校验 + 一次纠正性重试 + degraded 透传；reasoning 思考过程灰字折叠展示；上下文按用户维护的最大上下文动态预算（构词求和 token 估算，超预算带逐条估算表报错不截断）。
 - **产物回写（两步走）**：标准 write 管道（request identity 归因 agent_id=console）+ kb_member 置位；PRODUCT_FIELD_REGISTRY 与 MCP schema 零改动。strict 新桶 pending 分支给治理指引。
 - **POST 防御层**：Host 门→Content-Type json→X-Console-Request 头→Content-Length 帽（不读 body）→畸形 JSON 拒；OPTIONS 钉死不带 CORS 头（回归钉）。
+
+### Changed
+
+- **结构审计实施批（2026-10-11，#1273 三线程审计 + 两轮 review 后落地；行为面仅两处错误路径）**：
+  - 死代码裁删：`_coerce_tags_db`、`is_pair_dismissed`/`dismissed_pairs_for`（#997 backlog 铅子①，"released not suppressed" 契约测试改用其本体同款只读 SELECT 断言）、vnext_migration 死导入。
+  - 复用性收口：`outline_rows_for_ids` 并入 `text_unit_rows_for_ids`（逐字节等价双胞胎）且 find 读路径并集一次查询；meta scan-state 三对孪生收敛 `_json_state`/`_record_json_state`；scan_log 末条读取 doctor/audit 双实现合一（`db.audit.last_completed_scan_entry`）；内容 sha256 约定单一入口（`evidence_content_hash`，7 处内联换调）；embed-input 三函数下沉 `embed_inputs.py` leaf（解除 pipeline→tools 反向导入与 "Mirror..." 注释耦合）。
+  - 错误处理对称：`missing_subject_tags_rows`/`missing_summary_vec_rows` 的 sqlite3.Error 静默空返回改为 stderr 表面化（对齐 C6 修复版，堵"修复只打复制族一侧"的漂移）。
+  - SQL 纪律：scan_enumerate 每 anchor 对同行 memories 的三次单行查询合一。
+  - 测试基建：`tests/conftest.py` 单一 `clear_config_env`（消除 4 份漂移副本——3 份缺 WORKSPACE_RECALL_* 四键）+ `tests/_helpers.py`（make_tools 统一底座 + record_conflict）；42 个 make_tools 定义按差异矩阵收编（13 直收/10 partial/18 豁免，test_scan_pipeline 与 test_vnext_evidence 两共享源保留）。
+  - 测试拆分：5 个超 1500 行测试文件按功能域拆为 21 个文件（registry×4、lifecycle×3、recall×5、config×3、vnext_evidence 门面+6），全仓无 >1500 行文件；收集数守恒（2833/2841）；vnext 门面无状态基建留守、25 个消费文件零改动。
 - **记忆更新/作废入口**：知识库页直呼同进程内部接口（`memory_edit`/`memory_supersede`，单点替换/标签增删/带锁二次确认授权；不配第二个 MCP 服务，避免跨进程并发写）。
 - **LoCoMo-Refined 基准与可复现 harness**（e7477da）：双臂评测（mema 事实写入 vs verbatim 逐句写入）+ 回放工具链；README Benchmark 段同源。`run_locomo.py` 回放基建含 `MEMA_EVAL_MDEBERTA_CKPT` 检测器覆盖与 `--v58t2`/`--v3det` 三代对比旗标。
 
