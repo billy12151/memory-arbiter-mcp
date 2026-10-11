@@ -23,7 +23,7 @@ DRY_RUN=0
 # 模型件路径（默认本机现状;发版时可环境变量覆盖）
 EMBED_GGUF="${EMBED_GGUF:-$HOME/.node-llama-cpp/models/hf_ggml-org_embeddinggemma-300m-qat-Q8_0.gguf}"
 MDEBERTA_BASE="${MDEBERTA_BASE:-/Users/zhangzhiwei17/BillyProject/mini-clash/models/mdeberta-base}"
-MDEBERTA_CKPT="${MDEBERTA_CKPT:-/Users/zhangzhiwei17/BillyProject/mini-clash/models/mdeberta-v52_ep3_fp16.pt}"
+MDEBERTA_CKPT="${MDEBERTA_CKPT:-/Users/zhangzhiwei17/BillyProject/mini-clash/models/mdeberta-v58_ep3_fp16.pt}"
 
 VERSION="$("$REPO/.venv/bin/python" -c 'import memory_arbiter; print(memory_arbiter.__version__)')"
 OUT_DIR="$REPO/dist/mema-offline-$VERSION"
@@ -100,7 +100,8 @@ else
   "embedding": {"model_path": "$MODELS_DIR/$(ls "$HERE/models/"*.gguf | xargs basename)"},
   "semantic_conflict": {
     "mdeberta_ckpt": "$MODELS_DIR/$CKPT_NAME",
-    "mdeberta_notice_min_prob": 0.5
+    "mdeberta_notice_min_prob": 0.8,
+    "mdeberta_possible_min_susp": 0.7
   }
 }
 CFGJSON

@@ -11,6 +11,7 @@ Versions follow semantic versioning.
 
 - **possible_conflict 通道阈值门**：写时判定 argmax=possible 且组合置信 P(conflict)+P(possible_conflict) ≥ `semantic_conflict.mdeberta_possible_min_susp`（新配置键，默认 **0.7**）才落 info 灰区通知；低于静默转扫描兜底，回执新增 `model_possible_below_gate` 计数（与 `model_conflict_below_threshold` 同构）。此前 possible 任意概率都落通知——全管线唯一无门的判决出口，LoCoMo 回放 473 检出里 26% 噪音走此通道。门对写时 cross 腿、internal 腿与 backlog drain 同一生效（共用 `_judge_outcome`）；置 0 = 完整回滚旧行为。
   - 定标：v58_ep3 合并口径（四卷考 236c/198n/56p + LoCoMo 金标 4c/10p/459n）细网格甜区 [0.65, 0.73] 取 0.70——疑似命中 40/66 全保、no→疑似误报 5→2（0.571/0.648/0.648 三条被杀；0.96/0.968 两条任何阈值都压不掉）。依据 `mini-clash data/reports/threshold_joint_exam_locomo_v58ep3.json`。
+- **发布默认换装 v58_ep3_fp16**：judge checkpoint 从 v52_ep3_fp16 线切到 **v58_ep3_fp16**（fp16，~531MB，离线 bundle 自包含），`mdeberta_notice_min_prob` 默认 **0.5 → 0.8**（v52 时代 T=0.5 召回优先口径随 ckpt 退役）——发布默认即生产双门 notice 0.8 / possible 0.7。owner 拍板 2026-10-10（合并标定=四卷考+LoCoMo 金标：考卷 FP 2.02% 回 2.2% 预算、LoCoMo 真冲突 3/4 保持）。README/INTRO/INTEGRATION/离线安装器配置模板同步。
   - doctor `semantic.judge_model` 证据新增 `possible_min_susp`；README/README.zh-CN/INTEGRATION/INTRO 阈值句更新。
 - **eval harness**：LoCoMo 四线程亲审金标 8 对进 `eval/fixtures/conflict/pairs.jsonl`（6 non_conflict 新增 subject_mismatch/same_subject_parallel 细分 + 2 true_conflict，66→74，完整性契约按 locomo_gold_4way cohort 分流）；`evals/locomo/run_locomo.py` 新增 `--conflict-aware` 召回（检测组按 event_time 新者胜、旧成员出上下文）。
 

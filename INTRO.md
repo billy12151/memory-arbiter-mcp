@@ -13,7 +13,7 @@ Evidence KNN 只负责召回和排序。可选的本地 mDeBERTa 双头 checkpoi
 判定引擎不选赢家、不压制扫描、不编辑记忆。确定性漏斗（句预筛、记忆级筛选、余弦带、规则证据）全部保留；确定性直出路径（同键归一值不同）不经判定直接出 notice。
 
 - Scheduled scan 是宽门：规则/KNN 基础候选始终保留，扫描路径不跑任何模型，判断归 agent。判定引擎缺席或失败不会缩小基础候选集（fail-open），未判成的对落 backlog 后续写入重试。
-- Write-time notice 是严门：判定给出 conflict 且 P ≥ `semantic_conflict.mdeberta_notice_min_prob`（现 0.5）——或确定性直出——才形成用户 notice；possible_conflict 也过灰区门（P(冲突)+P(疑似) ≥ `mdeberta_possible_min_susp`，0.17.2 起默认 0.7）才落 info 提示，其余静默转 scan，不向用户倾倒不确定候选。
+- Write-time notice 是严门：判定给出 conflict 且 P ≥ `semantic_conflict.mdeberta_notice_min_prob`（现 0.8，0.17.2 换装 v58_ep3_fp16 定稿）——或确定性直出——才形成用户 notice；possible_conflict 也过灰区门（P(冲突)+P(疑似) ≥ `mdeberta_possible_min_susp`，0.17.2 起默认 0.7）才落 info 提示，其余静默转 scan，不向用户倾倒不确定候选。
 
 `notice_sync_wait_ms` 默认 3000 ms（范围 0–5000，0.15.8 起为活配置键），只决定同步返回或已接受的同一任务继续异步，不参与识别；`0` 表示完全异步，queue full 则根本没有已接受任务。`job_timeout_ms` 冻结为 10000 ms（0.17.1 合一总池重标），只在 semantic 队列已有积压时作为 pair 间让路预算；空队列时不生效，已开始的判定批次只受 `inference_timeout_ms`（30000 ms，冻结）控制。`checked_no_notice` 仅表示本次有界检查完成，不代表全库无冲突。evidence/semantic 队列都是进程内队列，崩溃、强制关停、queue full 或模型子进程重启后要按 coverage 恢复：先反复 `rebuild_evidence` 到 eligible coverage 完整/向量 ready，再分页执行 `scan_candidates`。
 

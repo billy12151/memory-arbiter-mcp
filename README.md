@@ -107,7 +107,7 @@ Lexical and evidence channels recall independently and merge per memory with rec
 
 Evidence KNN recalls sentence-level neighbours; it does not decide conflict truth. Since 0.17.1, each candidate pair that survives the deterministic funnel (sentence prefilter, memory-level screen, cosine band, rule evidence) is judged by an optional local **mDeBERTa** encoder (three classes: `conflict` / `no_conflict` / `possible_conflict`, plus a mechanism head). The judge sees the two bare row texts — no metadata, no prompt engineering — and returns calibrated probabilities:
 
-- `conflict` at P ≥ `semantic_conflict.mdeberta_notice_min_prob` (default 0.5) → a normal-severity notice;
+- `conflict` at P ≥ `semantic_conflict.mdeberta_notice_min_prob` (default 0.8, the v58_ep3_fp16 production pair since 0.17.2) → a normal-severity notice;
 - `possible_conflict` at P(conflict)+P(possible_conflict) ≥ `semantic_conflict.mdeberta_possible_min_susp` (default 0.7, since 0.17.2) → an `info`-severity notice (grey-zone reference, no `action_required`); below the gate the pair is counted (`model_possible_below_gate`), not notified;
 - `no_conflict` → silent clear (counted in the receipt).
 
@@ -219,8 +219,8 @@ The complete user surface is 28 keys (0.15.14: added `semantic_conflict.n_gpu_la
   },
   "semantic_conflict": {
     "enabled": true,
-    "mdeberta_ckpt": "~/.local/share/memory-arbiter/models/mdeberta-v52_ep3_fp16.pt",
-    "mdeberta_notice_min_prob": 0.5,
+    "mdeberta_ckpt": "~/.local/share/memory-arbiter/models/mdeberta-v58_ep3_fp16.pt",
+    "mdeberta_notice_min_prob": 0.8,
     "mdeberta_possible_min_susp": 0.7,
     "on_write": "async",
     "notice_sync_wait_ms": 3000
@@ -250,12 +250,12 @@ The complete user surface is 28 keys (0.15.14: added `semantic_conflict.n_gpu_la
 | `include_size` | Global switch for the recall size block (v0.15.6): on = `find`/`read`/`expired`/`history` all attach `{returned_chars, returned_count, tokens_estimate}`; off = none of them do |
 | `embedding.model_path` | Local GGUF embedding model — pointing at it is the sole intent to enable sqlite-vec evidence recall |
 | `embedding.auto_query` / `auto_write` | Auto-embed at query/write time (default `true`) |
-| `semantic_conflict.mdeberta_ckpt` | Local mDeBERTa checkpoint (v52_ep3_fp16, ~531MB, ships separately) for write-time conflict judging. Configured → auto-enabled, loaded at startup, kept resident (CPU fp32). Install the `mdeberta` extra first; see the model-download note below |
+| `semantic_conflict.mdeberta_ckpt` | Local mDeBERTa checkpoint (v58_ep3_fp16 since the 0.17.2 swap, ~531MB, ships separately) for write-time conflict judging. Configured → auto-enabled, loaded at startup, kept resident (CPU fp32). Install the `mdeberta` extra first; see the model-download note below |
 | `semantic_conflict.enabled` | Explicit off-switch; unset + `mdeberta_ckpt` means enabled, explicit `false` wins |
 | `semantic_conflict.on_write` | Write-time detection: `async` (default) or `off` |
 | `semantic_conflict.notice_sync_wait_ms` | How long the write response waits for the post-commit check so its result rides along (v0.15.8, default `3000`, clamp `0–5000`); `0` = never block the write response — batch ingestion still gets the check run asynchronously and notices deliver on a later response |
 | `semantic_conflict.mdeberta_model_dir` | config.json + tokenizer directory; default = `<ckpt dir>/mdeberta-base` |
-| `semantic_conflict.mdeberta_notice_min_prob` | P(conflict) floor for a normal-severity notice (default `0.5`); below it the pair is counted, not notified |
+| `semantic_conflict.mdeberta_notice_min_prob` | P(conflict) floor for a normal-severity notice (default `0.8`, the v58_ep3_fp16 production pair since 0.17.2); below it the pair is counted, not notified |
 | `semantic_conflict.mdeberta_possible_min_susp` | P(conflict)+P(possible_conflict) floor for an `info`-severity grey-zone notice (default `0.7`, v0.17.2; calibrated on the exam + LoCoMo gold corpora); below it the pair is counted (`model_possible_below_gate`), not notified; `0` restores the pre-0.17.2 ungated behavior |
 | `semantic_conflict.mdeberta_batch` | Judge batch size (default `0` = auto, device-tiered: 16 with a GPU — Apple Silicon / NVIDIA — 8 on CPU; an explicit value `>0` overrides the tier. No startup probe) |
 | `mcp.transport` | `stdio` (default) or opt-in `streamable-http` localhost server |
@@ -324,10 +324,10 @@ Use the absolute `npx` path from `which npx` on your machine. Remove any older `
 
 ## Conflict judge model (mDeBERTa, optional)
 
-The write-time conflict judge needs a one-time manual install (the 1.1GB checkpoint does not ship on PyPI):
+The write-time conflict judge needs a one-time manual install (the ~531MB fp16 checkpoint does not ship on PyPI):
 
 1. `pip install memory-arbiter-mcp[mdeberta]` (torch CPU wheel ~200MB + transformers);
-2. download `mdeberta-v52_ep3_fp16.pt` (~531MB, fp16 weights) plus the `mdeberta-base` directory (config.json + tokenizer, MB-sized) from the mini-clash release artifacts;
+2. download `mdeberta-v58_ep3_fp16.pt` (~531MB, fp16 weights) plus the `mdeberta-base` directory (config.json + tokenizer, MB-sized) from the mini-clash release artifacts;
 3. point `semantic_conflict.mdeberta_ckpt` at the `.pt` file in config.json (auto-enables + preloads at startup; `mdeberta_model_dir` defaults to a `mdeberta-base` folder next to the checkpoint).
 
 `mema doctor` verifies the dependency, the checkpoint digest, and the judge's label contract. Unconfigured = write-time arbitration disabled (scan/Agent fallback unaffected). ONNX+INT8 (smaller, no torch) is planned for a later release.

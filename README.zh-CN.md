@@ -155,7 +155,7 @@ mema doctor
 
 几个让人安心的点：
 
-- **宁可漏报，不乱报。** 写入时的提醒门槛很高：先过确定性漏斗（余弦带、规则证据），再由判定模型给出"真冲突"判决且置信度 ≥ 阈值（`mdeberta_notice_min_prob`，现 0.5）。判定为"可能冲突"的灰区提醒同样有门（0.17.2 起）：组合置信 P(冲突)+P(疑似) ≥ `mdeberta_possible_min_susp`（默认 0.7）才发 info 级提示。不满足就静默转入后台扫描，不拿不确定的东西打扰你。
+- **宁可漏报，不乱报。** 写入时的提醒门槛很高：先过确定性漏斗（余弦带、规则证据），再由判定模型给出"真冲突"判决且置信度 ≥ 阈值（`mdeberta_notice_min_prob`，现 0.8——0.17.2 起随 v58_ep3_fp16 换装定稿）。判定为"可能冲突"的灰区提醒同样有门（0.17.2 起）：组合置信 P(冲突)+P(疑似) ≥ `mdeberta_possible_min_susp`（默认 0.7）才发 info 级提示。不满足就静默转入后台扫描，不拿不确定的东西打扰你。
 - **后台还有一道兜底扫描。** 定时扫描（`scan_candidates`）门槛宽、保召回，模型不在线也能跑出确定性候选。两道门配合：宽门保证不漏，严门保证不吵。
 - **想清一遍全库的重复记忆？** 用 `memory_repair(task="scan_duplicates")` 一次拿全：服务端把所有页的近重复对聚合成一份有界结果（最多 200 对，默认只给 id/主题/workspace/原因/距离这类轻量字段，`include_quotes=true` 再附上证据引文），不会把 agent 会话撑爆。分诊后该合并的走 `merge_memories`，误报的照旧用 `record_conflict` 压掉。
 - **装完记得设定时任务。** 迷码自己不带定时器（扫描的价值闭环在 agent 判流，得靠外部调度器到点唤醒 agent）。0.16.0 规格升到 v2：①每小时先反复踢一脚 `memory_repair(task="scan_pipeline", data={"action": "kick"})` 直到返回 `complete=true`（服务端自己走库：全量还是增量、断点在哪全由水位线自判；扫出的疑似项进独立的判断队列，不进通知、也不进用户面冲突列表），再按页清队列 `memory_repair(task="scan_queue", data={"action": "page"}` / `action="submit"`——服务端代行落库：驳回即抑制源，确证时 agent 只需给 slot 和各组显示值）；②每天跑一次 `doctor` 做治理提醒。`scan_candidates` 降级为手动/排查通道；老版「分页+分诊」任务会被 doctor 的 `conflicts.spec_drift` 点名重建。完整规格：`memory(action="help", data={"topic": "scheduled_tasks"})`。
@@ -283,12 +283,12 @@ mema doctor --json
 | `update_check.enabled` | 唯一会联网的功能：偶尔查一下 PyPI 有没有新版本。关掉就完全不联网 | `true` |
 | `embedding.model_path` | 本地 embedding 模型（GGUF 文件）路径——**填了就是"我要用按意思搜"**，不用再开别的开关；向量维度自动跟着模型走，换不同维度的模型会在启动时自动按新维度重建向量表 | 无 |
 | `embedding.auto_query` / `embedding.auto_write` | 查询/写入时自动算向量 | `true` |
-| `semantic_conflict.mdeberta_ckpt` | 本地 mDeBERTa 判定模型权重（v52_ep3_fp16，约 531MB，单独下载），用于写入时的冲突判定。填了就自动启用、启动时加载、常驻内存（CPU）。先装 `mdeberta` extra，再下载 ckpt，详见 README「冲突判定模型」一节 | 无 |
+| `semantic_conflict.mdeberta_ckpt` | 本地 mDeBERTa 判定模型权重（v58_ep3_fp16，0.17.2 换装后现役，约 531MB，单独下载），用于写入时的冲突判定。填了就自动启用、启动时加载、常驻内存（CPU）。先装 `mdeberta` extra，再下载 ckpt，详见 README「冲突判定模型」一节 | 无 |
 | `semantic_conflict.enabled` | 显式关掉语义冲突的逃生口；不填时指向模型即启用，显式 `false` 优先 | 自动 |
 | `semantic_conflict.on_write` | 写入时的冲突检测：`async`（异步提醒）或 `off`（关闭） | `async` |
 | `semantic_conflict.notice_sync_wait_ms` | 写入响应愿意等多久，好让写时检查结果直接挂在本次响应上（0.15.8 恢复的配置键，默认 `3000`，范围 `0–5000`）；填 `0` = 完全不阻塞写入响应——批量导入就用这个，检查照常后台跑，提醒照样在之后的响应里带出来 | `3000` |
 | `semantic_conflict.mdeberta_model_dir` | 判定模型的 config+tokenizer 目录；缺省=ckpt 同目录的 `mdeberta-base/` | 无 |
-| `semantic_conflict.mdeberta_notice_min_prob` | 判定置信度阈值：低于它的"真冲突"只计数不打扰（现 0.5，召回优先口径） | `0.5` |
+| `semantic_conflict.mdeberta_notice_min_prob` | 判定置信度阈值：低于它的"真冲突"只计数不打扰（现 0.8——0.17.2 换装 v58_ep3_fp16 定稿；v52 时代 0.5 召回优先口径随 ckpt 退役） | `0.8` |
 | `semantic_conflict.mdeberta_possible_min_susp` | 疑似（possible）灰区门（0.17.2 起）：P(冲突)+P(疑似) ≥ 它才出 `info` 灰区提醒，低于只计数（`model_possible_below_gate`）不打扰；填 `0` 回退无门旧行为。按考卷+LoCoMo 金标定标 | `0.7` |
 | `semantic_conflict.mdeberta_batch` | 判定批大小（0=自动按设备分档：Apple Silicon/NVIDIA 16、其余 8） | `0` |
 | `include_size` | 召回复量总开关（0.15.6）：开着，`find` / `read` / 过期审计 / 历史版本四个召回面都带 `size` 块（返回字符数 + 条数 + **token 预估**），agent 汇报成本用同一把尺子；关了就全都不带 | `true` |
