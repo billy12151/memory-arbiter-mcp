@@ -244,7 +244,12 @@ class _MemVectorsMixin:
                     "SELECT id, subject, tags FROM memories WHERE status='active' "
                     "ORDER BY id"
                 ).fetchall()
-        except sqlite3.Error:
+        except sqlite3.Error as exc:
+            # O4 (2026-10-11, aligning with missing_row_vector_rows' C6 fix):
+            # a silent empty return starves the backfill forever (the review
+            # P1-2 trap); surface the failure instead.
+            import sys
+            print(f"missing_subject_tags_rows failed: {exc}", file=sys.stderr)
             return []
         out: list[dict[str, Any]] = []
         for row in rows:
@@ -304,7 +309,12 @@ class _MemVectorsMixin:
                     "SELECT id, subject, tags, content FROM memories WHERE status='active' "
                     "ORDER BY id"
                 ).fetchall()
-        except sqlite3.Error:
+        except sqlite3.Error as exc:
+            # O4 (2026-10-11, aligning with missing_row_vector_rows' C6 fix):
+            # a silent empty return starves the backfill forever (the review
+            # P1-2 trap); surface the failure instead.
+            import sys
+            print(f"missing_summary_vec_rows failed: {exc}", file=sys.stderr)
             return []
         out: list[dict[str, Any]] = []
         for row in rows:

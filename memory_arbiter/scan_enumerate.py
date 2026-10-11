@@ -255,9 +255,13 @@ class _ScanEnumerate:
                 for mid, bucket in (suspected_anomalies or {}).items()
             }
             for anchor_id in anchors:
+                # B3 (2026-10-11 SQL discipline): the anchor row used to be
+                # fetched three times (workspace here, version via a scalar
+                # subquery inside the units SQL, content further below) — one
+                # single-row SELECT now serves all three.
                 anchor_row = conn.execute(
-                    "SELECT COALESCE(NULLIF(workspace_canonical,''),workspace) AS workspace "
-                    "FROM memories WHERE id=?",
+                    "SELECT COALESCE(NULLIF(workspace_canonical,''),workspace) AS workspace, "
+                    "content, version FROM memories WHERE id=?",
                     (anchor_id,),
                 ).fetchone()
                 # C3b grouping: pair only within the anchor's own bucket. The
@@ -282,27 +286,26 @@ class _ScanEnumerate:
                 # (subject version progression is timeline evolution, not a
                 # numeric clue) — the row-channel counterpart of the unit
                 # channel's kind='text' anchor filter.
+                anchor_version = int(anchor_row["version"]) if anchor_row else None
                 units = conn.execute(
                     """SELECT r.id AS eid, r.text AS text, v.embedding AS embedding,
                               r.memory_version AS memory_version, r.content_hash AS content_hash,
                               r.start_offset AS start_offset, r.end_offset AS end_offset
                        FROM memory_row r
                        JOIN memory_row_vec v ON v.id=r.id
-                       WHERE r.memory_id=? AND r.memory_version=(
-                           SELECT version FROM memories WHERE id=?)
+                       WHERE r.memory_id=? AND r.memory_version=?
                          AND r.kind != 'subject'
                        ORDER BY r.id""",
-                    (anchor_id, anchor_id),
+                    (anchor_id, anchor_version),
                 )
                 first_unit = units.fetchone()
                 if first_unit is None:
                     # Async republish window or a permanently failed publish:
-                    # surface it instead of silently skipping forever.
+                    # surface it instead of silently skipping forever. (A
+                    # missing anchor row lands here too: version NULL binds
+                    # nothing, mirroring the old subquery's empty result.)
                     stale_anchors += 1
-                anchor_content_row = conn.execute(
-                    "SELECT content FROM memories WHERE id=?", (anchor_id,),
-                ).fetchone()
-                anchor_content = str(anchor_content_row["content"]) if anchor_content_row else ""
+                anchor_content = str(anchor_row["content"]) if anchor_row else ""
                 peer_content_cache: dict[int, str] = {}
 
                 def peer_content(peer_mid: int) -> str:
