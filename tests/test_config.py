@@ -1325,7 +1325,7 @@ def test_semantic_mdeberta_ckpt_alone_auto_enables_and_preloads(
     assert settings.semantic_conflict_mdeberta_ckpt == ckpt
     # model_dir default = ckpt-adjacent mdeberta-base (§3.6)
     assert settings.semantic_conflict_mdeberta_model_dir == tmp_path / "mdeberta-base"
-    assert settings.semantic_conflict_mdeberta_notice_min_prob == 0.5  # owner 2026-10-05 终拍 T=0.5
+    assert settings.semantic_conflict_mdeberta_notice_min_prob == 0.8  # 0.17.2 换装 v58_ep3_fp16 定稿（owner 2026-10-10）；v52 时代 T=0.5 随 ckpt 退役
     assert any("auto-enabled" in warning for warning in settings.config_warnings)
 
     tools = MemoryTools(settings)

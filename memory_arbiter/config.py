@@ -60,8 +60,9 @@ class Settings:
     # wins); preload/resident are frozen true — a configured checkpoint loads
     # at startup and stays resident.
     semantic_conflict_enabled: bool = False
-    # 0.17.1: the mDeBERTa judge checkpoint (v52_ep3_fp16 line). Configured →
-    # arbitration enabled; unset → arbitration disabled (fail-open, doctor reports).
+    # 0.17.1: the mDeBERTa judge checkpoint (v58_ep3_fp16 since the 0.17.2
+    # release swap). Configured → arbitration enabled; unset → arbitration
+    # disabled (fail-open, doctor reports).
     semantic_conflict_model_path: Path | None = None  # 0.17.1 vestigial: never populated from config (fixtures may set)
     semantic_conflict_mdeberta_ckpt: Path | None = None
     # config.json + tokenizer dir; default = <ckpt dir>/mdeberta-base (§3.6).
@@ -69,8 +70,11 @@ class Settings:
     # 0.17.1 owner 拍板: P(conflict) ≥ this → normal notice; below → counted
     # only. possible_conflict 的门槛见下方 possible_min_susp（0.17.2 起有灰区门，
     # 非无门直出）。
-    # owner 2026-10-05 终拍 T=0.5（召回优先，阈值不抬高，后续靠模型提升）
-    semantic_conflict_mdeberta_notice_min_prob: float = 0.5
+    # 阈值随 ckpt 换装走：v52 时代 owner 2026-10-05 终拍 T=0.5（召回优先）；
+    # 0.17.2 发布换装 v58_ep3_fp16，owner 2026-10-10 定稿 T=0.80（合并标定=
+    # 四卷考+LoCoMo 金标，考卷 FP 2.02% 回 2.2% 预算）——即生产双门
+    # notice 0.8 / possible 0.7。
+    semantic_conflict_mdeberta_notice_min_prob: float = 0.8
     # 0.17.2 owner 拍板 2026-10-10: possible_conflict 灰区门——argmax=possible
     # 且 P(conflict)+P(possible_conflict) ≥ this 才落 info 通知；低于只计数
     # （model_possible_below_gate）。0 = 旧行为（无门）。定标：v58_ep3 合并
@@ -288,7 +292,7 @@ class Settings:
         # 静默吞成 1.0 = 正式 notice 永不出的配置错误）。
         mdeberta_min_prob_val = clamp_float(
             parse_float(
-                mdeberta_min_prob, 0.5,
+                mdeberta_min_prob, 0.8,
                 name="semantic_conflict.mdeberta_notice_min_prob",
                 warnings=config_warnings,
             ),

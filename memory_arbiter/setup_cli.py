@@ -53,9 +53,9 @@ MODELSCOPE_DOWNLOAD_URL = (
 LLAMA_CPP_CPU_EXTRA_INDEX = "https://abetlen.github.io/llama-cpp-python/whl/cpu"
 
 # Semantic-conflict judge — historical (0.17.1): the Qwen/GGUF semantic judge
-# retired. The judge is mDeBERTa (v52_ep3_fp16 line checkpoint, ~531MB, ships
-# separately) — configured via semantic_conflict.mdeberta_ckpt; setup no
-# longer downloads any judge model. See the README "conflict judge model" section for the
+# retired. The judge is mDeBERTa (v58_ep3_fp16 checkpoint since the 0.17.2
+# release swap, ~531MB, ships separately) — configured via
+# semantic_conflict.mdeberta_ckpt; setup no longer downloads any judge model. See the README "conflict judge model" section for the
 # manual three-step install (extra → checkpoint → config key).
 _DOWNLOAD_CHUNK_BYTES = 1 << 20  # 1 MiB
 _DOWNLOAD_TIMEOUT_S = 60
@@ -539,7 +539,7 @@ def _render_check_step(
     # semantic-conflict judge (0.17.1: mDeBERTa) — informational pointer; the
     # ~531MB checkpoint ships separately and is configured manually.
     lines.append(f"{_color('ℹ', _YELLOW, use_color)} 冲突判定引擎: mDeBERTa（可选能力）")
-    lines.append(_color("  → 安装: pip install memory-arbiter-mcp[mdeberta]，下载 mDeBERTa checkpoint（v52_ep3_fp16）后配 semantic_conflict.mdeberta_ckpt（见 README）", _DIM, use_color))
+    lines.append(_color("  → 安装: pip install memory-arbiter-mcp[mdeberta]，下载 mDeBERTa checkpoint（v58_ep3_fp16）后配 semantic_conflict.mdeberta_ckpt（见 README）", _DIM, use_color))
 
     # config load
     cl = checks["config_load_ok"]
