@@ -210,6 +210,9 @@ def build_isolated_runtime(conv_dir: Path):
     cfg["backup_jsonl"] = str(conv_dir / "backup.jsonl")
     cfg["client"] = "locomo-eval"
     cfg["agent_id"] = "locomo-eval"
+    ckpt_override = os.getenv("MEMA_EVAL_MDEBERTA_CKPT")
+    if ckpt_override:
+        cfg.setdefault("semantic_conflict", {})["mdeberta_ckpt"] = ckpt_override
     eval_cfg = conv_dir / "config.json"
     eval_cfg.write_text(json.dumps(cfg, indent=2))
     os.environ["MEMORY_ARBITER_CONFIG"] = str(eval_cfg)
@@ -541,6 +544,8 @@ def main() -> None:
     ap.add_argument("--qa-file", default="predictions.jsonl", help="QA output filename (per-answerer reruns)")
     ap.add_argument("--verbatim", action="store_true", help="zero-extraction arm: store each utterance verbatim with event_time (mema-as-documented)")
     ap.add_argument("--hybrid", action="store_true", help="dual-write arm: curated facts AND verbatim utterances in one library")
+    ap.add_argument("--v58t2", action="store_true", help="fresh replay dir suffix for v58 + new thresholds run")
+    ap.add_argument("--v3det", action="store_true", help="fresh replay dir suffix for v60b detector run")
     ap.add_argument("--v2det", action="store_true", help="fresh replay dir suffix for re-running conflict detection with a new detector checkpoint")
     ap.add_argument("--conflict-aware", action="store_true", help="conflict-aware recall: drop superseded members of detected conflicts from the recalled context (newest event_time wins)")
     args = ap.parse_args()
@@ -577,6 +582,10 @@ def main() -> None:
             sid = f"{sid}-verbatim"
         if args.v2det:
             sid = f"{sid}-v2det"
+        if args.v3det:
+            sid = f"{sid}-v3det"
+        if args.v58t2:
+            sid = f"{sid}-v58t2"
         if args.hybrid:
             sid = f"{sid}-hybrid"
         conv_dir = RUN_DIR / sid
