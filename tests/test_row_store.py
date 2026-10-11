@@ -17,7 +17,7 @@ pytest.importorskip("sqlite_vec")  # CI [test] extra has no vec0 module
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-import tests.test_workspace_recall as twr  # noqa: E402
+import tests.test_workspace_recall_isolation as twr  # noqa: E402
 from memory_arbiter.evidence import evidence_content_hash  # noqa: E402
 from memory_arbiter.rowseg import RowSegment  # noqa: E402
 

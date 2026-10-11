@@ -375,7 +375,7 @@ def test_knn_rowid_in_matches_bruteforce_topk(tmp_path: Path) -> None:
     tie 距离 + exclude），rowid-IN KNN 的 top-k 集合与 Python 参考一致。
     非 strict 库所有 workspace 共享首个 canonical（单桶模型），跨工作区
     判别只能在 strict 下钉。"""
-    import tests.test_workspace_recall as twr
+    import tests.test_workspace_recall_isolation as twr
     from memory_arbiter.evidence import EvidenceUnit, evidence_content_hash
 
     tools = twr.make_tools(tmp_path, "strict", vec=True)
