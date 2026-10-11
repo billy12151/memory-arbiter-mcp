@@ -6,6 +6,9 @@ import time
 from typing import Any, TYPE_CHECKING
 from .config import Settings
 from .db import MemoryDB
+from .embed_inputs import embed_input_profile as _embed_input_profile
+from .embed_inputs import summary_embed_text as _summary_embed_text_impl
+from . import embed_inputs as _embed_inputs
 from .scan_pipeline import ScanPipeline
 from .constants import EMBED_PREFIX_STS
 
@@ -176,26 +179,15 @@ class _ToolsLifecycle:
         wait point; the thread itself is a daemon and never blocks shutdown)."""
         return self._backfill_done.wait(timeout)
 
-    SUMMARY_SEGMENT_CHARS = 40
-    SUMMARY_TOTAL_CHARS = 800
+    # C5 (2026-10-11): implementation moved to the embed_inputs leaf; the
+    # class keeps named constants and a test-compat delegating alias.
+    SUMMARY_SEGMENT_CHARS = _embed_inputs.SUMMARY_SEGMENT_CHARS
+    SUMMARY_TOTAL_CHARS = _embed_inputs.SUMMARY_TOTAL_CHARS
 
     @classmethod
     def _summary_embed_text(cls, subject: Any, tags: Any, content: Any) -> str:
-        """C3a canonical summary text: subject + sorted tags + each body
-        segment's first 40 chars, capped ~800 chars total.
-
-        Segments split on blank lines (local_text_units' paragraph shape);
-        ownership voting needs topical signal, not full bodies — a misplaced
-        memory keeps its subject/tag vocabulary even when bodies drift.
-        """
-        cleaned = [str(tag).strip() for tag in (tags or []) if str(tag).strip()]
-        parts = [f"{str(subject or '').strip()}\n{' '.join(sorted(cleaned))}".strip()]
-        body = str(content or "")
-        for segment in body.split("\n\n"):
-            segment = segment.strip()
-            if segment:
-                parts.append(segment[:cls.SUMMARY_SEGMENT_CHARS])
-        return "\n".join(parts)[:cls.SUMMARY_TOTAL_CHARS]
+        """Test-compat alias; single implementation is embed_inputs.summary_embed_text."""
+        return _summary_embed_text_impl(subject, tags, content)
 
     def _backfill_memory_summary_vectors(self, embedder: "ManagedEmbedder") -> int:
         """Embed the C3a summary vector for every active memory missing one.
@@ -205,8 +197,6 @@ class _ToolsLifecycle:
         prepare per chunk, commit in one short transaction, failures leave
         rows missing for the next restart.
         """
-        from .pipeline.operations import _embed_input_profile
-
         rows = self.db.missing_summary_vec_rows()
         written = 0
         try:
@@ -231,7 +221,7 @@ class _ToolsLifecycle:
                     profile = _embed_input_profile(row)
                     er = embedder.embed_text(
                         prefix=EMBED_PREFIX_STS,
-                        body=self._summary_embed_text(
+                        body=_summary_embed_text_impl(
                             row.get("subject"), row.get("tags"), row.get("content"),
                         ),
                     )
@@ -285,7 +275,6 @@ class _ToolsLifecycle:
         next process start. Returns the number of vectors actually written
         (not the number of candidates).
         """
-        from .pipeline.operations import _embed_input_profile
         from .pipeline.write import WritePipeline
 
         rows = self.db.missing_subject_tags_rows()

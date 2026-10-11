@@ -7,6 +7,8 @@ import sqlite3
 from typing import Any, Protocol, TYPE_CHECKING
 
 from ..embedder import ManagedEmbedder
+from ..embed_inputs import summary_embed_text as _summary_embed_text_impl
+from ..embed_inputs import subject_tags_embed_text as _subject_tags_embed_text_impl
 
 from .. import workspace_rules
 from ..constants import (
@@ -68,13 +70,9 @@ class WritePipeline:
 
     @classmethod
     def _subject_tags_embed_text(cls, subject: Any, tags: Any) -> str:
-        """Canonical text embedded into subject_tags_vec (owner spec: "subject
-        + 排序后 tags"). Tags are sorted so tag ORDER never changes the
-        vector; case/whitespace are left to the model like every other
-        embedded body."""
-        cleaned = [str(tag).strip() for tag in (tags or []) if str(tag).strip()]
-        body = f"{str(subject or '').strip()}\n{' '.join(sorted(cleaned))}".strip()
-        return body
+        """Test-compat alias; single implementation is
+        embed_inputs.subject_tags_embed_text (reuse batch C5)."""
+        return _subject_tags_embed_text_impl(subject, tags)
 
     def _duplicate_hint_candidate_rows(
         self, memory_id: int, record: _SubjectTagRecord, workspace_canonical: str,
@@ -91,7 +89,6 @@ class WritePipeline:
         subject = str(getattr(record, "subject", None) or "").strip()
         # 0.17.0 P2-7: an EMPTY subject no longer disqualifies — the summary
         # vector carries the body signal the subject gate never could.
-        from ..tools import MemoryTools
 
         embedder, _ = self._ensure_active_embedder()
         if embedder is not None and self.db.state.sqlite_vec_available:
@@ -111,7 +108,7 @@ class WritePipeline:
                 # P2-7: candidates recall on the SUMMARY vector — retitled
                 # near-duplicates stay reachable; content trigram owns the
                 # fine gate (the old subject-first recall killed them).
-                summary_text = MemoryTools._summary_embed_text(
+                summary_text = _summary_embed_text_impl(
                     subject, getattr(record, "tags", None),
                     str(getattr(record, "content", None) or ""),
                 )
@@ -206,11 +203,9 @@ class WritePipeline:
             embedder, _ = self._ensure_active_embedder()
             if embedder is None or not self.db.state.sqlite_vec_available:
                 return False
-            from ..tools import MemoryTools
-
             er = embedder.embed_text(
                 prefix=EMBED_PREFIX_STS,
-                body=MemoryTools._summary_embed_text(
+                body=_summary_embed_text_impl(
                     record.get("subject"), record.get("tags"), record.get("content"),
                 ),
             )

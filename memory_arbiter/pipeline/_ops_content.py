@@ -754,7 +754,7 @@ class _OpsContent:
         # its deltas to, so this comparison is race-free. The separate
         # post-commit re-read of the row is gone (P2-T3): edit_result always
         # carries the transaction's own post-edit record.
-        from .operations import _embed_input_profile
+        from ..embed_inputs import embed_input_profile as _embed_input_profile
         pre_inputs = _embed_input_profile(current)
         post_inputs = _embed_input_profile(updated)
         if pre_inputs[:2] != post_inputs[:2]:

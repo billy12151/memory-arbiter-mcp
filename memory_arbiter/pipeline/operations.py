@@ -1,7 +1,6 @@
 """Governance, edit, status, and maintenance operations for MemoryTools (Phase 4 extraction)."""
 from __future__ import annotations
 
-import json
 from typing import Any, TYPE_CHECKING
 
 from ..acl import CallerWorkspace, WorkspaceScope
@@ -11,36 +10,6 @@ from ._ops_ws_lifecycle import _OpsWsLifecycle
 from ._ops_ws_move import _OpsWsMove
 from ._ops_content import _OpsContent
 from ._ops_status import _OpsStatus
-
-
-def _embed_input_profile(record: dict[str, Any] | None) -> tuple[str, str, str]:
-    """Derived-embedding input profile (0.16.12 P2-T1): the normalized
-    (subject, tags, content) triple the two recall-vector refreshes re-embed
-    from. Row-level equality of this triple means the refreshed vectors would
-    be byte-identical, so the re-embed is skippable. Accepts tags in either
-    shape — the raw JSON string (SQL rows) or an already-parsed list
-    (missing_*_rows snapshots) — so profiles compare equal across sources."""
-    if not record:
-        return ("", "", "")
-    raw_tags = record.get("tags")
-    if isinstance(raw_tags, str):
-        try:
-            tags = json.loads(raw_tags or "[]")
-        except (TypeError, ValueError):
-            tags = []
-    elif isinstance(raw_tags, (list, tuple)):
-        tags = list(raw_tags)
-    else:
-        tags = []
-    # Mirror _subject_tags_embed_text/_summary_embed_text exactly:
-    # strip each tag, drop empties, THEN sort — an unstripped join would let
-    # distinct embed inputs share a profile (second-round adversarial finding).
-    cleaned = sorted(str(t).strip() for t in tags if str(t).strip())
-    return (
-        str(record.get("subject") or ""),
-        " ".join(cleaned),
-        str(record.get("content") or ""),
-    )
 
 if TYPE_CHECKING:
     from ..update_monitor import UpdateMonitor
