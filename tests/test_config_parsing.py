@@ -49,6 +49,8 @@ from memory_arbiter.embedder import (
     compute_model_digest,
 )
 from memory_arbiter.tools import MemoryTools
+# No autouse _relevance_floor_off copy here: parsing-domain tests never touch the
+# search recall path (grep-verified), so the floor stays at its real default.
 
 try:
     import sqlite_vec  # type: ignore  # noqa: F401

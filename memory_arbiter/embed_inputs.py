@@ -33,7 +33,7 @@ def summary_embed_text(subject: Any, tags: Any, content: Any) -> str:
 
 def subject_tags_embed_text(subject: Any, tags: Any) -> str:
     """Canonical text embedded into subject_tags_vec (owner spec: "subject
-    + sorted tags"). Tags are sorted so tag ORDER never changes the
+    + 排序后 tags"). Tags are sorted so tag ORDER never changes the
     vector; case/whitespace are left to the model like every other
     embedded body."""
     cleaned = [str(tag).strip() for tag in (tags or []) if str(tag).strip()]

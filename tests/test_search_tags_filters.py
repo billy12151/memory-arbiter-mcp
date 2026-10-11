@@ -11,8 +11,6 @@ from pathlib import Path
 import pytest
 
 from memory_arbiter.arbitration import compare_memories
-from memory_arbiter.config import Settings, parse_bool
-from memory_arbiter.db import MemoryDB
 from memory_arbiter.embedder import EmbedResult
 from memory_arbiter.models import SourceType
 from memory_arbiter.tools import MemoryTools

@@ -815,14 +815,3 @@ def test_removed_judgment_surface_and_pair_payload_are_rejected(tmp_path: Path) 
     assert pair["ok"] is False
     assert any("left_id" in warning for warning in pair.get("warnings", []))
 
-
-# ── from test_conflict_notice_hardening.py ──
-
-"""Regression tests for the v3 conflict-notice hardening slice.
-
-Covers: model output with missing parsed keys no longer raising KeyError on
-the notice path, per-task degradation counting deduplicated by reason,
-pending-workspace memories reporting a skipped (not incomplete) conflict job,
-and slot_key entity/scope canonicalisation with raw+canon double-form
-suppression matching against applying conflict groups (B-C4).
-"""

@@ -6,7 +6,6 @@ from memory_arbiter.config import Settings
 from memory_arbiter.db import MemoryDB
 from memory_arbiter.models import ConflictMember, ConflictValueGroup, MemoryStatus
 from memory_arbiter.tools import MemoryTools
-from tests.test_workspace_recall_isolation import _VEC_AVAILABLE
 
 @pytest.fixture(autouse=True)
 def _relevance_floor_off(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -49,6 +48,7 @@ except Exception:
     _VEC_AVAILABLE = False
 
 requires_vec = pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not installed")
+
 
 
 def default_insulation_make_tools(tmp_path: Path, isolation: str = "none", *, vec: bool = False) -> MemoryTools:

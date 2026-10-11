@@ -11,7 +11,6 @@ per-isolation policy with a stub backend so they run without a model file.
 from pathlib import Path
 
 from memory_arbiter.config import Settings
-from memory_arbiter.db import MemoryDB
 from memory_arbiter.tools import MemoryTools
 import json
 from contextlib import contextmanager
