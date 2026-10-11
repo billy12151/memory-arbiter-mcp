@@ -27,6 +27,8 @@ Versions follow semantic versioning.
 - **LLM 学习工作台**：用户自带 OpenAI 兼容 API（`llm.*` 六键：base_url/api_key/model/max_context_tokens/max_output_tokens/timeout_seconds；Settings 页可写、key 打码、热加载）；六个学习动作（快速总结/知识点梳理/生成考试题/费曼讲解/反过来考我/时间线梳理）+ 自定义指令；skill 式提示词文件 + 薄结构校验 + 一次纠正性重试 + degraded 透传；reasoning 思考过程灰字折叠展示；上下文按用户维护的最大上下文动态预算（构词求和 token 估算，超预算带逐条估算表报错不截断）。
 - **产物回写（两步走）**：标准 write 管道（request identity 归因 agent_id=console）+ kb_member 置位；PRODUCT_FIELD_REGISTRY 与 MCP schema 零改动。strict 新桶 pending 分支给治理指引。
 - **POST 防御层**：Host 门→Content-Type json→X-Console-Request 头→Content-Length 帽（不读 body）→畸形 JSON 拒；OPTIONS 钉死不带 CORS 头（回归钉）。
+- **记忆更新/作废入口**：知识库页直呼同进程内部接口（`memory_edit`/`memory_supersede`，单点替换/标签增删/带锁二次确认授权；不配第二个 MCP 服务，避免跨进程并发写）。
+- **LoCoMo-Refined 基准与可复现 harness**（e7477da）：双臂评测（mema 事实写入 vs verbatim 逐句写入）+ 回放工具链；README Benchmark 段同源。`run_locomo.py` 回放基建含 `MEMA_EVAL_MDEBERTA_CKPT` 检测器覆盖与 `--v58t2`/`--v3det` 三代对比旗标。
 
 ### Changed
 
@@ -36,6 +38,12 @@ Versions follow semantic versioning.
 ### Security
 
 - api_key 明文存本地 config.json（localhost-only 场景，README 明示建议文件权限 600）；GET 打码、提交哨兵 `__unchanged__`、错误信息脱敏；LLM 调用仅由后端代理。
+
+### Fixed
+
+- **Console 对抗性 review R2 收口**：P0×2（/v1 探测缓存毒化、onclick 内联 JS 插值存储型 XSS——库内值进 HTML 属性一律 data-*+this）+P1×5+P2×8，回归钉×8。
+- **run_locomo 重放空串 event_time**（b833436）：locomo_gold_4way fixture 的空 event_time 被写接口 ISO 校验拒收——重放时规范为未设置。
+- **R3 全项目盘点修复批**（2026-10-11，四线程盘查 P1×3+P2×20）：strict 下 Console 编辑/作废补 workspace 透传（内层 ACL 原回落 settings.workspace 拒掉外层等值门已放行的编辑）；knowledge_save 置位失败分支报真值（`kb_member=false`+重试提示，前端对应分支）；i18n 缺键 `saveBtn`/`llmSaved` 改用已有键+死键清理+键全覆盖守卫测试；llm timeline 校验 content 路径补全量 datetime 提取（T 边界假阳性不再白耗重试）；`write_llm_config` 整数与 from_env 同界钳制+落盘强制 0600；tags_only 编辑的 CAS 钉事务内兑现（原静默丢弃）；`memory_edit` 成功响应补 caller 域字段与降级警告（响应形状族对齐）；单查询纪律八处（merge 逐 loser SELECT/成员逐条 SELECT 家族/逐行 EXISTS 探测/set_kb_member 单语句/向量重建 executemany/CAS 改读 content_sha 列）；drain 通道 below-gate 观测计数进 worker status；eval receipt 白名单与归因表补 `model_possible_below_gate`；run_locomo 多组共享成员缓存缺口；EN INTEGRATION 三处补 0.17.2 门句；配置键数文案 21→28 五处与键表 llm.*/possible_min_susp 补齐；setup 下载指引 V4m/1.1GB 旧文案改 v52_ep3_fp16/~531MB。
 
 ## [0.17.1] — 2026-10-04
 

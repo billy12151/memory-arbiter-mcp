@@ -18,7 +18,7 @@ stdio 是默认传输。要让多个本地客户端共享一个社区版进程�
 
 ## 配置面
 
-0.15.0 起**配置只认文件**：所有用户可调项都在 `~/.config/memory-arbiter/config.json`（或 `MEMORY_ARBITER_CONFIG` 启动上下文变量指向的文件）。完整配置面共 21 键（0.17.1：claims.required / semantic_conflict.model_path / n_gpu_layers 退役，新增四个 semantic_conflict.mdeberta_* 键）：
+0.15.0 起**配置只认文件**：所有用户可调项都在 `~/.config/memory-arbiter/config.json`（或 `MEMORY_ARBITER_CONFIG` 启动上下文变量指向的文件）。完整配置面共 28 键（0.17.1：claims.required / semantic_conflict.model_path / n_gpu_layers 退役，新增四个 semantic_conflict.mdeberta_* 键；0.17.2：新增 semantic_conflict.mdeberta_possible_min_susp；0.18.0：新增六个 llm.* 键——Console LLM 学习工作台的自有端点配置）：
 
 ```json
 {
@@ -29,6 +29,7 @@ stdio 是默认传输。要让多个本地客户端共享一个社区版进程�
   "include_size": true,
   "embedding": {"model_path": "…", "auto_query": true, "auto_write": true},
   "semantic_conflict": {"enabled": true, "mdeberta_ckpt": "…", "mdeberta_model_dir": "…", "mdeberta_batch": 16, "mdeberta_notice_min_prob": 0.5, "mdeberta_possible_min_susp": 0.7, "on_write": "async", "notice_sync_wait_ms": 3000},
+  "llm": {"base_url": "", "model": "", "api_key": "", "max_context_tokens": 0, "max_output_tokens": 8192, "timeout_seconds": 120},
   "mcp": {"transport": "stdio", "http": {"host": "127.0.0.1", "port": 8000}}
 }
 ```
@@ -36,7 +37,7 @@ stdio 是默认传输。要让多个本地客户端共享一个社区版进程�
 意图语义：
 
 - `embedding.model_path` 指向本地 GGUF 模型就是启用 sqlite-vec 证据召回的唯一意图——不再有 `vec.enabled`/`embedding.provider`/`vec.dim`。向量维度取自模型本身；数据库把活跃维度记录为库内事实源，换成不同输出维度的模型时会在启动时按新维度 DROP 并重建向量表，索引翻为 `state=mismatch`，待全量重建把数据重新发布进新表。
-- `semantic_conflict.mdeberta_ckpt` 指向本地 mDeBERTa 判定权重（V4m）即启用语义冲突运行时，并在启动时加载、常驻不卸载（`preload`/`resident` 冻结为 true）。`semantic_conflict.enabled=false` 是显式关闭的逃生口；不设 + 有 `mdeberta_ckpt` 即视为启用。0.17.1 起 Qwen/GGUF 判定后端已删除，旧 `model_path` 配置会给迁移警告。
+- `semantic_conflict.mdeberta_ckpt` 指向本地 mDeBERTa 判定权重（v52_ep3_fp16 线）即启用语义冲突运行时，并在启动时加载、常驻不卸载（`preload`/`resident` 冻结为 true）。`semantic_conflict.enabled=false` 是显式关闭的逃生口；不设 + 有 `mdeberta_ckpt` 即视为启用。0.17.1 起 Qwen/GGUF 判定后端已删除，旧 `model_path` 配置会给迁移警告。
 - 真实（有 config 文件的）安装缺能力时——embedding 模型缺失，或语义冲突未显式关闭但 mdeberta 判定模型缺失——每次工具响应都会带一条持久的降级横幅（指向 `mema setup --install`），每个 Agent 的第一次调用还会在 onboarding notice 里附带能力健康卡。`enabled=false` 且已配置模型视为 deliberate 极简安装，不 nag。`mema setup --install` 是 setup 的执行模式：自动 pip 装 extras、下载 embedding GGUF 模型（断点续传，HuggingFace 失败自动切 ModelScope）；mDeBERTa 判定权重另行手动安装，并回写完成的 config；裸 `mema setup` 保持只指导不执行。
 - 排序固定为 hybrid（字面 + 证据倒数排名融合），没有排序模式可选。
 - HTTP 接口路径固定 `/mcp`，请求体上限固定 4 MB。

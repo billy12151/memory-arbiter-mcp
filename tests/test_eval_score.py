@@ -243,6 +243,9 @@ def test_conflict_attribution_reads_judge_budget_and_direct_verdicts() -> None:
         "channel_b_identified": 1,
         "channel_c_identified": 1,
         "channel_c_qwen_total": 2,
+        # R3 盘点 P2: the grey-zone gate counter joined the attribution
+        # surface (0 for archives whose receipts predate the gate).
+        "model_possible_below_gate_total": 0,
     }
 
 

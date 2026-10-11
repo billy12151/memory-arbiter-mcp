@@ -1,10 +1,10 @@
 {
   "_readme": [
     "Copy to ~/.config/memory-arbiter/config.json and edit local paths.",
-    "Since 0.15.0 configuration is file-only and this is the complete 21-key user surface. Engine params, timeouts, thresholds, and caps are frozen constants (memory_arbiter/constants.py); 0.14.x keys that no longer exist are ignored with a 'no longer configurable' warning. Only six launch-context env vars remain (MEMORY_ARBITER_CONFIG/DB_PATH/BACKUP_JSONL/MCP_TRANSPORT/CLIENT/AGENT_ID); every other MEMORY_ARBITER_* variable is no longer read.",
+    "Since 0.15.0 configuration is file-only and this is the complete 28-key user surface. Engine params, timeouts, thresholds, and caps are frozen constants (memory_arbiter/constants.py); 0.14.x keys that no longer exist are ignored with a 'no longer configurable' warning. Only six launch-context env vars remain (MEMORY_ARBITER_CONFIG/DB_PATH/BACKUP_JSONL/MCP_TRANSPORT/CLIENT/AGENT_ID); every other MEMORY_ARBITER_* variable is no longer read.",
     "client and agent_id are REQUIRED with no built-in defaults: the MCP server refuses to start when either is missing or blank. Under stdio this configured identity is the process-level caller identity used for attribution; streamable-http takes caller identity from the per-request X-Mema-Client / X-Mema-Agent-Id headers instead.",
     "embedding.model_path IS the intent to enable sqlite-vec evidence recall — there is no vec.enabled/provider/dim knob any more. The vector dimension comes from the model itself; switching to a model with a different dimension drops and rebuilds the vector tables at the new dimension at startup.",
-    "semantic_conflict.mdeberta_ckpt enables the local mDeBERTa judge (V4m checkpoint, downloaded separately): it loads at startup and stays resident (preload/resident are frozen true); the write-time notice is judge-gated (conflict at P >= mdeberta_notice_min_prob). mdeberta_model_dir (config+tokenizer for the base encoder) is optional and defaults to mdeberta-base/ next to the ckpt; mdeberta_notice_min_prob should be recalibrated per checkpoint (V4m 0.80 / V21 0.90).",
+    "semantic_conflict.mdeberta_ckpt enables the local mDeBERTa judge (v52_ep3_fp16 line checkpoint, downloaded separately): it loads at startup and stays resident (preload/resident are frozen true); the write-time notice is judge-gated (conflict at P >= mdeberta_notice_min_prob). mdeberta_model_dir (config+tokenizer for the base encoder) is optional and defaults to mdeberta-base/ next to the ckpt; mdeberta_notice_min_prob should be recalibrated per checkpoint (per-checkpoint calibration; the built-in default is 0.5).",
     "This example explicitly keeps semantic_conflict.enabled=false: configuring mdeberta_ckpt alone will not enable judging while enabled=false stands; set enabled=true or remove enabled to use mdeberta_ckpt auto-enable.",
     "The HTTP endpoint path is fixed /mcp and request bodies are capped at 4 MB; ranking is fixed hybrid.",
     "All isolation modes normalize workspace_canonical; none disables ACL only.",
@@ -16,6 +16,14 @@
   "backup_jsonl": "~/.local/share/memory-arbiter/memory.backup.jsonl",
   "workspace": "default",
   "isolation": "none",
+  "llm": {
+    "base_url": "",
+    "model": "",
+    "api_key": "",
+    "max_context_tokens": 0,
+    "max_output_tokens": 8192,
+    "timeout_seconds": 120
+  },
   "mcp": {
     "transport": "stdio",
     "http": {
@@ -34,10 +42,11 @@
   },
   "semantic_conflict": {
     "enabled": false,
-    "mdeberta_ckpt": "~/.local/share/memory-arbiter/models/mdeberta-v4m_dual_v1.pt",
+    "mdeberta_ckpt": "~/.local/share/memory-arbiter/models/mdeberta-v52_ep3_fp16.pt",
     "mdeberta_model_dir": "~/.local/share/memory-arbiter/models/mdeberta-base",
-    "mdeberta_notice_min_prob": 0.8,
     "mdeberta_batch": 0,
+    "mdeberta_notice_min_prob": 0.8,
+    "mdeberta_possible_min_susp": 0.7,
     "on_write": "async",
     "notice_sync_wait_ms": 3000
   }

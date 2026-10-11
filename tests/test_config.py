@@ -1693,3 +1693,28 @@ def test_model_configured_library_without_vec_tables_is_healthy(tmp_path: Path) 
     preview = tools.memory_repair("rebuild_evidence", {"dry_run": True})
     assert preview["ok"] is True
     assert preview["data"]["vector_table_repair"]["required"] is False
+
+
+def test_config_surface_examples_and_registry_aligned() -> None:
+    """R3 盘点 P2 pin: the reference example must cover every registry key
+    and the surface count is pinned — 0.17.1 aligned them by hand and 0.17.2
+    drifted again (mdeberta_possible_min_susp missing from five prose spots
+    and the example); a test is cheaper than a third realignment. Bump the
+    count together with the README key tables and prose when adding a key."""
+    from memory_arbiter.config_registry import CONFIG_DESCRIPTORS
+
+    assert len(CONFIG_DESCRIPTORS) == 28
+
+    example = json.loads(
+        (Path(__file__).resolve().parents[1] / "examples" / "memory-arbiter.config.example.json").read_text()
+    )
+    missing: list[str] = []
+    for descriptor in CONFIG_DESCRIPTORS:
+        node: object = example
+        for part in descriptor["path"].split("."):
+            if isinstance(node, dict) and part in node:
+                node = node[part]
+            else:
+                missing.append(descriptor["path"])
+                break
+    assert not missing, f"example config missing registry keys: {missing}"

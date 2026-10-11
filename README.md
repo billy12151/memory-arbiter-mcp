@@ -69,7 +69,7 @@ mema setup --install   # downloads the embedding GGUF (~330MB, resumable); the m
 mema doctor            # verify
 ```
 
-`mema setup` without `--install` stays guidance-only: it writes `~/.config/memory-arbiter/config.json` and self-checks the environment without touching pip or the network; `--install` is the execution mode (pip installs the extras, downloads the embedding GGUF model with resume/mirror fallback, and writes the finished config itself). Since 0.15.0 configuration is file-only and the whole user surface is 21 keys (see [Configuration](#configuration)): paths, identity, workspace/isolation, `update_check.enabled`, `include_size`, the embedding model, the optional semantic-conflict mDeBERTa judge (`mdeberta_ckpt`, see below), and MCP transport/host/port. The reference `examples/memory-arbiter.config.example.json` shows the same slim surface with per-key notes. Then wire your MCP client from `examples/*.mcp.json` and start the server with `mema`.
+`mema setup` without `--install` stays guidance-only: it writes `~/.config/memory-arbiter/config.json` and self-checks the environment without touching pip or the network; `--install` is the execution mode (pip installs the extras, downloads the embedding GGUF model with resume/mirror fallback, and writes the finished config itself). Since 0.15.0 configuration is file-only and the whole user surface is 28 keys (see [Configuration](#configuration)): paths, identity, workspace/isolation, `update_check.enabled`, `include_size`, the embedding model, the optional semantic-conflict mDeBERTa judge (`mdeberta_ckpt`, see below), the Console LLM workbench's own endpoint (`llm.*`, 0.18.0), and MCP transport/host/port. The reference `examples/memory-arbiter.config.example.json` shows the same slim surface with per-key notes. Then wire your MCP client from `examples/*.mcp.json` and start the server with `mema`.
 
 When a capability is missing (e.g. the models were never downloaded), every tool response carries a persistent degraded-mode banner with the `mema setup --install` remediation, and each agent's first call includes a capability health card — an incomplete install cannot pass for a complete one silently.
 
@@ -146,7 +146,9 @@ What is *not* filtered: an explicit `workspace` argument (even a blacklisted one
   markdown bodies and one-hop relation graphs.
 - **LLM study workbench**: bring your own OpenAI-compatible API (base URL /
   API key / model / context budget in Settings — stored locally, proxied by
-  the console backend, never exposed to the page). Six one-click study
+  the console backend, never exposed to the page; the key sits in the config
+  file in plain text, so keep the file owner-only — the write path enforces
+  `0600`). Six one-click study
   actions on selected memories — summarize, outline, quiz, Feynman explain,
   quiz-me, timeline — plus a free-form prompt. Outputs can be saved back as
   memories through the standard write pipeline (attributed `agent_id=console`).
@@ -198,7 +200,7 @@ The old database is never deleted. Standard JSON configuration is backed up and 
 
 Configuration is file-only since 0.15.0. Everything tunable lives in `~/.config/memory-arbiter/config.json` (or the file the `MEMORY_ARBITER_CONFIG` launch-context variable points at; `mema setup` writes the starter template). Engine parameters, timeouts, thresholds, and caps are frozen constants (`memory_arbiter/constants.py`).
 
-The complete user surface is 21 keys (0.15.14: added `semantic_conflict.n_gpu_layers`, removed `semantic_conflict.max_notice_pairs` and `policy_path`; 0.17.1: removed `claims.required`, `semantic_conflict.model_path` and `n_gpu_layers`, added the four `semantic_conflict.mdeberta_*` keys):
+The complete user surface is 28 keys (0.15.14: added `semantic_conflict.n_gpu_layers`, removed `semantic_conflict.max_notice_pairs` and `policy_path`; 0.17.1: removed `claims.required`, `semantic_conflict.model_path` and `n_gpu_layers`, added the four `semantic_conflict.mdeberta_*` keys; 0.17.2: added `semantic_conflict.mdeberta_possible_min_susp`; 0.18.0: added the six `llm.*` keys):
 
 ```json
 {
@@ -218,8 +220,18 @@ The complete user surface is 21 keys (0.15.14: added `semantic_conflict.n_gpu_la
   "semantic_conflict": {
     "enabled": true,
     "mdeberta_ckpt": "~/.local/share/memory-arbiter/models/mdeberta-v52_ep3_fp16.pt",
+    "mdeberta_notice_min_prob": 0.5,
+    "mdeberta_possible_min_susp": 0.7,
     "on_write": "async",
     "notice_sync_wait_ms": 3000
+  },
+  "llm": {
+    "base_url": "",
+    "model": "",
+    "api_key": "",
+    "max_context_tokens": 0,
+    "max_output_tokens": 8192,
+    "timeout_seconds": 120
   },
   "mcp": {
     "transport": "stdio",
@@ -248,6 +260,10 @@ The complete user surface is 21 keys (0.15.14: added `semantic_conflict.n_gpu_la
 | `semantic_conflict.mdeberta_batch` | Judge batch size (default `0` = auto, device-tiered: 16 with a GPU — Apple Silicon / NVIDIA — 8 on CPU; an explicit value `>0` overrides the tier. No startup probe) |
 | `mcp.transport` | `stdio` (default) or opt-in `streamable-http` localhost server |
 | `mcp.http.host` / `port` | Local HTTP endpoint; host is restricted to loopback, defaults to `127.0.0.1:8000`; the endpoint path is fixed at `/mcp` |
+| `llm.base_url` / `llm.model` / `llm.api_key` | The Console LLM study workbench's own OpenAI-compatible endpoint (0.18.0, all optional — empty = the workbench stays unavailable). Stored locally in plain text; the config file is enforced `0600` on write; the key is proxied by the console backend only and never exposed to the page |
+| `llm.max_context_tokens` | Material budget for one workbench call (default `0` = auto, clamp `0–10,000,000`) |
+| `llm.max_output_tokens` | Completion cap (default `8192`, clamp `1–1,000,000`) — sized so thinking-mode models cannot burn the whole output budget |
+| `llm.timeout_seconds` | Per-request timeout (default `120`, clamp `1–3600`); values are clamped identically on write and reload |
 
 See [`examples/memory-arbiter.config.example.json`](examples/memory-arbiter.config.example.json).
 

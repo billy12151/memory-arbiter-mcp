@@ -265,7 +265,7 @@ mema doctor --json
 
 ## 配置（进阶）
 
-配置文件在 `~/.config/memory-arbiter/config.json`（`mema setup` 会帮你生成）。0.15.0 起**配置只认文件**：所有可调项就是下面这 21 个键（0.17.1：退役 `claims.required`、`semantic_conflict.model_path` 和 `n_gpu_layers`，新增四个 `mdeberta_*` 键），引擎参数、超时、阈值、上限全部冻结为内置常量，不用再操心。
+配置文件在 `~/.config/memory-arbiter/config.json`（`mema setup` 会帮你生成）。0.15.0 起**配置只认文件**：所有可调项就是下面这 28 个键（0.17.1：退役 `claims.required`、`semantic_conflict.model_path` 和 `n_gpu_layers`，新增四个 `mdeberta_*` 键；0.17.2：新增 `semantic_conflict.mdeberta_possible_min_susp`；0.18.0：新增六个 `llm.*` 键——Console LLM 学习工作台的自有端点），引擎参数、超时、阈值、上限全部冻结为内置常量，不用再操心。
 
 | 配置项 | 白话说明 | 默认值 |
 | --- | --- | --- |
@@ -274,6 +274,10 @@ mema doctor --json
 | `backup_jsonl` | 数据库写不进去时的兜底备份文件（只追加） | 安装时生成 |
 | `workspace` | 写入时不带 workspace 用的默认工作区 | `default` |
 | `isolation` | workspace 隔离档：`none` / `weak` / `strict` | `none` |
+| `llm.base_url` / `llm.model` / `llm.api_key` | Console LLM 学习工作台自己的 OpenAI 兼容端点（0.18.0，全部可选——不填=工作台不可用）。本地明文存储，写入时强制 `0600` 权限；Key 只由 Console 后端代为调用，页面拿不到 | 无 |
+| `llm.max_context_tokens` | 工作台单次调用的材料预算（默认 `0`=自动，范围 0–10,000,000） | `0` |
+| `llm.max_output_tokens` | 输出上限（默认 `8192`，范围 1–1,000,000）——防思考型模型烧光输出预算 | `8192` |
+| `llm.timeout_seconds` | 单请求超时（默认 `120`，范围 1–3600）；写入与重载两侧同一套钳制 | `120` |
 | `mcp.transport` | `stdio`（默认，一对一）或 `streamable-http`（多个客户端共享一个本地服务） | `stdio` |
 | `mcp.http.host` / `mcp.http.port` | HTTP 模式的监听地址（只允许本机）和端口；地址路径固定是 `/mcp`，不用配 | `127.0.0.1:8000` |
 | `update_check.enabled` | 唯一会联网的功能：偶尔查一下 PyPI 有没有新版本。关掉就完全不联网 | `true` |
@@ -285,6 +289,7 @@ mema doctor --json
 | `semantic_conflict.notice_sync_wait_ms` | 写入响应愿意等多久，好让写时检查结果直接挂在本次响应上（0.15.8 恢复的配置键，默认 `3000`，范围 `0–5000`）；填 `0` = 完全不阻塞写入响应——批量导入就用这个，检查照常后台跑，提醒照样在之后的响应里带出来 | `3000` |
 | `semantic_conflict.mdeberta_model_dir` | 判定模型的 config+tokenizer 目录；缺省=ckpt 同目录的 `mdeberta-base/` | 无 |
 | `semantic_conflict.mdeberta_notice_min_prob` | 判定置信度阈值：低于它的"真冲突"只计数不打扰（现 0.5，召回优先口径） | `0.5` |
+| `semantic_conflict.mdeberta_possible_min_susp` | 疑似（possible）灰区门（0.17.2 起）：P(冲突)+P(疑似) ≥ 它才出 `info` 灰区提醒，低于只计数（`model_possible_below_gate`）不打扰；填 `0` 回退无门旧行为。按考卷+LoCoMo 金标定标 | `0.7` |
 | `semantic_conflict.mdeberta_batch` | 判定批大小（0=自动按设备分档：Apple Silicon/NVIDIA 16、其余 8） | `0` |
 | `include_size` | 召回复量总开关（0.15.6）：开着，`find` / `read` / 过期审计 / 历史版本四个召回面都带 `size` 块（返回字符数 + 条数 + **token 预估**），agent 汇报成本用同一把尺子；关了就全都不带 | `true` |
 

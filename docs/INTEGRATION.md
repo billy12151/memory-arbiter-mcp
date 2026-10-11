@@ -18,7 +18,7 @@ Writes require a non-empty `subject`; include `source_type`, `event_time`, `sour
 
 ## Configuration Surface
 
-Since 0.15.0 configuration is file-only: everything user-tunable lives in `~/.config/memory-arbiter/config.json` (or the file the `MEMORY_ARBITER_CONFIG` launch-context variable points at). The complete surface is 21 keys (0.17.1: `claims.required`, `semantic_conflict.model_path` and `n_gpu_layers` removed; the four `semantic_conflict.mdeberta_*` keys added):
+Since 0.15.0 configuration is file-only: everything user-tunable lives in `~/.config/memory-arbiter/config.json` (or the file the `MEMORY_ARBITER_CONFIG` launch-context variable points at). The complete surface is 28 keys (0.17.1: `claims.required`, `semantic_conflict.model_path` and `n_gpu_layers` removed; the four `semantic_conflict.mdeberta_*` keys added; 0.17.2: `semantic_conflict.mdeberta_possible_min_susp` added; 0.18.0: the six `llm.*` keys added — the Console LLM study workbench's own OpenAI-compatible endpoint, empty by default):
 
 ```json
 {
@@ -28,7 +28,8 @@ Since 0.15.0 configuration is file-only: everything user-tunable lives in `~/.co
   "update_check": {"enabled": true},
   "include_size": true,
   "embedding": {"model_path": "…", "auto_query": true, "auto_write": true},
-  "semantic_conflict": {"enabled": true, "mdeberta_ckpt": "…", "mdeberta_model_dir": "…", "mdeberta_batch": 16, "mdeberta_notice_min_prob": 0.5, "on_write": "async", "notice_sync_wait_ms": 3000},
+  "semantic_conflict": {"enabled": true, "mdeberta_ckpt": "…", "mdeberta_model_dir": "…", "mdeberta_batch": 16, "mdeberta_notice_min_prob": 0.5, "mdeberta_possible_min_susp": 0.7, "on_write": "async", "notice_sync_wait_ms": 3000},
+  "llm": {"base_url": "", "model": "", "api_key": "", "max_context_tokens": 0, "max_output_tokens": 8192, "timeout_seconds": 120},
   "mcp": {"transport": "stdio", "http": {"host": "127.0.0.1", "port": 8000}}
 }
 ```
@@ -87,7 +88,7 @@ Use `memory_repair(task="rebuild_evidence", data={"dry_run":true})` to inspect m
 
 ### Three-class judge (0.17.1)
 
-Evidence KNN provides bounded short-pair recall and ranking only. Since 0.17.1 the optional judge is a local mDeBERTa encoder (v52_ep3 checkpoint, CPU) that classifies each funnel-surviving pair as `conflict` / `no_conflict` / `possible_conflict` with calibrated probabilities: `conflict` at P ≥ `semantic_conflict.mdeberta_notice_min_prob` (default 0.5) lands a normal notice, `possible_conflict` lands an `info` grey-zone notice, `no_conflict` clears silently. The write-time funnel gates (sentence prefilter, memory screen, cosine band, rule evidence) are unchanged.
+Evidence KNN provides bounded short-pair recall and ranking only. Since 0.17.1 the optional judge is a local mDeBERTa encoder (v52_ep3 checkpoint, CPU) that classifies each funnel-surviving pair as `conflict` / `no_conflict` / `possible_conflict` with calibrated probabilities: `conflict` at P ≥ `semantic_conflict.mdeberta_notice_min_prob` (default 0.5) lands a normal notice, `possible_conflict` at P(conflict)+P(possible_conflict) ≥ `semantic_conflict.mdeberta_possible_min_susp` (default 0.7 since 0.17.2; below the gate the pair is only counted as `model_possible_below_gate`) lands an `info` grey-zone notice, `no_conflict` clears silently. The write-time funnel gates (sentence prefilter, memory screen, cosine band, rule evidence) are unchanged.
 
 The judge never picks a winner, suppresses the scheduled scan, or edits memory. Its probabilities ride the deterministic funnel, which still validates the DIRECT-verdict path (same stripped key + canonical value difference lands a notice without spending the judge):
 
@@ -112,7 +113,7 @@ Only a completed full-scan boundary — a `scan_candidates` page returning `next
 
 ### Write-time notice
 
-A user-visible notice requires the judge to return `conflict` at P ≥ `semantic_conflict.mdeberta_notice_min_prob` (default `0.5`) — or the deterministic direct verdict (same stripped key, different canonical values, grounded) — with no coexistence veto and complete slot provenance; `possible_conflict` lands an `info` grey-zone notice instead. Internal (same-memory) findings never die at write time: they land `pending` with the model opinion attached, and the scan-side strong model owns negative verdicts. Notice snapshots freeze member versions, value groups, slot provenance, detector/model version, task id, and dedupe key.
+A user-visible notice requires the judge to return `conflict` at P ≥ `semantic_conflict.mdeberta_notice_min_prob` (default `0.5`) — or the deterministic direct verdict (same stripped key, different canonical values, grounded) — with no coexistence veto and complete slot provenance; `possible_conflict` past the `mdeberta_possible_min_susp` grey-zone gate (default 0.7) lands an `info` notice instead, and a below-gate possible is silently counted (`model_possible_below_gate`). Internal (same-memory) findings never die at write time: they land `pending` with the model opinion attached, and the scan-side strong model owns negative verdicts. Notice snapshots freeze member versions, value groups, slot provenance, detector/model version, task id, and dedupe key.
 
 After a successful write, the server waits at most `semantic_conflict.notice_sync_wait_ms` (v0.15.8 live config key, default `3000`, clamp `0–5000`) for the bounded notice task. If the wait expires, the write returns successfully and the same accepted task continues asynchronously; it is not cancelled or recomputed. A queue-full/rejected enqueue is different: there is no task to wait for. `checked_no_notice` means only that every candidate inside that bounded write-time task completed the funnel; it is not a whole-library claim. Scheduled scan remains the durable recall backstop.
 
