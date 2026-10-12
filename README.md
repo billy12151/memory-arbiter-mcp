@@ -9,7 +9,7 @@
 
 Memory Arbiter (迷码) is a capability amplifier for your AI agents: plug it in over MCP and every agent you use — Claude Code, Cursor, Codex, ZCode — becomes one assistant with a running memory. Decisions made in Claude today are usable in Cursor tomorrow; every fact carries its provenance, collisions get surfaced before they bite, and what you've locked cannot be silently overwritten. One SQLite file on your machine holds every fact in full; every model — embeddings, conflict judge — runs locally.
 
-> **Current release: `0.17.2`** · local-first · MCP-native · 4 tools · knowledge workbench in `0.18.0` (on main now)
+> **Current release: `0.18.0`** · local-first · MCP-native · 4 tools · knowledge workbench in `0.18.0` (on main now)
 
 ## In one minute: what mema does for you
 
