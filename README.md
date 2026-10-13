@@ -2,10 +2,13 @@
 # Memory Arbiter MCP
 
 [![PyPI](https://img.shields.io/pypi/v/memory-arbiter-mcp)](https://pypi.org/project/memory-arbiter-mcp/)
+[![Website](https://img.shields.io/badge/website-memarbiter.cn-brightgreen)](https://memarbiter.cn/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](pyproject.toml)
 
 **English | [中文](README.zh-CN.md)**
+
+**Official site & docs: [memarbiter.cn](https://memarbiter.cn/)**
 
 Memory Arbiter (迷码) is a capability amplifier for your AI agents: plug it in over MCP and every agent you use — Claude Code, Cursor, Codex, ZCode — becomes one assistant with a running memory. Decisions made in Claude today are usable in Cursor tomorrow; every fact carries its provenance, collisions get surfaced before they bite, and what you've locked cannot be silently overwritten. One SQLite file on your machine holds every fact in full; every model — embeddings, conflict judge — runs locally.
 
@@ -79,6 +82,8 @@ mema doctor            # verify
 ```
 
 Then wire your MCP client from [`examples/*.mcp.json`](examples/) and start the server with `mema`. Missing capabilities (models not downloaded) surface as a persistent degraded banner with remediation — an incomplete install cannot pass for a complete one.
+
+Full documentation, the Team edition and the personal edition live at **[memarbiter.cn](https://memarbiter.cn/)** (docs: [memarbiter.cn/docs](https://memarbiter.cn/docs/)).
 
 **Two things to know before first use:**
 

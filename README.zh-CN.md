@@ -2,6 +2,8 @@
 
 **[English](README.md) | 中文**
 
+**官网与文档：[memarbiter.cn](https://memarbiter.cn/)**
+
 <!-- mcp-name: io.github.billy12151/memory-arbiter-mcp -->
 
 ## 一句话说明白
@@ -76,6 +78,8 @@ mema doctor            # 体检验证
 ```
 
 然后从 [`examples/`](examples/) 挑 `.mcp.json` 接入客户端，用 `mema` 启动。能力缺失会以持续降级横幅 + 补救指引出现——**装一半不会冒充装好了**。
+
+完整文档、Team 版与个人版都在 **[memarbiter.cn](https://memarbiter.cn/)**（文档入口：[memarbiter.cn/docs](https://memarbiter.cn/docs/)）。
 
 **上手前只知道两件事：** ① `client`/`agent_id` 必须在 config.json 里显式配置（无内置默认，留空拒绝启动）；② `remember` 必须带 `workspace`——先 `memory_review(view="workspaces")` 列出桶，再传一个已存在的桶名（`default` 是全局池）。
 
